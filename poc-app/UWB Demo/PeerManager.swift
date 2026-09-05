@@ -24,6 +24,8 @@ final class PeerManager: NSObject, ObservableObject {
         var locarHeading: Float?
         /// Why Nearby Interaction can't give a bearing yet, e.g. "sweep left/right".
         var hint: String?
+        /// Pairing stage reached with this peer, e.g. "mc tok ni run cam".
+        var link: String?
 
         var id: MCPeerID { peerID }
 
@@ -104,6 +106,10 @@ final class PeerManager: NSObject, ObservableObject {
     /// The single peer whose NISession holds the camera-assistance claim.
     private var cameraAssistedPeer: MCPeerID?
     private var cameraAssistanceGrantedAt = Date.distantPast
+    private var tokenRetries: [MCPeerID: Task<Void, Never>] = [:]
+    private var tokenAttempts: [MCPeerID: Int] = [:]
+    /// Last NISession invalidation reason per peer, surfaced in `linkStatus`.
+    private var niErrors: [MCPeerID: String] = [:]
     /// Hold once converged: long enough for the filter to carry the bearing on
     /// VIO until this peer's next turn.
     private let cameraAssistanceMinHold: TimeInterval = 25
@@ -608,6 +614,7 @@ final class PeerManager: NSObject, ObservableObject {
 
             peer.range = tracks[id]
             peer.estimatedDistance = estimate?.distance
+            peer.link = linkStatus(for: id)
 
             if let estimate, estimate.bearingConfidence > 0.6 {
                 peer.locarDirection = estimate.direction
@@ -907,12 +914,54 @@ final class PeerManager: NSObject, ObservableObject {
         }
     }
 
+    private func scheduleTokenRetry(_ peerID: MCPeerID) {
+        guard tokenRetries[peerID] == nil else { return }
+        let attempt = (tokenAttempts[peerID] ?? 0) + 1
+        tokenAttempts[peerID] = attempt
+        // Capped: if NI never vends a token the device has a real problem, and
+        // spinning forever would just hide it.
+        guard attempt <= 10 else { return }
+        tokenRetries[peerID] = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(500))
+            guard let self, !Task.isCancelled else { return }
+            await MainActor.run {
+                self.tokenRetries[peerID] = nil
+                guard self.mcSession?.connectedPeers.contains(peerID) == true else { return }
+                self.sendDiscoveryToken(to: peerID, force: true)
+            }
+        }
+    }
+
+    /// Compact pairing state per peer, so a failure can be read off the screen
+    /// instead of inferred. Each stage has to succeed for ranging to start.
+    private func linkStatus(for peerID: MCPeerID) -> String {
+        var parts: [String] = []
+        parts.append(mcSession?.connectedPeers.contains(peerID) == true ? "mc" : "mc✗")
+        parts.append(sentTokenTo.contains(peerID) ? "tok" : "tok✗")
+        parts.append(niSessions[peerID] != nil ? "ni" : "ni✗")
+        parts.append(configurations[peerID] != nil ? "run" : "run✗")
+        if cameraAssistedPeer == peerID {
+            parts.append("cam")
+        }
+        if let error = niErrors[peerID] {
+            parts.append(error)
+        }
+        return parts.joined(separator: " ")
+    }
+
     private func sendDiscoveryToken(to peerID: MCPeerID, force: Bool = false) {
         if !force, sentTokenTo.contains(peerID) {
             return
         }
         let session = niSession(for: peerID)
-        guard let token = session.discoveryToken else { return }
+        guard let token = session.discoveryToken else {
+            // A token is not always available the instant a session is created,
+            // and nothing else retriggers this path. Returning silently
+            // deadlocks the pair: each side sits waiting for a token the other
+            // will never send, which looks exactly like "no NI at all".
+            scheduleTokenRetry(peerID)
+            return
+        }
         guard let data = try? NSKeyedArchiver.archivedData(withRootObject: token, requiringSecureCoding: true) else { return }
         do {
             try mcSession?.send(data, toPeers: [peerID], with: .reliable)
@@ -1098,6 +1147,10 @@ final class PeerManager: NSObject, ObservableObject {
         lastRangeIngest[peerID] = nil
         lastBearingIngest[peerID] = nil
         pendingRecalibration.remove(peerID)
+        tokenRetries[peerID]?.cancel()
+        tokenRetries[peerID] = nil
+        tokenAttempts[peerID] = nil
+        niErrors[peerID] = nil
         locar.forget(peerID)
         peers[peerID] = nil
         isTearingDown = false
@@ -1174,11 +1227,28 @@ final class PeerManager: NSObject, ObservableObject {
             useCameraAssistance = false
         }
         guard let peerID = peerID(for: sessionID) else { return }
+        niErrors[peerID] = Self.shortError(error)
         niSessions[peerID] = nil
         configurations[peerID] = nil
         sentTokenTo.remove(peerID)
+        // Without this the claim stays pinned to a peer whose session is gone:
+        // no one else can claim it, and `rotateCameraAssistanceIfDue` can no
+        // longer find the holder among `niSessions`, so rotation stops for good.
+        releaseCameraAssistance(from: peerID)
         if mcSession?.connectedPeers.contains(peerID) == true {
             sendDiscoveryToken(to: peerID, force: true)
+        }
+    }
+
+    private static func shortError(_ error: Error) -> String {
+        guard let error = error as? NIError else { return "err" }
+        switch error.code {
+        case .invalidARConfiguration: return "badAR"
+        case .resourceUsageTimeout: return "timeout"
+        case .activeSessionsLimitExceeded: return "tooMany"
+        case .userDidNotAllow: return "denied"
+        case .invalidConfiguration: return "badCfg"
+        default: return "err\(error.code.rawValue)"
         }
     }
 }

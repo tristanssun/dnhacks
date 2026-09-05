@@ -72,6 +72,11 @@ struct ContentView: View {
                         Text(mark.peer.hint ?? "Step side to side")
                             .foregroundStyle(.secondary)
                     }
+                    if let link = mark.peer.link {
+                        Text(link)
+                            .font(.system(size: 9).monospaced())
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 .font(.caption)
                 .multilineTextAlignment(.center)
