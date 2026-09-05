@@ -134,6 +134,7 @@ final class PeerManager: NSObject, ObservableObject {
     private var lastRangeIngest: [MCPeerID: Date] = [:]
     private var lastBearingIngest: [MCPeerID: Date] = [:]
     private var lastThetaIngest: [MCPeerID: Date] = [:]
+    private var lastBearingLog: [MCPeerID: Date] = [:]
     /// Last ingest per (anchor, target) pair. See `shouldIngestRelative`.
     private var relativeIngestDates: [MCPeerID: [MCPeerID: Date]] = [:]
     private let relativeIngestInterval: TimeInterval = 1.0 / 3
@@ -423,7 +424,11 @@ final class PeerManager: NSObject, ObservableObject {
     /// unlike 0x57 there is no UUID and no list — an exchange only ever
     /// concerns the pair that made it.
     private func sendBearing(_ angle: Float, at date: Date, to peerID: MCPeerID) {
-        guard let psi = locar.worldAzimuth(bodyAngle: angle) else { return }
+        guard let psi = locar.worldAzimuth(bodyAngle: angle) else {
+            bearingLog("send-skip", peerID, "no world azimuth (ARKit not tracking)")
+            return
+        }
+        bearingLog("bearing-sent", peerID, String(format: "%.0f deg", psi * 180 / .pi))
         var data = Data([0x58])
         var value = psi
         var age = UInt16(clamping: Int(Date().timeIntervalSince(date) * 1000))
@@ -443,14 +448,30 @@ final class PeerManager: NSObject, ObservableObject {
         let ageMs = data.subdata(in: 5..<7).withUnsafeBytes { $0.load(as: UInt16.self) }
         guard theirPsi.isFinite else { return }
         let now = Date()
-        guard let mine = lastBearing[peerID],
-              let ourPsi = locar.worldAzimuth(bodyAngle: mine.angle) else { return }
+        guard let mine = lastBearing[peerID] else {
+            // The common case, and the one that matters: only one NISession per
+            // device holds camera assistance, so the unassisted side rarely has
+            // a bearing of its own to pair with theirs.
+            bearingLog("theta-skip", peerID, "no bearing of our own")
+            return
+        }
+        guard let ourPsi = locar.worldAzimuth(bodyAngle: mine.angle) else {
+            bearingLog("theta-skip", peerID, "no world azimuth")
+            return
+        }
 
         let range = lastEstimate[peerID]?.distance ?? tracks[peerID]?.range ?? 3
         let maxLag = min(max(0.08 * Double(range), 0.15), 0.7)
         let theirAge = Double(ageMs) / 1000
         let ourAge = now.timeIntervalSince(mine.date)
-        guard theirAge < maxLag, ourAge < maxLag else { return }
+        guard theirAge < maxLag, ourAge < maxLag else {
+            bearingLog(
+                "theta-skip",
+                peerID,
+                String(format: "stale: theirs %.2fs ours %.2fs limit %.2fs", theirAge, ourAge, maxLag)
+            )
+            return
+        }
         guard shouldIngest(peerID, .theta, at: now) else { return }
 
         let theta = LocAREngine.wrapAngle(ourPsi - theirPsi + .pi)
@@ -1176,6 +1197,16 @@ final class PeerManager: NSObject, ObservableObject {
         return false
     }
 
+    /// Bearing-exchange events, throttled per peer. These fire at Nearby
+    /// Interaction rates when they fire at all, so an unthrottled log would
+    /// bury the rest of the timeline.
+    private func bearingLog(_ event: String, _ peerID: MCPeerID, _ detail: String) {
+        let now = Date()
+        if let last = lastBearingLog[peerID], now.timeIntervalSince(last) < 2 { return }
+        lastBearingLog[peerID] = now
+        mcLog(event, peerID, detail)
+    }
+
     /// Multipeer timeline, prefixed `MCLOG` so it filters out of the console the
     /// way `LOCARPERF` does. Every failure in this layer has so far been
     /// diagnosed indirectly, from Apple's own log messages plus inference; these
@@ -1602,6 +1633,7 @@ final class PeerManager: NSObject, ObservableObject {
         lastRangeIngest[peerID] = nil
         lastBearingIngest[peerID] = nil
         lastThetaIngest[peerID] = nil
+        lastBearingLog[peerID] = nil
         relativeIngestDates[peerID] = nil
         for anchor in Array(relativeIngestDates.keys) {
             relativeIngestDates[anchor]?[peerID] = nil

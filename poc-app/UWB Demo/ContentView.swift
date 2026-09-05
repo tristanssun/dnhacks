@@ -37,8 +37,15 @@ struct ContentView: View {
         let minY = max(safeArea.top, 54) + 56
         let maxY = local.y
         let usableHeight = max(maxY - minY, 1)
-        let scale = usableHeight / 8
         let marks = Self.marks(from: Array(manager.peers.values).sorted { $0.displayName < $1.displayName }, at: date)
+        // Fixed 8 m full-scale pinned every peer to the screen edge at the
+        // ranges actually being tested (6-9 m), so the drawn position stopped
+        // tracking reality well before any estimation error did. Scale to the
+        // farthest peer instead, with headroom so a peer walking out does not
+        // sit on the boundary, and a floor so a close pair is not magnified
+        // into jitter.
+        let span = Self.radarSpan(for: marks)
+        let scale = usableHeight / span
         let placed = Self.placedMarks(
             from: marks,
             local: local,
@@ -53,6 +60,13 @@ struct ContentView: View {
             ArrowMark()
                 .frame(width: 16, height: 28)
                 .offset(x: local.x - 8, y: local.y - 14)
+
+            // The span moves with the farthest peer, so it has to be readable
+            // or the radar silently rescales under you.
+            Text(String(format: "%.0f ft", span * 3.28084))
+                .font(.system(size: 10).monospacedDigit())
+                .foregroundStyle(.secondary)
+                .offset(x: minX, y: minY - 16)
 
             ForEach(placed) { item in
                 let mark = item.mark
@@ -90,6 +104,12 @@ struct ContentView: View {
         }
         .frame(width: size.width, height: size.height, alignment: .topLeading)
         .clipped()
+    }
+
+    /// Metres represented by the full height of the radar.
+    private static func radarSpan(for marks: [Mark]) -> CGFloat {
+        let farthest = marks.map { CGFloat($0.distance) }.max() ?? 0
+        return min(max(farthest * 1.25, 4), 40)
     }
 
     private struct Mark: Identifiable {
