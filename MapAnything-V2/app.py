@@ -45,8 +45,11 @@ STATIC = ROOT / "static"
 MODEL_ID = os.getenv("MAPANYTHING_MODEL", "facebook/map-anything-apache")
 UPDATE_SECONDS = float(os.getenv("TWIN_UPDATE_SECONDS", "10"))
 VIDEO_SUFFIXES = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm"}
-IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
+IMAGE_SUFFIXES = {".bmp", ".heic", ".heif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 IMAGE_LOAD_SUFFIXES = {".jpg", ".jpeg", ".png"}
+SKIP_SUFFIXES = {".aae", ".db", ".ini", ".json", ".txt", ".xml"}
+SKIP_NAMES = {".ds_store", "desktop.ini", "thumbs.db"}
+_HEIC_BRANDS = {b"heic", b"heif", b"heim", b"heix", b"mif1", b"msf1"}
 OVERLAP_FRAMES = 8
 DEFAULT_SETTINGS = {
     "seconds_between_frames": 1.5,
@@ -122,6 +125,56 @@ def _save_world(session: Path, world: dict) -> None:
     _world_path(session).write_text(json.dumps(world, indent=2))
 
 
+def _sniff_media(path: Path) -> str | None:
+    try:
+        header = path.read_bytes()[:32]
+    except OSError:
+        return None
+    if header.startswith(b"\xff\xd8\xff") or header.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "photo"
+    if header[:4] == b"RIFF" and header[8:12] == b"WEBP":
+        return "photo"
+    if header.startswith(b"BM") or header[:2] in {b"II", b"MM"}:
+        return "photo"
+    if len(header) >= 12 and header[4:8] == b"ftyp":
+        return "photo" if header[8:12].lower() in _HEIC_BRANDS else "video"
+    if header.startswith(b"\x1aE\xdf\xa3"):
+        return "video"
+    return None
+
+
+def _media_kind(path: Path, name: str) -> str | None:
+    label = Path(name).name.lower()
+    suffix = Path(name).suffix.lower() or path.suffix.lower()
+    if label in SKIP_NAMES or suffix in SKIP_SUFFIXES:
+        return "skip"
+    if suffix in VIDEO_SUFFIXES:
+        return "video"
+    if suffix in IMAGE_SUFFIXES:
+        return "photo"
+    return _sniff_media(path)
+
+
+def _read_bgr(source: Path):
+    image = cv2.imread(str(source), cv2.IMREAD_COLOR)
+    if image is not None:
+        return image
+    try:
+        from PIL import Image, ImageOps
+
+        try:
+            from pillow_heif import register_heif_opener
+
+            register_heif_opener()
+        except ImportError:
+            pass
+        with Image.open(source) as pil:
+            rgb = np.array(ImageOps.exif_transpose(pil).convert("RGB"))
+        return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    except Exception:
+        return None
+
+
 def _write_thumbnail(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     if source.suffix.lower() in VIDEO_SUFFIXES:
@@ -131,7 +184,7 @@ def _write_thumbnail(source: Path, destination: Path) -> None:
         if not ok or frame is None:
             return
     else:
-        frame = cv2.imread(str(source))
+        frame = _read_bgr(source)
         if frame is None:
             return
     height, width = frame.shape[:2]
@@ -223,14 +276,11 @@ def _update_settings(session: Path, settings: dict) -> dict:
 
 
 def _normalize_photo(source: Path, dest_dir: Path, prefix: str) -> Path:
-    suffix = source.suffix.lower()
-    if suffix not in IMAGE_SUFFIXES:
-        raise gr.Error(
-            f"Unsupported photo type: {source.name}. Use JPEG, PNG, WebP, BMP, or TIFF."
-        )
-    image = cv2.imread(str(source))
+    image = _read_bgr(source)
     if image is None:
-        raise gr.Error(f"Could not read photo {source.name}. Use JPEG or PNG.")
+        raise gr.Error(
+            f"Could not read photo {source.name}. Use JPEG, PNG, WebP, HEIC, BMP, or TIFF."
+        )
     dest_dir.mkdir(parents=True, exist_ok=True)
     destination = dest_dir / f"{prefix}-{uuid.uuid4().hex[:6]}.jpg"
     cv2.imwrite(str(destination), image, [cv2.IMWRITE_JPEG_QUALITY, 92])
@@ -448,7 +498,9 @@ def _queue_videos(session: Path, sources) -> list[Path]:
     for source in sources:
         suffix = source.suffix.lower()
         if suffix not in VIDEO_SUFFIXES:
-            raise gr.Error(f"Unsupported video type: {source.name}")
+            if _sniff_media(source) != "video":
+                raise gr.Error(f"Unsupported video type: {source.name}")
+            suffix = ".mp4"
         destination = inbox / f"{time.time_ns()}-{uuid.uuid4().hex[:6]}{suffix}"
         shutil.copy2(source, destination)
         queued.append(destination)
@@ -542,16 +594,19 @@ def ingest_paths(session_id: str, items: list[tuple[Path, str]], settings=None) 
         raise gr.Error("Upload at least one photo or video.")
     session_id = session_id or uuid.uuid4().hex[:12]
     session = _session_dir(session_id)
-    videos = [(path, name) for path, name in items if Path(name).suffix.lower() in VIDEO_SUFFIXES
-              or path.suffix.lower() in VIDEO_SUFFIXES]
-    photos = [(path, name) for path, name in items if Path(name).suffix.lower() in IMAGE_SUFFIXES
-              or path.suffix.lower() in IMAGE_SUFFIXES]
-    classified = {id(path) for path, _ in videos + photos}
-    unknown = [name for path, name in items if id(path) not in classified]
-    if unknown:
+    videos, photos, unknown = [], [], []
+    for path, name in items:
+        kind = _media_kind(path, name)
+        if kind == "video":
+            videos.append((path, name))
+        elif kind == "photo":
+            photos.append((path, name))
+        elif kind != "skip":
+            unknown.append(name)
+    if not videos and not photos:
         raise gr.Error(
-            f"Unsupported file type: {unknown[0]}. Use photos (JPEG, PNG, WebP, TIFF, BMP) "
-            "or videos (MP4, MOV, WebM, MKV, AVI)."
+            f"Unsupported file type: {(unknown or ['upload'])[0]}. Use photos "
+            "(JPEG, PNG, WebP, HEIC, TIFF, BMP) or videos (MP4, MOV, WebM, MKV, AVI)."
         )
     queued = []
     if videos:
@@ -704,12 +759,14 @@ def update_live_twin(session_id, seconds_between_frames, max_frames,
             prefix = f"{source_id}_still" if source_id else f"gap_{index:04d}"
             _normalize_photo(photo, image_dir, prefix)
         view_paths = [
-            path for path in image_dir.iterdir() if path.is_file()
+            path
+            for path in image_dir.iterdir()
+            if path.is_file() and path.suffix.lower() in IMAGE_LOAD_SUFFIXES
         ] if image_dir.is_dir() else []
-        if len(view_paths) < 2:
+        if not view_paths:
             shutil.rmtree(increment, ignore_errors=True)
             raise gr.Error(
-                "Need at least two views. Upload a longer video, more photos, or another viewpoint."
+                "Could not extract any views. Upload a photo or a longer video."
             )
         addition, _, result = reconstruct(str(image_dir), confidence_percentile, as_mesh)
         poses_path = increment / "poses.json"
@@ -1018,6 +1075,10 @@ try:
                 with destination.open("wb") as handle:
                     shutil.copyfileobj(upload.file, handle)
                 items.append((destination, original))
+            print(
+                f"ingest {session_id}: {[name for _path, name in items]}",
+                flush=True,
+            )
             ingest_paths(
                 session_id,
                 items,
@@ -1029,6 +1090,7 @@ try:
                 },
             )
         except gr.Error as exc:
+            print(f"ingest failed {session_id}: {exc}", flush=True)
             raise HTTPException(400, str(exc)) from exc
         finally:
             for path, _name in items:

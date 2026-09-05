@@ -98,6 +98,20 @@ with tempfile.TemporaryDirectory() as temporary:
     assert world["stats"]["photos"] == 2 and world["stats"]["videos"] == 0
     assert world["stats"]["localized"] == 2 and world["has_model"]
 
+    heic_named = root / "IMG_1234.HEIC"
+    heic_named.write_bytes(only_a.read_bytes())
+    sidecar = root / "IMG_1234.AAE"
+    sidecar.write_text("edit sidecar")
+    heic_session = app.ingest_paths("", [(heic_named, "IMG_1234.HEIC"), (sidecar, "IMG_1234.AAE")])
+    heic_world = app.public_world(heic_session)
+    assert heic_world["stats"]["photos"] == 1 and heic_world["stats"]["videos"] == 0
+
+    solo = root / "solo.jpg"
+    make_photo(solo, (20, 80, 160))
+    solo_session = app.ingest_paths("", [(solo, "solo.jpg")])
+    viewer, _, status = app.update_live_twin(solo_session, 0.5, 3, 10, False)
+    assert Path(viewer).is_file() and "1 gap photo(s)" in status and "Initialized" in status
+
     mixed_session = app.ingest_paths(
         "",
         [(first, "first.avi"), (gap_a, "gap_a.jpg")],
