@@ -1372,7 +1372,9 @@ final class PeerManager: NSObject, ObservableObject {
         parts.append(sentTokenTo.contains(peerID) ? "tok" : "tok✗")
         parts.append(niSessions[peerID] != nil ? "ni" : "ni✗")
         parts.append(configurations[peerID] != nil ? "run" : "run✗")
-        if cameraAssistedPeer == peerID {
+        if !useCameraAssistance {
+            parts.append("camOff")
+        } else if cameraAssistedPeer == peerID {
             parts.append("cam")
         }
         // θ and how tightly the cloud agrees on it. This is the state variable
@@ -1673,6 +1675,16 @@ final class PeerManager: NSObject, ObservableObject {
             lastNIDirection[peerID] = (direction, now)
         }
         var changed = false
+        if bodyAngle(horizontalAngle: horizontalAngle, direction: direction) == nil {
+            // "no bearing of our own" is where the theta exchange dies, so name
+            // which input was missing rather than just that the result was nil.
+            bearingLog(
+                "no-bearing",
+                peerID,
+                "hAngle \(horizontalAngle == nil ? "nil" : "ok") dir \(direction == nil ? "nil" : "ok")"
+                    + (useCameraAssistance ? "" : " camOff")
+            )
+        }
         if let angle = bodyAngle(horizontalAngle: horizontalAngle, direction: direction) {
             lastBearing[peerID] = (angle, now)
             sendBearing(angle, at: now, to: peerID)
@@ -1720,6 +1732,14 @@ final class PeerManager: NSObject, ObservableObject {
     private func handleInvalidation(sessionID: ObjectIdentifier, error: Error) {
         guard !isTearingDown else { return }
         if let error = error as? NIError, error.code == .invalidARConfiguration {
+            // Permanent and global: once off, no session ever asks for camera
+            // assistance again, so the device silently loses `horizontalAngle`
+            // and with it every bearing past raw NI direction's short range.
+            // That is exactly the state that makes a bearing exchange
+            // impossible, so it must be visible.
+            if useCameraAssistance {
+                mcLog("cam-disabled", peerID(for: sessionID), "invalidARConfiguration, permanent")
+            }
             useCameraAssistance = false
         }
         guard let peerID = peerID(for: sessionID) else { return }
