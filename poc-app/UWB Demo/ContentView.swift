@@ -173,14 +173,14 @@ struct ContentView: View {
 
     private static func marks(from peers: [PeerManager.Peer]) -> [Mark] {
         peers.compactMap { peer in
-            guard let distance = peer.locarDistance ?? peer.distance ?? peer.bluetoothDistance else {
+            guard let distance = peer.locarDistance ?? peer.bluetoothDistance else {
                 return nil
             }
             return Mark(
                 id: "\(peer.displayName)-\(peer.id.hashValue)",
                 peer: peer,
                 distance: distance,
-                direction: peer.locarDirection ?? peer.direction,
+                direction: peer.locarDirection,
                 latencyMs: peer.uwbLatencyMs ?? peer.bluetoothLatencyMs
             )
         }
@@ -219,9 +219,14 @@ struct ContentView: View {
         return 0
     }
 
+    /// "12.4 ft" live UWB. "~12.4 ft" VIO-propagated or stale. Trailing "?" means
+    /// no usable bearing, so the arrow is drawn straight ahead.
     private static func distanceLabel(for mark: Mark) -> String {
         let feet = Double(mark.distance) * 3.28084
-        let text = String(format: "%.1f ft", feet)
+        var text = String(format: "%.1f ft", feet)
+        if !mark.peer.isLive {
+            text = "~" + text
+        }
         return mark.direction == nil ? "\(text)?" : text
     }
 

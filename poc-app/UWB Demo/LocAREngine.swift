@@ -2,19 +2,23 @@ import Foundation
 import MultipeerConnectivity
 import simd
 
-/// Exact LocAR estimator from Miller et al., "Multi-User Augmented Reality with
-/// Infrastructure-free Collaborative Localization" (arXiv:2111.00174), §4.
+/// LocAR estimator (Miller et al., arXiv:2111.00174, §4) on iPhone hardware.
 ///
 /// Joint state is factorized as P(D) Π_i P(V_i | D) (Rao-Blackwellization).
-/// D is the display pose in its own VIO world. Each V_i is a peer in that same
-/// world, plus a yaw offset θ from the peer's VIO frame. Hardware is on-device
-/// ARKit VIO and Nearby Interaction ranges. The measurement model is range-only,
-/// as in the paper. NI direction is not used.
+/// D is the display pose in its own ARKit world. Each V_i is a peer in that same
+/// world plus a yaw offset θ from the peer's ARKit frame. Motion comes from
+/// ARKit VIO on both phones, eqs. (4)–(7). Range comes from Nearby Interaction,
+/// eq. (8). Nearby Interaction direction is used only by `calibrate`.
 final class LocAREngine {
     struct Estimate {
+        /// Expected range E[|V − D|]. Stays correct even while the bearing is
+        /// still ambiguous (the cloud is a ring around the display).
         var distance: Float
         var direction: simd_float3
         var heading: Float
+        /// Mean resultant length of the horizontal bearing distribution, 0...1.
+        /// Near 1 the cloud agrees on a bearing; near 0 it is a uniform ring.
+        var bearingConfidence: Float
         var worldPosition: SIMD3<Float>
     }
 
@@ -26,16 +30,12 @@ final class LocAREngine {
         var weight: Float
     }
 
-    private struct TargetCloud {
-        var particles: [TargetParticle]
-    }
-
     private struct Hypothesis {
         var x: Float
         var y: Float
         var z: Float
         var weight: Float
-        var targets: [MCPeerID: TargetCloud]
+        var targets: [MCPeerID: [TargetParticle]]
     }
 
     private static let displayCount = 64
@@ -44,17 +44,15 @@ final class LocAREngine {
     private let sigmaTheta: Float = 0.008
     private let sigmaRange: Float = 0.18
     private let nlosProbability: Float = 0.2
+    private let jumpLimit: Float = 2.5
 
     private var hypotheses: [Hypothesis]
     private var lastLocalPosition: SIMD3<Float>?
     private var lastLocalTime: Date?
     private var lastRemotePose: [MCPeerID: (position: SIMD3<Float>, yaw: Float)] = [:]
-    private var lastCalibration: [MCPeerID: Date] = [:]
-    private var lastRange: [MCPeerID: Float] = [:]
     private(set) var localYaw: Float = 0
     private var cameraTransform = matrix_identity_float4x4
-    private var hasLocal = false
-    private let calibrationInterval: TimeInterval = 2
+    private(set) var hasLocal = false
 
     init() {
         let count = Self.displayCount
@@ -66,92 +64,107 @@ final class LocAREngine {
 
     func forget(_ peerID: MCPeerID) {
         lastRemotePose[peerID] = nil
-        lastCalibration[peerID] = nil
-        lastRange[peerID] = nil
         for i in hypotheses.indices {
             hypotheses[i].targets[peerID] = nil
         }
     }
 
-    /// Display VIO. Updates D with eqs. (4)–(6) without a yaw offset, since this
-    /// motion is already in the display world.
-    func setLocal(position: SIMD3<Float>, yaw: Float, transform: simd_float4x4) {
-        cameraTransform = transform
-        localYaw = yaw
-        let now = Date()
-        if let last = lastLocalPosition, let lastTime = lastLocalTime {
-            let delta = position - last
-            if simd_length(delta) > 2.5 {
-                resetDisplay(around: position)
-            } else {
-                let dt = Float(now.timeIntervalSince(lastTime))
-                let step = max(min(sqrt(dt / 0.1), 3), 0.2)
-                for i in hypotheses.indices {
-                    hypotheses[i].x += delta.x + gauss(sigmaXYZ * step)
-                    hypotheses[i].y += delta.y + gauss(sigmaXYZ * step)
-                    hypotheses[i].z += delta.z + gauss(sigmaXYZ * step)
-                }
-            }
-        } else {
-            resetDisplay(around: position)
-        }
-        lastLocalPosition = position
-        lastLocalTime = now
-        hasLocal = true
+    func hasTargets(_ peerID: MCPeerID) -> Bool {
+        hypotheses.first?.targets[peerID] != nil
     }
 
-    /// Peer VIO. Applies eqs. (4)–(7) to every V_i | D_j cloud.
-    func ingestRemoteVIO(peerID: MCPeerID, position: SIMD3<Float>, yaw: Float) {
-        ensureTargets(peerID, range: nil)
-        if let last = lastRemotePose[peerID] {
-            let dx = position.x - last.position.x
-            let dy = position.y - last.position.y
-            let dz = position.z - last.position.z
-            for i in hypotheses.indices {
-                guard var cloud = hypotheses[i].targets[peerID] else { continue }
-                for k in cloud.particles.indices {
-                    let theta = cloud.particles[k].theta
-                    let cosine = cos(theta)
-                    let sine = sin(theta)
-                    cloud.particles[k].x += dx * cosine + dz * sine + gauss(sigmaXYZ)
-                    cloud.particles[k].y += dy + gauss(sigmaXYZ)
-                    cloud.particles[k].z += dz * cosine - dx * sine + gauss(sigmaXYZ)
-                    cloud.particles[k].theta += gauss(sigmaTheta)
-                }
-                hypotheses[i].targets[peerID] = cloud
-            }
+    // MARK: Motion
+
+    /// Display VIO. Propagates D with eqs. (4)–(6), no yaw offset, since this
+    /// motion is already in the display world. A re-origin (ARKit reset or a
+    /// jump) shifts everything so relative vectors are preserved.
+    func setLocal(_ pose: VIOTracker.Pose) {
+        guard pose.isReliable else { return }
+        cameraTransform = pose.transform
+        localYaw = pose.yaw
+        let now = Date()
+        defer {
+            lastLocalPosition = pose.position
+            lastLocalTime = now
+            hasLocal = true
         }
-        lastRemotePose[peerID] = (position, yaw)
+        guard let last = lastLocalPosition, let lastTime = lastLocalTime else {
+            resetDisplay(around: pose.position)
+            return
+        }
+        let delta = pose.position - last
+        if pose.didResume || simd_length(delta) > jumpLimit {
+            reorigin(to: pose.position)
+            return
+        }
+        let dt = Float(now.timeIntervalSince(lastTime))
+        let step = max(min(sqrt(dt / 0.1), 3), 0.2)
+        for i in hypotheses.indices {
+            hypotheses[i].x += delta.x + gauss(sigmaXYZ * step)
+            hypotheses[i].y += delta.y + gauss(sigmaXYZ * step)
+            hypotheses[i].z += delta.z + gauss(sigmaXYZ * step)
+        }
     }
+
+    /// Peer VIO. Applies eqs. (4)–(7) to every V_i | D_j cloud. A peer reset or
+    /// jump is not motion and is skipped.
+    func ingestRemoteVIO(peerID: MCPeerID, position: SIMD3<Float>, yaw: Float, isReset: Bool) {
+        defer { lastRemotePose[peerID] = (position, yaw) }
+        guard !isReset, let last = lastRemotePose[peerID], hasTargets(peerID) else { return }
+        let dx = position.x - last.position.x
+        let dy = position.y - last.position.y
+        let dz = position.z - last.position.z
+        guard simd_length(SIMD3(dx, dy, dz)) <= jumpLimit else { return }
+        for i in hypotheses.indices {
+            guard var particles = hypotheses[i].targets[peerID] else { continue }
+            for k in particles.indices {
+                let theta = particles[k].theta
+                let cosine = cos(theta)
+                let sine = sin(theta)
+                particles[k].x += dx * cosine + dz * sine + gauss(sigmaXYZ)
+                particles[k].y += dy + gauss(sigmaXYZ)
+                particles[k].z += dz * cosine - dx * sine + gauss(sigmaXYZ)
+                particles[k].theta += gauss(sigmaTheta)
+            }
+            hypotheses[i].targets[peerID] = particles
+        }
+    }
+
+    // MARK: Range
 
     /// UWB range z. Uniform ±3σ_r band plus P_nlos, eq. (8). Parent weight is
-    /// the marginal P(z | D_j) = Σ_k w_k P(z | V_k, D_j).
+    /// the marginal P(z | D_j) = Σ_k w_k P(z | V_k, D_j). If almost no particle
+    /// is inside the band, the cloud is lost and fresh sphere samples are injected.
     func ingestUWB(peerID: MCPeerID, range: Float) {
         guard hasLocal, range > 0.05, range < 80 else { return }
-        lastRange[peerID] = range
         ensureTargets(peerID, range: range)
-        if shouldSnapToRange(peerID, range: range) {
-            snapToRange(peerID, range: range, direction: nil)
-        }
         let limit = 3 * sigmaRange
+        let inlierProbability = 1 - nlosProbability
 
         for i in hypotheses.indices {
             let display = SIMD3<Float>(hypotheses[i].x, hypotheses[i].y, hypotheses[i].z)
-            guard var cloud = hypotheses[i].targets[peerID] else { continue }
+            guard var particles = hypotheses[i].targets[peerID] else { continue }
             var likelihood: Float = 0
-            for k in cloud.particles.indices {
-                let peer = SIMD3<Float>(cloud.particles[k].x, cloud.particles[k].y, cloud.particles[k].z)
+            var inliers: Float = 0
+            for k in particles.indices {
+                let peer = SIMD3<Float>(particles[k].x, particles[k].y, particles[k].z)
                 let error = abs(simd_length(peer - display) - range)
-                let probability: Float = error > limit ? nlosProbability : (1 - nlosProbability)
-                likelihood += cloud.particles[k].weight * probability
-                cloud.particles[k].weight *= probability
+                let inside = error <= limit
+                let probability = inside ? inlierProbability : nlosProbability
+                if inside {
+                    inliers += particles[k].weight
+                }
+                likelihood += particles[k].weight * probability
+                particles[k].weight *= probability
             }
-            normalizeTargets(&cloud.particles)
-            if effectiveCount(cloud.particles) < Float(Self.targetCount) * 0.5 {
-                resampleTargets(&cloud.particles)
-                injectSphere(into: &cloud.particles, origin: display, range: range, fraction: 0.15)
+            normalize(&particles)
+            if inliers < 0.15 {
+                injectSphere(into: &particles, origin: display, range: range, fraction: 0.3)
+            } else if effectiveCount(particles) < Float(Self.targetCount) * 0.5 {
+                resample(&particles)
+                injectSphere(into: &particles, origin: display, range: range, fraction: 0.1)
             }
-            hypotheses[i].targets[peerID] = cloud
+            hypotheses[i].targets[peerID] = particles
             hypotheses[i].weight *= max(likelihood, 1e-8)
         }
 
@@ -161,144 +174,117 @@ final class LocAREngine {
         }
     }
 
-    /// Recurring UWB lock-in. When Nearby Interaction has a fresh range, and
-    /// direction if we are in LOS, collapse V onto that fix. Runs at most once
-    /// per `calibrationInterval` per peer.
-    @discardableResult
-    func calibrateIfDue(peerID: MCPeerID, range: Float, direction: simd_float3?) -> Bool {
+    /// Recurring UWB lock-in. With a fresh Nearby Interaction direction the peer
+    /// cloud is collapsed onto that 3D fix. Without direction, the cloud is only
+    /// pulled onto the range sphere if it disagrees with the range by > 0.5 m.
+    /// Returns true if anything was changed.
+    func calibrate(peerID: MCPeerID, range: Float, direction: simd_float3?) -> Bool {
         guard hasLocal, range > 0.05, range < 25 else { return false }
-        lastRange[peerID] = range
-        let now = Date()
-        let wait = range < 1.5 ? 0.25 : calibrationInterval
-        if let last = lastCalibration[peerID], now.timeIntervalSince(last) < wait {
-            return false
+        ensureTargets(peerID, range: range)
+        let uniform = 1 / Float(Self.targetCount)
+
+        if let direction, let world = niDirectionInWorld(direction) {
+            for i in hypotheses.indices {
+                let origin = SIMD3<Float>(hypotheses[i].x, hypotheses[i].y, hypotheses[i].z)
+                guard var particles = hypotheses[i].targets[peerID] else { continue }
+                let target = origin + world * range
+                for k in particles.indices {
+                    if Float.random(in: 0...1) < 0.85 {
+                        particles[k].x = target.x + gauss(0.08)
+                        particles[k].y = target.y + gauss(0.05)
+                        particles[k].z = target.z + gauss(0.08)
+                    }
+                    particles[k].weight = uniform
+                }
+                hypotheses[i].targets[peerID] = particles
+            }
+            return true
         }
-        snapToRange(peerID, range: range, direction: direction)
-        lastCalibration[peerID] = now
+
+        guard let expected = expectedRange(peerID) else { return false }
+        guard abs(expected - range) > 0.5 else { return false }
+        for i in hypotheses.indices {
+            let origin = SIMD3<Float>(hypotheses[i].x, hypotheses[i].y, hypotheses[i].z)
+            guard var particles = hypotheses[i].targets[peerID] else { continue }
+            for k in particles.indices {
+                let peer = SIMD3<Float>(particles[k].x, particles[k].y, particles[k].z)
+                var radial = peer - origin
+                let length = simd_length(radial)
+                if length < 0.08 {
+                    radial = randomUnitVector() * range
+                } else {
+                    radial *= range / length
+                }
+                particles[k].x = origin.x + radial.x + gauss(0.08)
+                particles[k].y = origin.y + radial.y + gauss(0.08)
+                particles[k].z = origin.z + radial.z + gauss(0.08)
+                particles[k].weight = uniform
+            }
+            hypotheses[i].targets[peerID] = particles
+        }
         return true
     }
 
-    private func shouldSnapToRange(_ peerID: MCPeerID, range: Float) -> Bool {
-        if range < 1.5 { return true }
-        guard let current = planarDistance(peerID) else { return false }
-        return range + 0.6 < current
-    }
-
-    private func snapToRange(_ peerID: MCPeerID, range: Float, direction: simd_float3?) {
-        ensureTargets(peerID, range: range)
-        let worldDirection = direction.flatMap { niDirectionInWorld($0) }
-        let jitter: Float = range < 1.5 ? 0.05 : 0.1
-        for i in hypotheses.indices {
-            let origin = SIMD3<Float>(hypotheses[i].x, hypotheses[i].y, hypotheses[i].z)
-            guard var cloud = hypotheses[i].targets[peerID] else { continue }
-            if let worldDirection {
-                let target = origin + worldDirection * range
-                for k in cloud.particles.indices {
-                    cloud.particles[k].x = target.x + gauss(jitter)
-                    cloud.particles[k].y = origin.y + gauss(jitter * 0.5)
-                    cloud.particles[k].z = target.z + gauss(jitter)
-                    cloud.particles[k].weight = 1 / Float(Self.targetCount)
-                }
-            } else {
-                for k in cloud.particles.indices {
-                    let peer = SIMD3<Float>(cloud.particles[k].x, cloud.particles[k].y, cloud.particles[k].z)
-                    var radial = SIMD3<Float>(peer.x - origin.x, 0, peer.z - origin.z)
-                    let length = simd_length(radial)
-                    if length < 0.08 {
-                        let angle = Float.random(in: 0..<(2 * .pi))
-                        radial = SIMD3<Float>(sin(angle) * range, 0, cos(angle) * range)
-                    } else {
-                        radial = (radial / length) * range
-                    }
-                    cloud.particles[k].x = origin.x + radial.x + gauss(jitter)
-                    cloud.particles[k].y = origin.y + gauss(jitter * 0.4)
-                    cloud.particles[k].z = origin.z + radial.z + gauss(jitter)
-                    cloud.particles[k].weight = 1 / Float(Self.targetCount)
-                }
-            }
-            hypotheses[i].targets[peerID] = cloud
-        }
-    }
-
-    private func planarDistance(_ peerID: MCPeerID) -> Float? {
-        guard let estimate = estimateRelative(peerID) else { return nil }
-        return hypot(estimate.x, estimate.z)
-    }
-
-    private func estimateRelative(_ peerID: MCPeerID) -> SIMD3<Float>? {
-        var relative = SIMD3<Float>.zero
-        var weightSum: Float = 0
-        for hypothesis in hypotheses {
-            guard let cloud = hypothesis.targets[peerID], let mean = meanPosition(cloud) else { continue }
-            let display = SIMD3<Float>(hypothesis.x, hypothesis.y, hypothesis.z)
-            relative += (mean - display) * hypothesis.weight
-            weightSum += hypothesis.weight
-        }
-        guard weightSum > 0 else { return nil }
-        return relative / weightSum
-    }
-
-    private func niDirectionInWorld(_ direction: simd_float3) -> simd_float3? {
-        var local = direction
-        if abs(local.z) < 0.18, hypot(local.x, local.y) > 0.4 {
-            local = simd_float3(local.x, 0, -local.y)
-        }
-        let length = simd_length(local)
-        guard length > 0.05 else { return nil }
-        local /= length
-        let rotated = cameraTransform * SIMD4<Float>(local.x, local.y, local.z, 0)
-        let world = SIMD3<Float>(rotated.x, rotated.y, rotated.z)
-        let worldLength = simd_length(world)
-        guard worldLength > 0.05 else { return nil }
-        return world / worldLength
-    }
+    // MARK: Output
 
     func estimate(for peerID: MCPeerID) -> Estimate? {
-        guard hasLocal else { return nil }
-        var relative = SIMD3<Float>.zero
+        guard hasLocal, hasTargets(peerID) else { return nil }
+        var rangeSum: Float = 0
+        var bearing = SIMD2<Float>.zero
         var world = SIMD3<Float>.zero
-        var weightSum: Float = 0
+        var total: Float = 0
         var sinSum: Float = 0
         var cosSum: Float = 0
         for hypothesis in hypotheses {
-            guard let cloud = hypothesis.targets[peerID] else { continue }
-            guard let mean = meanPosition(cloud) else { continue }
+            guard let particles = hypothesis.targets[peerID] else { continue }
             let display = SIMD3<Float>(hypothesis.x, hypothesis.y, hypothesis.z)
-            relative += (mean - display) * hypothesis.weight
-            world += mean * hypothesis.weight
-            weightSum += hypothesis.weight
-            for particle in cloud.particles {
+            for particle in particles {
+                let point = SIMD3<Float>(particle.x, particle.y, particle.z)
+                let relative = point - display
                 let weight = hypothesis.weight * particle.weight
+                rangeSum += simd_length(relative) * weight
+                let planar = hypot(relative.x, relative.z)
+                if planar > 0.02 {
+                    bearing += SIMD2<Float>(relative.x, relative.z) / planar * weight
+                }
+                world += point * weight
+                total += weight
                 sinSum += sin(particle.theta) * weight
                 cosSum += cos(particle.theta) * weight
             }
         }
-        guard weightSum > 0 else { return nil }
-        relative /= weightSum
-        world /= weightSum
-        let (right, forward) = bodyAxes(relative)
+        guard total > 0 else { return nil }
+        bearing /= total
+        let confidence = simd_length(bearing)
+        let (right, forward) = bodyAxes(SIMD3<Float>(bearing.x, 0, bearing.y))
         let planar = hypot(right, forward)
-        let direction: simd_float3
-        if planar > 0.02 {
-            direction = simd_float3(right / planar, forward / planar, 0)
-        } else {
-            direction = simd_float3(0, 1, 0)
-        }
+        let direction = planar > 1e-4
+            ? simd_float3(right / planar, forward / planar, 0)
+            : simd_float3(0, 1, 0)
         let theta = atan2(sinSum, cosSum)
         let remoteYaw = lastRemotePose[peerID]?.yaw ?? 0
-        let worldSin = sin(remoteYaw + theta)
-        let worldCos = cos(remoteYaw + theta)
-        let headingRight = worldSin * cos(localYaw) - worldCos * sin(localYaw)
-        let headingForward = worldSin * sin(localYaw) + worldCos * cos(localYaw)
-        let measured = lastRange[peerID]
-        let horizontal = hypot(relative.x, relative.z)
+        let facing = SIMD3<Float>(sin(remoteYaw + theta), 0, cos(remoteYaw + theta))
+        let (facingRight, facingForward) = bodyAxes(facing)
         return Estimate(
-            distance: measured ?? horizontal,
+            distance: rangeSum / total,
             direction: direction,
-            heading: atan2(headingRight, headingForward),
-            worldPosition: world
+            heading: atan2(facingRight, facingForward),
+            bearingConfidence: confidence,
+            worldPosition: world / total
         )
     }
+
+    /// Nearby Interaction direction (device frame) converted to the radar's body
+    /// frame: x right, y forward, projected onto the horizontal plane.
+    func bodyDirection(fromNI direction: simd_float3) -> simd_float3? {
+        guard hasLocal, let world = niDirectionInWorld(direction) else { return nil }
+        let (right, forward) = bodyAxes(world)
+        let planar = hypot(right, forward)
+        guard planar > 0.05 else { return nil }
+        return simd_float3(right / planar, forward / planar, 0)
+    }
+
+    // MARK: Internals
 
     private func resetDisplay(around position: SIMD3<Float>) {
         let weight = 1 / Float(Self.displayCount)
@@ -310,13 +296,30 @@ final class LocAREngine {
         }
     }
 
-    private func ensureTargets(_ peerID: MCPeerID, range: Float?) {
-        let seedRange = range ?? 3
+    /// ARKit changed its origin. Move every hypothesis to the new position and
+    /// carry its targets along so relative estimates survive.
+    private func reorigin(to position: SIMD3<Float>) {
         for i in hypotheses.indices {
-            if hypotheses[i].targets[peerID] == nil {
-                let origin = SIMD3<Float>(hypotheses[i].x, hypotheses[i].y, hypotheses[i].z)
-                hypotheses[i].targets[peerID] = TargetCloud(particles: seedSphere(origin: origin, range: seedRange))
+            let old = SIMD3<Float>(hypotheses[i].x, hypotheses[i].y, hypotheses[i].z)
+            let shift = position - old
+            hypotheses[i].x = position.x + gauss(0.02)
+            hypotheses[i].y = position.y + gauss(0.02)
+            hypotheses[i].z = position.z + gauss(0.02)
+            for (peer, var particles) in hypotheses[i].targets {
+                for k in particles.indices {
+                    particles[k].x += shift.x
+                    particles[k].y += shift.y
+                    particles[k].z += shift.z
+                }
+                hypotheses[i].targets[peer] = particles
             }
+        }
+    }
+
+    private func ensureTargets(_ peerID: MCPeerID, range: Float) {
+        for i in hypotheses.indices where hypotheses[i].targets[peerID] == nil {
+            let origin = SIMD3<Float>(hypotheses[i].x, hypotheses[i].y, hypotheses[i].z)
+            hypotheses[i].targets[peerID] = seedSphere(origin: origin, range: range)
         }
     }
 
@@ -324,15 +327,8 @@ final class LocAREngine {
         let count = Self.targetCount
         let weight = 1 / Float(count)
         return (0..<count).map { _ in
-            let lambda = Float.random(in: 0..<(2 * .pi))
-            let phi = acos(Float.random(in: -1...1))
             let radius = max(range + gauss(sigmaRange), 0.2)
-            let offset = SIMD3<Float>(
-                sin(phi) * cos(lambda),
-                cos(phi),
-                sin(phi) * sin(lambda)
-            ) * radius
-            let point = origin + offset
+            let point = origin + randomUnitVector() * radius
             return TargetParticle(
                 x: point.x,
                 y: point.y,
@@ -346,32 +342,54 @@ final class LocAREngine {
     private func injectSphere(into particles: inout [TargetParticle], origin: SIMD3<Float>, range: Float, fraction: Float) {
         let count = max(Int(Float(particles.count) * fraction), 1)
         let extras = seedSphere(origin: origin, range: range)
+        let uniform = 1 / Float(particles.count)
         for i in 0..<count {
             particles[i] = extras[i]
+            particles[i].weight = uniform
         }
-        normalizeTargets(&particles)
+        normalize(&particles)
     }
 
-    private func meanPosition(_ cloud: TargetCloud) -> SIMD3<Float>? {
-        var position = SIMD3<Float>.zero
-        var weight: Float = 0
-        for particle in cloud.particles {
-            position += SIMD3(particle.x, particle.y, particle.z) * particle.weight
-            weight += particle.weight
+    private func expectedRange(_ peerID: MCPeerID) -> Float? {
+        var sum: Float = 0
+        var total: Float = 0
+        for hypothesis in hypotheses {
+            guard let particles = hypothesis.targets[peerID] else { continue }
+            let display = SIMD3<Float>(hypothesis.x, hypothesis.y, hypothesis.z)
+            for particle in particles {
+                let weight = hypothesis.weight * particle.weight
+                sum += simd_length(SIMD3(particle.x, particle.y, particle.z) - display) * weight
+                total += weight
+            }
         }
-        guard weight > 0 else { return nil }
-        return position / weight
+        guard total > 0 else { return nil }
+        return sum / total
     }
 
-    private func bodyAxes(_ relative: SIMD3<Float>) -> (Float, Float) {
+    /// Nearby Interaction and ARKit share the device frame (+x right, +y up,
+    /// +z toward the user), so the camera transform maps NI direction to world.
+    private func niDirectionInWorld(_ direction: simd_float3) -> simd_float3? {
+        let length = simd_length(direction)
+        guard length > 0.05 else { return nil }
+        let local = direction / length
+        let rotated = cameraTransform * SIMD4<Float>(local.x, local.y, local.z, 0)
+        let world = SIMD3<Float>(rotated.x, rotated.y, rotated.z)
+        let worldLength = simd_length(world)
+        guard worldLength > 0.05 else { return nil }
+        return world / worldLength
+    }
+
+    /// Body frame from yaw ψ where forward = (sin ψ, cos ψ) in world (x, z).
+    /// Right is (−cos ψ, sin ψ), matching ARKit's +x-right camera frame.
+    private func bodyAxes(_ vector: SIMD3<Float>) -> (right: Float, forward: Float) {
         let cosine = cos(localYaw)
         let sine = sin(localYaw)
-        let right = relative.x * cosine - relative.z * sine
-        let forward = relative.x * sine + relative.z * cosine
+        let forward = vector.x * sine + vector.z * cosine
+        let right = -vector.x * cosine + vector.z * sine
         return (right, forward)
     }
 
-    private func normalizeTargets(_ particles: inout [TargetParticle]) {
+    private func normalize(_ particles: inout [TargetParticle]) {
         let sum = particles.reduce(Float.zero) { $0 + $1.weight }
         let count = max(particles.count, 1)
         guard sum > 0 else {
@@ -411,7 +429,7 @@ final class LocAREngine {
         return sumSquares > 0 ? 1 / sumSquares : 0
     }
 
-    private func resampleTargets(_ particles: inout [TargetParticle]) {
+    private func resample(_ particles: inout [TargetParticle]) {
         let count = particles.count
         guard count > 1 else { return }
         var cdf = [Float](repeating: 0, count: count)
@@ -454,6 +472,12 @@ final class LocAREngine {
             next[step].weight = weight
         }
         hypotheses = next
+    }
+
+    private func randomUnitVector() -> SIMD3<Float> {
+        let lambda = Float.random(in: 0..<(2 * .pi))
+        let phi = acos(Float.random(in: -1...1))
+        return SIMD3<Float>(sin(phi) * cos(lambda), cos(phi), sin(phi) * sin(lambda))
     }
 
     private func gauss(_ sigma: Float) -> Float {
