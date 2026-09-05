@@ -12,7 +12,11 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             GeometryReader { proxy in
-                TimelineView(.animation(paused: manager.peers.isEmpty)) { context in
+                // Capped at 60. ProMotion was driving this at 120+, and the
+                // radar carries no detail that a 120 Hz redraw resolves — it
+                // just doubled layout work on the same thread the filter and
+                // ARKit frame delivery share.
+                TimelineView(.animation(minimumInterval: 1.0 / 60, paused: manager.peers.isEmpty)) { context in
                     radar(size: proxy.size, safeArea: proxy.safeAreaInsets, date: context.date)
                 }
             }

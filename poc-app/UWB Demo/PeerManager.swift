@@ -123,7 +123,7 @@ final class PeerManager: NSObject, ObservableObject {
     private var lastBearingIngest: [MCPeerID: Date] = [:]
     /// Last ingest per (anchor, target) pair. See `shouldIngestRelative`.
     private var relativeIngestDates: [MCPeerID: [MCPeerID: Date]] = [:]
-    private let relativeIngestInterval: TimeInterval = 0.5
+    private let relativeIngestInterval: TimeInterval = 1.0 / 3
     /// How recently a shared estimate must have arrived to mark a peer relayed.
     private let relayWindow: TimeInterval = 3
     private let ingestInterval: TimeInterval = 0.1
@@ -606,7 +606,7 @@ final class PeerManager: NSObject, ObservableObject {
     /// reporting M peers fans in as N x M, so a per-target gate still lets the
     /// rate scale with the number of devices.
     ///
-    /// 2 Hz rather than the 10 Hz the direct channels use. A shared estimate is
+    /// 3 Hz rather than the 10 Hz the direct channels use. A shared estimate is
     /// a slow correction built from someone else's filter, not a primary
     /// observation, and it does not carry 10 Hz of new information.
     private func shouldIngestRelative(anchor: MCPeerID, target: MCPeerID, at now: Date) -> Bool {
