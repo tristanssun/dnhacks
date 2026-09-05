@@ -1,0 +1,8 @@
+DROP TABLE IF EXISTS tokens;
+CREATE TABLE IF NOT EXISTS tokens (
+  id INTEGER NOT NULL,
+  token TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+
+  PRIMARY KEY(id)
+);
