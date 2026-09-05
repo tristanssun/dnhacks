@@ -58,9 +58,6 @@ final class LocAREngine {
     /// Anchor samples drawn per hypothesis when applying a peer-to-peer range.
     private static let anchorSamples = 16
 
-    /// A/B switch for the display re-centering cost. See `PerfMonitor`.
-    var isRecenteringEnabled = true
-
     private var hypotheses: [Hypothesis]
     private var lastLocalPosition: SIMD3<Float>?
     /// ARKit frame timestamp of the last accepted local pose.
@@ -581,9 +578,6 @@ final class LocAREngine {
     }
 
     private func recenterDisplay(on position: SIMD3<Float>) {
-        // A/B arm B: skip re-centering entirely. Accuracy regresses to the
-        // unbounded-diffusion behaviour, which is the point of the comparison.
-        guard isRecenteringEnabled else { return }
         let started = CACurrentMediaTime()
         defer { perfCounters.recordRecenter(CACurrentMediaTime() - started) }
 

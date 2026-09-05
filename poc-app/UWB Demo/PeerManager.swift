@@ -284,7 +284,6 @@ final class PeerManager: NSObject, ObservableObject {
             pendingVIOReset = true
         }
         let now = Date()
-        locar.isRecenteringEnabled = perf.recentering
         locar.setLocal(pose)
         // Poses already arrive thinned to ~20 Hz by VIOTracker.
         deadReckon(from: pose, at: now)

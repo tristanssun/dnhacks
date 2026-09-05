@@ -60,11 +60,14 @@ final class PerfCounters: Sendable {
 
 let perfCounters = PerfCounters()
 
-/// A/B instrumentation for the progressive-slowdown investigation.
+/// Runtime instrumentation. Emits one CSV row per second prefixed `LOCARPERF`
+/// so a run can be pasted out of the Xcode console straight into a spreadsheet,
+/// and publishes a live snapshot for the on-screen HUD.
 ///
-/// Emits one CSV row per second prefixed `LOCARPERF` so a run can be pasted
-/// out of the Xcode console straight into a spreadsheet, and publishes a live
-/// snapshot for the on-screen HUD.
+/// `recenter_ms_per_s` earns its place beyond raw cost: it is proportional to
+/// the number of peer clouds the filter holds, so it doubling across a
+/// lost/found pair is how duplicate peer identities were caught, and it reading
+/// zero means `setLocal` is bailing on unreliable ARKit tracking.
 @MainActor
 final class PerfMonitor: ObservableObject {
     struct Snapshot {
@@ -86,11 +89,6 @@ final class PerfMonitor: ObservableObject {
 
     @Published private(set) var snapshot = Snapshot()
 
-    /// Arm A (default true): display re-centering runs. Arm B: skipped.
-    @Published var recentering = true {
-        didSet { note("recentering=\(recentering)") }
-    }
-
     private var timer: Timer?
     private var startedAt = CACurrentMediaTime()
     private var lastTick = CACurrentMediaTime()
@@ -99,7 +97,7 @@ final class PerfMonitor: ObservableObject {
         guard timer == nil else { return }
         startedAt = CACurrentMediaTime()
         lastTick = startedAt
-        print("LOCARPERF,elapsed_s,ar_hz,ui_hz,publish_hz,hop_p50_ms,hop_p95_ms,recenter_ms_per_s,memory_mb,thermal,recentering")
+        print("LOCARPERF,elapsed_s,ar_hz,ui_hz,publish_hz,hop_p50_ms,hop_p95_ms,recenter_ms_per_s,memory_mb,thermal")
         let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
@@ -111,12 +109,6 @@ final class PerfMonitor: ObservableObject {
     func stop() {
         timer?.invalidate()
         timer = nil
-    }
-
-    /// Marks a flag change in the log so arms can be split apart afterwards.
-    private func note(_ text: String) {
-        let elapsed = CACurrentMediaTime() - startedAt
-        print(String(format: "LOCARMARK,%.1f,%@", elapsed, text))
     }
 
     private func tick() {
@@ -142,7 +134,7 @@ final class PerfMonitor: ObservableObject {
         snapshot = next
 
         print(String(
-            format: "LOCARPERF,%.1f,%.1f,%.1f,%.1f,%.2f,%.2f,%.1f,%.1f,%d,%d",
+            format: "LOCARPERF,%.1f,%.1f,%.1f,%.1f,%.2f,%.2f,%.1f,%.1f,%d",
             next.elapsed,
             next.arHz,
             next.uiHz,
@@ -151,8 +143,7 @@ final class PerfMonitor: ObservableObject {
             next.hopP95Ms,
             next.recenterMsPerSec,
             next.memoryMB,
-            next.thermal,
-            recentering ? 1 : 0
+            next.thermal
         ))
     }
 

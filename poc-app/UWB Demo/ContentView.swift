@@ -292,13 +292,6 @@ private struct PerfHUD: View {
                         .foregroundStyle(snapshot.thermal >= 2 ? .red : .primary)
                 }
             }
-            HStack(spacing: 8) {
-                Toggle("recenter", isOn: $perf.recentering)
-            }
-            .toggleStyle(.button)
-            .buttonStyle(.bordered)
-            .controlSize(.mini)
-            .font(.caption2)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
