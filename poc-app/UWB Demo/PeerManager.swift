@@ -110,6 +110,9 @@ final class PeerManager: NSObject, ObservableObject {
     private let thetaAnchorInterval: TimeInterval = 2
     /// θ confidence below which the compass is allowed to intervene.
     private let thetaAnchorConfidence: Float = 0.3
+    /// θ agreement required before a VIO-propagated bearing is shown at all.
+    /// Below this the raw Nearby Interaction bearing, or nothing, is honest.
+    private let thetaTrustThreshold: Float = 0.5
     /// Most recent estimate per peer. `publishLocAR` computes these; everything
     /// else reuses them rather than walking the particle clouds again.
     private var lastEstimate: [MCPeerID: LocAREngine.Estimate] = [:]
@@ -855,7 +858,16 @@ final class PeerManager: NSObject, ObservableObject {
             peer.link = linkStatus(for: id)
             peer.isRelayed = hasRecentRelay(for: id, at: now)
 
-            if let estimate, estimate.bearingConfidence > 0.6 {
+            // Both gates, not just cloud agreement. A bearing carried by peer
+            // VIO is only as good as θ, and when θ has converged on a wrong
+            // value every particle moves the same wrong way — the cloud stays
+            // tight and confidence stays high while the arrow is badly wrong.
+            // That is exactly the lateral-motion-at-range case: the tangential
+            // component changes range by d²/2r, which at 6 m is centimetres, so
+            // ranging cannot contradict θ and the error is invisible until the
+            // devices come close enough for NI direction to fix it.
+            if let estimate, estimate.bearingConfidence > 0.6,
+               estimate.thetaConfidence > thetaTrustThreshold {
                 peer.locarDirection = estimate.direction
             } else if let angle = freshBearing(for: id, at: now) {
                 peer.locarDirection = simd_float3(sin(angle), cos(angle), 0)
