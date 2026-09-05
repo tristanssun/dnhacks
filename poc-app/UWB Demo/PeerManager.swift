@@ -114,6 +114,11 @@ final class PeerManager: NSObject, ObservableObject {
     private var lastSessionState: [MCPeerID: MCSessionState] = [:]
     private var lastSendFailureLog: [MCPeerID: Date] = [:]
     private let inviteTimeout: TimeInterval = 12
+    /// Last time an invitation actually produced a connection. Past
+    /// `inviteStarvationLimit` with no progress, a pending invite stops earning
+    /// protection from the discovery refresh.
+    private var lastInviteProgress = Date()
+    private let inviteStarvationLimit: TimeInterval = 30
     /// Slow enough not to disturb an invitation inside its 12 s timeout.
     private let discoveryRefreshInterval: TimeInterval = 20
     /// Peers whose ranging just resumed after a dropout; they get one calibrate
@@ -228,6 +233,10 @@ final class PeerManager: NSObject, ObservableObject {
 
     private func start() {
         perf.start()
+        // Not `distantPast`: that made the first ping tick bounce the browser
+        // ~250 ms in, during initial discovery, which dropped and re-vended the
+        // browse entry an invitation had just been sent to.
+        lastDiscoveryRefresh = Date()
         replaceSession()
 
         let advertiser = MCNearbyServiceAdvertiser(
@@ -1057,7 +1066,13 @@ final class PeerManager: NSObject, ObservableObject {
     private func hasPendingInvite() -> Bool {
         let now = Date()
         pendingInvites = pendingInvites.filter { now.timeIntervalSince($0.value) < inviteTimeout }
-        return !pendingInvites.isEmpty
+        guard !pendingInvites.isEmpty else { return false }
+        // Deferring to an in-flight invitation is only worth it while invitations
+        // are plausibly working. If they have been failing for a long stretch,
+        // the likeliest cause is that we are inviting a browse entry MC has
+        // since discarded — and the only way out of that is the refresh this
+        // guard is blocking. Protecting the invite forever deadlocks recovery.
+        return now.timeIntervalSince(lastInviteProgress) < inviteStarvationLimit
     }
 
     /// Retry schedule, separated by role so the two sides never invite at once.
@@ -1166,6 +1181,7 @@ final class PeerManager: NSObject, ObservableObject {
             reconnectTasks[peerID]?.cancel()
             reconnectTasks[peerID] = nil
             pendingInvites[peerID] = nil
+            lastInviteProgress = Date()
             establishedPeers.insert(peerID)
             if peers[peerID] == nil {
                 peers[peerID] = Peer(peerID: peerID)
@@ -1178,6 +1194,12 @@ final class PeerManager: NSObject, ObservableObject {
                 sendVIO(pose)
             }
         case .notConnected:
+            // A failed invitation is finished, not in flight. Leaving it in
+            // `pendingInvites` to age out over 12 s meant the 1-2.5 s retry
+            // cadence kept one permanently in the window, which held the
+            // browser refresh down to advertiser-only forever and left us
+            // re-inviting a stale browse entry with no way to get a fresh one.
+            pendingInvites[peerID] = nil
             guard !isTearingDown else { return }
             if establishedPeers.contains(peerID) {
                 establishedPeers.remove(peerID)
