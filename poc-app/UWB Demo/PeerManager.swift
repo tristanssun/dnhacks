@@ -906,6 +906,39 @@ final class PeerManager: NSObject, ObservableObject {
         }
     }
 
+    /// Multipeer vends a fresh `MCPeerID` when a device is rediscovered, and it
+    /// does not compare equal to the previous one. Every per-peer dictionary
+    /// here is keyed by that object — `peers`, `niSessions`, `tracks`, and the
+    /// filter's target clouds — so one phone can end up with two complete sets
+    /// of state. In the logs that showed as `recenter_ms_per_s` doubling from
+    /// ~40 to ~85 immediately after a lost/found pair, then stepping back down
+    /// as teardown ran.
+    ///
+    /// The discovery ID is stable for the life of an install, so identity
+    /// follows that rather than the object.
+    private func isDuplicateOfConnected(_ peerID: MCPeerID, remoteID: String) -> Bool {
+        guard let connected = mcSession?.connectedPeers else { return false }
+        return connected.contains {
+            $0 != peerID && knownRemoteIDs[$0]?.caseInsensitiveCompare(remoteID) == .orderedSame
+        }
+    }
+
+    /// Drops stale `MCPeerID`s that name the same device as `peerID`. Only ones
+    /// with no live session: a connected object is the working link, and the
+    /// newly discovered duplicate is the one that should be ignored.
+    private func reconcileIdentity(_ peerID: MCPeerID, remoteID: String) {
+        let stale = knownRemoteIDs
+            .filter { $0.key != peerID && $0.value.caseInsensitiveCompare(remoteID) == .orderedSame }
+            .map(\.key)
+        for old in stale where mcSession?.connectedPeers.contains(old) != true {
+            mcLog("identity-merge", peerID, "dropping stale \(old.displayName)")
+            knownRemoteIDs[old] = nil
+            reconnectTasks[old]?.cancel()
+            reconnectTasks[old] = nil
+            tearDown(old)
+        }
+    }
+
     /// The lower discovery ID owns invitations for a pair. Both sides advertise
     /// and accept, but only one sends, so two invites can never cross.
     ///
@@ -1546,25 +1579,44 @@ extension PeerManager: MCSessionDelegate {
 extension PeerManager: MCNearbyServiceAdvertiserDelegate {
     nonisolated func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didReceiveInvitationFromPeer peerID: MCPeerID, withContext context: Data?, invitationHandler: @escaping (Bool, MCSession?) -> Void) {
         let remoteID = context.flatMap { String(data: $0, encoding: .utf8) }
-        let alreadyConnected = invitationSession?.connectedPeers.contains(peerID) == true
+        // Answered from the main actor so the decision can consult
+        // `knownRemoteIDs`. The handler is escaping and the inviter allows 12 s,
+        // so replying an actor hop later is well inside the budget.
         Task { @MainActor in
-            self.remember(peerID, remoteID: remoteID)
-            self.lastInviteReceived[peerID] = Date()
-            // Logged with whether we also had an invitation of our own in
-            // flight: both sides inviting at once is what produces duplicate
-            // sessions, and the loser is torn down with a connection reset.
-            let crossed = self.pendingInvites[peerID] != nil
-            self.mcLog(
-                alreadyConnected ? "invite-recv-reject" : "invite-recv-accept",
-                peerID,
-                crossed ? "CROSSED with our own invite" : ""
-            )
+            self.answerInvitation(from: peerID, remoteID: remoteID, respond: invitationHandler)
         }
-        if alreadyConnected {
-            invitationHandler(false, nil)
+    }
+
+    @MainActor
+    private func answerInvitation(
+        from peerID: MCPeerID,
+        remoteID: String?,
+        respond: @escaping (Bool, MCSession?) -> Void
+    ) {
+        remember(peerID, remoteID: remoteID)
+        lastInviteReceived[peerID] = Date()
+
+        // Duplicate is judged by discovery ID, not object identity. Comparing
+        // `connectedPeers.contains(peerID)` misses a device we are already
+        // connected to under an earlier `MCPeerID`, so the second invitation was
+        // accepted, a duplicate connection formed, and its collapse took the
+        // working session down with it — the `connected -> notConnected` at
+        // t=151 in the logs, right after an advertiser-side "Unable to connect".
+        let duplicate = remoteID.map { isDuplicateOfConnected(peerID, remoteID: $0) }
+            ?? (mcSession?.connectedPeers.contains(peerID) == true)
+        let crossed = pendingInvites[peerID] != nil
+        mcLog(
+            duplicate ? "invite-recv-reject" : "invite-recv-accept",
+            peerID,
+            [crossed ? "CROSSED with our own invite" : "", duplicate ? "duplicate identity" : ""]
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+        )
+        guard !duplicate else {
+            respond(false, nil)
             return
         }
-        invitationHandler(true, invitationSession)
+        respond(true, invitationSession)
     }
 
     nonisolated func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didNotStartAdvertisingPeer error: Error) {
@@ -1581,6 +1633,17 @@ extension PeerManager: MCNearbyServiceBrowserDelegate {
         Task { @MainActor in
             self.remember(peerID, remoteID: remoteID)
             self.mcLog("found", peerID, remoteID == nil ? "no discoveryInfo" : "")
+            if let remoteID {
+                // Already connected to this device under an earlier MCPeerID:
+                // the live session is the real one, so drop this object rather
+                // than building a second set of state around it.
+                if self.isDuplicateOfConnected(peerID, remoteID: remoteID) {
+                    self.mcLog("found-duplicate", peerID, "already connected under another peerID")
+                    self.knownRemoteIDs[peerID] = nil
+                    return
+                }
+                self.reconcileIdentity(peerID, remoteID: remoteID)
+            }
             if self.isInitiator(for: peerID) {
                 self.invite(peerID)
             } else {
