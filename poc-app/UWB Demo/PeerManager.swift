@@ -81,6 +81,11 @@ final class PeerManager: NSObject, ObservableObject {
     /// Most recent estimate per peer. `publishLocAR` computes these; everything
     /// else reuses them rather than walking the particle clouds again.
     private var lastEstimate: [MCPeerID: LocAREngine.Estimate] = [:]
+    /// Last time each peer's range / bearing was fed to the filter. See
+    /// `shouldIngest`. 10 Hz matches the paper's own UWB polling rate (§5.2).
+    private var lastRangeIngest: [MCPeerID: Date] = [:]
+    private var lastBearingIngest: [MCPeerID: Date] = [:]
+    private let ingestInterval: TimeInterval = 0.1
     /// Set by anything that changes filter state; drained by `publishTimer`.
     private var needsPublish = false
     private var publishTimer: Timer?
@@ -395,7 +400,8 @@ final class PeerManager: NSObject, ObservableObject {
                 if let existing = remoteRange[sender], existing.date >= date { continue }
                 remoteRange[sender] = RangeSample(range: range, date: date)
                 track(sender, measurement: range, from: .remote, at: date)
-                if let fused = fusedRange(for: sender, at: now) {
+                if let fused = fusedRange(for: sender, at: now),
+                   shouldIngest(sender, .range, at: now) {
                     locar.ingestUWB(peerID: sender, range: fused)
                 }
                 changed = true
@@ -442,10 +448,45 @@ final class PeerManager: NSObject, ObservableObject {
     private func fuse(_ peerID: MCPeerID) {
         let now = Date()
         if let range = fusedRange(for: peerID, at: now) {
-            locar.ingestUWB(peerID: peerID, range: range)
+            if shouldIngest(peerID, .range, at: now) {
+                locar.ingestUWB(peerID: peerID, range: range)
+            }
             calibrateIfDue(peerID, range: range, at: now)
         }
         setNeedsPublish()
+    }
+
+    private enum IngestChannel {
+        case range
+        case bearing
+    }
+
+    /// Gate on feeding the filter, per peer and per channel.
+    ///
+    /// The same physical range reaches `ingestUWB` from three paths — the local
+    /// NI update, the peer's copy of that range, and the peer's range list — and
+    /// each one multiplies the particle weights again. Three ingests of one
+    /// measurement give a 64x inlier/outlier ratio instead of 4x, which is the
+    /// false convergence and particle impoverishment the paper's uniform error
+    /// model exists to avoid (§4.1.3).
+    ///
+    /// This decimates rather than drops: callers read the freshest stored sample
+    /// through `fusedRange`, so whatever arrives next after the gate reopens is
+    /// the most recent measurement, not a stale one.
+    private func shouldIngest(_ peerID: MCPeerID, _ channel: IngestChannel, at now: Date) -> Bool {
+        let last: Date?
+        switch channel {
+        case .range: last = lastRangeIngest[peerID]
+        case .bearing: last = lastBearingIngest[peerID]
+        }
+        if let last, now.timeIntervalSince(last) < ingestInterval {
+            return false
+        }
+        switch channel {
+        case .range: lastRangeIngest[peerID] = now
+        case .bearing: lastBearingIngest[peerID] = now
+        }
+        return true
     }
 
     private func freshBearing(for peerID: MCPeerID, at now: Date) -> Float? {
@@ -896,6 +937,8 @@ final class PeerManager: NSObject, ObservableObject {
         pingSentAt[peerID] = nil
         forgetBluetooth(for: peerID)
         lastEstimate[peerID] = nil
+        lastRangeIngest[peerID] = nil
+        lastBearingIngest[peerID] = nil
         locar.forget(peerID)
         peers[peerID] = nil
         isTearingDown = false
@@ -925,7 +968,11 @@ final class PeerManager: NSObject, ObservableObject {
         var changed = false
         if let angle = bodyAngle(horizontalAngle: horizontalAngle, direction: direction) {
             lastBearing[peerID] = (angle, now)
-            locar.ingestBearing(peerID: peerID, bodyAngle: angle)
+            // Gated separately from range: bearing is a different information
+            // channel and shouldn't be starved by range traffic, or vice versa.
+            if shouldIngest(peerID, .bearing, at: now) {
+                locar.ingestBearing(peerID: peerID, bodyAngle: angle)
+            }
             changed = true
         }
         if let distance, distance.isFinite, distance > 0 {
