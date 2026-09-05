@@ -368,7 +368,7 @@ final class PeerManager: NSObject, ObservableObject {
                 // The sender's measurement of the sender↔me range.
                 if let existing = remoteRange[sender], existing.date >= date { continue }
                 remoteRange[sender] = RangeSample(range: range, date: date)
-                track(sender, measurement: range, sigma: RangeTrack.remoteSigma, at: date)
+                track(sender, measurement: range, from: .remote, at: date)
                 if let fused = fusedRange(for: sender, at: now) {
                     locar.ingestUWB(peerID: sender, range: fused)
                 }
@@ -398,16 +398,19 @@ final class PeerManager: NSObject, ObservableObject {
             return
         }
         remoteRange[peerID] = RangeSample(range: range, date: date)
-        track(peerID, measurement: range, sigma: RangeTrack.remoteSigma, at: date)
+        track(peerID, measurement: range, from: .remote, at: date)
         fuse(peerID)
     }
 
-    private func track(_ peerID: MCPeerID, measurement: Float, sigma: Float, at date: Date) {
+    /// UWB is the display truth; ARKit only fills the gaps between samples.
+    private let trackMode: RangeTrack.Mode = .uwbFirst
+
+    private func track(_ peerID: MCPeerID, measurement: Float, from source: RangeTrack.Source, at date: Date) {
         if var track = tracks[peerID] {
-            track.update(measurement, sigma: sigma, at: date)
+            track.update(measurement, from: source, at: date)
             tracks[peerID] = track
-        } else {
-            tracks[peerID] = RangeTrack(range: measurement, at: date)
+        } else if source == .local || trackMode == .smoothed {
+            tracks[peerID] = RangeTrack(range: measurement, at: date, mode: trackMode)
         }
     }
 
@@ -897,7 +900,7 @@ final class PeerManager: NSObject, ObservableObject {
         if let distance, distance.isFinite, distance > 0 {
             let sample = RangeSample(range: distance, date: now)
             localRange[peerID] = sample
-            track(peerID, measurement: distance, sigma: RangeTrack.localSigma, at: now)
+            track(peerID, measurement: distance, from: .local, at: now)
             sendRawRange(sample, to: peerID)
             fuse(peerID)
         } else if changed {

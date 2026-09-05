@@ -1,13 +1,27 @@
 import Foundation
 
-/// Constant-velocity Kalman filter on a UWB range, in meters.
+/// Tracked UWB range, in meters. It is a value type so the view can hold a
+/// snapshot and call `value(at:)` every frame.
 ///
-/// Smooths the ±10 cm jitter without moving-average lag, rejects outliers with
-/// a 3σ gate, accepts VIO dead-reckoning between UWB frames, and extrapolates
-/// to render time so the label shows where you are now rather than one UWB
-/// interval ago. It is a value type so the view can hold a snapshot and call
-/// `value(at:)` every frame.
+/// `.uwbFirst` (default): every local UWB sample is taken at face value. Between
+/// samples the range advances with ARKit motion (`nudge`), or with the last
+/// measured rate when the bearing isn't resolved. UWB is the truth; ARKit only
+/// fills the 100–200 ms gaps and dropouts.
+///
+/// `.smoothed`: constant-velocity Kalman filter that also fuses the peer's
+/// sample. Less jitter, a little more lag.
 struct RangeTrack {
+    enum Mode {
+        case uwbFirst
+        case smoothed
+    }
+
+    enum Source {
+        case local
+        case remote
+    }
+
+    let mode: Mode
     private(set) var range: Float
     private(set) var rate: Float
     /// Time of the last accepted measurement.
@@ -17,6 +31,9 @@ struct RangeTrack {
     private var p01: Float
     private var p11: Float
     private var outliers = 0
+    /// Set by `nudge`; tells `.uwbFirst` that motion is already being applied so
+    /// it must not also extrapolate with the measured rate.
+    private var motionAssisted = false
 
     /// Human walking acceleration, m/s².
     static let accelerationSigma: Float = 1.5
@@ -29,7 +46,8 @@ struct RangeTrack {
     static let liveWindow: TimeInterval = 0.75
     static let staleWindow: TimeInterval = 5
 
-    init(range: Float, at date: Date) {
+    init(range: Float, at date: Date, mode: Mode = .uwbFirst) {
+        self.mode = mode
         self.range = range
         rate = 0
         updatedAt = date
@@ -41,9 +59,45 @@ struct RangeTrack {
 
     // MARK: Inputs
 
-    /// Fuse a range measurement taken at `date`. Late samples are shifted by the
-    /// current rate so a 50 ms old value doesn't drag the estimate behind.
-    mutating func update(_ measurement: Float, sigma: Float, at date: Date) {
+    mutating func update(_ measurement: Float, from source: Source, at date: Date) {
+        switch mode {
+        case .uwbFirst:
+            guard source == .local else { return }
+            snap(measurement, at: date)
+        case .smoothed:
+            fuse(measurement, sigma: source == .local ? Self.localSigma : Self.remoteSigma, at: date)
+        }
+    }
+
+    /// Take the UWB sample as-is. The only rejection is a physically impossible
+    /// jump (faster than `maxRate`), and even that is accepted after 3 in a row.
+    private mutating func snap(_ measurement: Float, at date: Date) {
+        let dt = Float(max(date.timeIntervalSince(updatedAt), 0.02))
+        let previous = range
+        let jump = measurement - value(at: date)
+        if abs(jump) > 0.35 + Self.maxRate * dt {
+            outliers += 1
+            if outliers < 3 {
+                return
+            }
+        }
+        outliers = 0
+        let instantRate = max(min((measurement - previous) / dt, Self.maxRate), -Self.maxRate)
+        if motionAssisted {
+            // ARKit is carrying the motion between samples; rate would double-count.
+            rate = 0
+        } else {
+            rate = dt > 0.5 ? 0 : 0.5 * rate + 0.5 * instantRate
+        }
+        motionAssisted = false
+        range = max(measurement, 0)
+        updatedAt = date
+        predictedAt = date
+    }
+
+    /// Kalman fuse of a range measurement taken at `date`. Late samples are
+    /// shifted by the current rate so a 50 ms old value doesn't drag the estimate.
+    private mutating func fuse(_ measurement: Float, sigma: Float, at date: Date) {
         predict(to: date)
         let lag = Float(max(predictedAt.timeIntervalSince(date), 0))
         let z = measurement + rate * min(lag, 0.25)
@@ -53,7 +107,7 @@ struct RangeTrack {
         if abs(innovation) > gate {
             outliers += 1
             if outliers >= 3 {
-                self = RangeTrack(range: measurement, at: date)
+                self = RangeTrack(range: measurement, at: date, mode: mode)
             }
             return
         }
@@ -76,6 +130,7 @@ struct RangeTrack {
     mutating func nudge(_ delta: Float, at date: Date) {
         predict(to: date)
         range = max(range + max(min(delta, 0.3), -0.3), 0)
+        motionAssisted = true
     }
 
     // MARK: Output
