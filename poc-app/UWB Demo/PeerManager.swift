@@ -84,6 +84,8 @@ final class PeerManager: NSObject, ObservableObject {
     /// else reuses them rather than walking the particle clouds again.
     private var lastEstimate: [MCPeerID: LocAREngine.Estimate] = [:]
     private var lastDiscoveryRefresh = Date.distantPast
+    /// Slow enough not to disturb an invitation inside its 12 s timeout.
+    private let discoveryRefreshInterval: TimeInterval = 20
     /// Peers whose ranging just resumed after a dropout; they get one calibrate
     /// that bypasses `calibrationInterval`. See `track` and `calibrateIfDue`.
     private var pendingRecalibration: Set<MCPeerID> = []
@@ -218,7 +220,7 @@ final class PeerManager: NSObject, ObservableObject {
             self?.shareRanges()
             self?.broadcastRelativeEstimates()
             self?.calibrateAllDue()
-            self?.refreshDiscoveryIfIdle()
+            self?.refreshDiscoveryIfDue()
             self?.rotateCameraAssistanceIfDue()
             self?.setNeedsPublish()
         }
@@ -931,10 +933,25 @@ final class PeerManager: NSObject, ObservableObject {
     /// `didNotStartBrowsingForPeers` does not cover. Only while nothing is
     /// connected, and rarely, so it cannot disturb an invitation in flight the
     /// way the per-attempt refresh did.
-    private func refreshDiscoveryIfIdle() {
-        guard mcSession?.connectedPeers.isEmpty != false else { return }
+    /// Re-arms advertising and browsing periodically, whether or not we are
+    /// already connected to someone.
+    ///
+    /// This used to skip whenever any peer was connected, which meant a device
+    /// stopped refreshing the moment it joined its first session — forever. Two
+    /// devices never noticed, because both are idle while they find each other.
+    /// A third arriving later did: the established pair had both stopped
+    /// refreshing, so whichever of them needed to initiate toward the newcomer
+    /// was browsing with a stale view and never saw it. The observed shape was
+    /// a star — the middle device by join order reachable from both ends, the
+    /// outer two unable to see each other.
+    ///
+    /// Rate-limited rather than gated. The original harm was refreshing
+    /// immediately before an invite, which tore down the browse the invite was
+    /// about to go through; a slow periodic refresh is decoupled from invite
+    /// timing and safe while connected.
+    private func refreshDiscoveryIfDue() {
         let now = Date()
-        guard now.timeIntervalSince(lastDiscoveryRefresh) >= 30 else { return }
+        guard now.timeIntervalSince(lastDiscoveryRefresh) >= discoveryRefreshInterval else { return }
         lastDiscoveryRefresh = now
         refreshDiscovery()
     }
@@ -974,7 +991,7 @@ final class PeerManager: NSObject, ObservableObject {
         // No `refreshDiscovery()` here. It restarted the browser and invited
         // through it in the same breath, before the peer had been rediscovered,
         // and it could invalidate an invitation still inside its 12 s timeout.
-        // The wedged-browser safety net lives in `refreshDiscoveryIfIdle`.
+        // Periodic re-arming lives in `refreshDiscoveryIfDue`.
         invite(peerID)
         return false
     }
