@@ -1,91 +1,26 @@
-rtabmap
-=======
+# RTAB-Map iOS
 
-[![RTAB-Map Logo](https://raw.githubusercontent.com/introlab/rtabmap/master/guilib/src/images/RTAB-Map100.png)](http://introlab.github.io/rtabmap)
+iOS app for [RTAB-Map](https://github.com/introlab/rtabmap) (iPhone/iPad with LiDAR).
 
-[![Release][release-image]][releases]
-[![Downloads][downloads-image]][downloads]
-[![codecov](https://codecov.io/gh/introlab/rtabmap/graph/badge.svg?token=mPwvfZMOia)](https://codecov.io/gh/introlab/rtabmap)
-[![License][license-image]][license]
+Open `app/ios/RTABMapApp.xcodeproj` in Xcode.
 
-[release-image]: https://img.shields.io/badge/release-0.23.1-green.svg?style=flat
-[releases]: https://github.com/introlab/rtabmap/releases
+## Layout
 
-[downloads-image]: https://img.shields.io/github/downloads/introlab/rtabmap/total?label=downloads
-[downloads]: https://github.com/introlab/rtabmap/releases
+- `app/ios`: Swift UI, Xcode project, and `install_deps.sh`
+- `app/android/jni`: shared C++ mapping/rendering code compiled by the iOS target
+- `corelib`, `utilite`, `cmake_modules`: RTAB-Map libraries built for iOS by `install_deps.sh`
 
-[license-image]: https://img.shields.io/badge/license-BSD-green.svg?style=flat
-[license]: https://github.com/introlab/rtabmap/blob/master/LICENSE
+## Build
 
-RTAB-Map library and standalone application.
+1. Install CMake and Xcode.
+2. Build third-party libraries and the RTAB-Map iOS static libs:
 
- * For more information (e.g., papers, major updates), visit [RTAB-Map's home page](http://introlab.github.io/rtabmap).
- * For installation instructions and examples, visit [RTAB-Map's wiki](https://github.com/introlab/rtabmap/wiki).
- * For the C++ API of the library, see the [API documentation](https://introlab.github.io/rtabmap/api/latest/), which also lists all [parameters](https://introlab.github.io/rtabmap/api/latest/parameters.html) and [command-line tools](https://introlab.github.io/rtabmap/api/latest/tools.html).
+   ```bash
+   cd app/ios/RTABMapApp
+   ./install_deps.sh
+   ```
 
-To use RTAB-Map under ROS, visit the [rtabmap](http://wiki.ros.org/rtabmap) page on the ROS wiki.
+   This writes headers and `.a` files into `app/ios/RTABMapApp/Libraries/`.
+3. Open `app/ios/RTABMapApp.xcodeproj`, select a LiDAR device, and run.
 
-### Acknowledgements
-This project is supported by [IntRoLab - Intelligent / Interactive / Integrated / Interdisciplinary Robot Lab](https://introlab.3it.usherbrooke.ca/), Sherbrooke, Québec, Canada.
-
-<a href="https://introlab.3it.usherbrooke.ca/">
-<img src="https://github.com/introlab/16SoundsUSB/blob/master/images/IntRoLab.png" alt="IntRoLab" height="100">
-</a>
-
-#### CI Latest
-
-  <table>
-    <tbody>
-        <tr>
-           <td>
-           <a href="https://github.com/introlab/rtabmap/actions/workflows/cmake-linux.yml"><img src="https://github.com/introlab/rtabmap/actions/workflows/cmake-linux.yml/badge.svg" alt="CMake Linux Build Status"/> <br> 
-           <a href="https://github.com/introlab/rtabmap/actions/workflows/cmake-windows.yml"><img src="https://github.com/introlab/rtabmap/actions/workflows/cmake-windows.yml/badge.svg" alt="CMake Windows Build Status"/> <br> 
-           <a href="https://github.com/introlab/rtabmap/actions/workflows/cmake-macos.yml"><img src="https://github.com/introlab/rtabmap/actions/workflows/cmake-macos.yml/badge.svg" alt="CMake MaCOS Build Status"/> <br> 
-           <a href="https://github.com/introlab/rtabmap/actions/workflows/cmake-ros.yml"><img src="https://github.com/introlab/rtabmap/actions/workflows/cmake-ros.yml/badge.svg" alt="CMake ROS Build Status"/> <br> 
-           <a href="https://github.com/introlab/rtabmap/actions/workflows/docker.yml"><img src="https://github.com/introlab/rtabmap/actions/workflows/docker.yml/badge.svg" alt="Docker Build Status"/>
-           </td>
-        </tr>
-     </tbody>
-  </table>
- 
- #### ROS Binaries
- 
- `ros-$ROS_DISTRO-rtabmap`
- 
- <table>
-    <tbody>
-        <tr>
-           <td rowspan="1">ROS 1</td>
-            <td>Noetic</td>
-            <td><a href="http://build.ros.org/job/Nbin_ufv8_uFv8__rtabmap__ubuntu_focal_arm64__binary/"><img src="http://build.ros.org/buildStatus/icon?job=Nbin_ufv8_uFv8__rtabmap__ubuntu_focal_arm64__binary" alt="Build Status"/></td>
-        </tr>
-        <tr>
-            <td rowspan="5">ROS 2</td>
-            <td>Humble</td>
-            <td><a href="http://build.ros2.org/job/Hbin_uJ64__rtabmap__ubuntu_jammy_amd64__binary/"><img src="http://build.ros2.org/buildStatus/icon?job=Hbin_uJ64__rtabmap__ubuntu_jammy_amd64__binary" alt="Build Status"/></td>
-        </tr>
-        <tr>
-            <td>Jazzy</td>
-            <td><a href="http://build.ros2.org/job/Jbin_uN64__rtabmap__ubuntu_noble_amd64__binary/"><img src="http://build.ros2.org/buildStatus/icon?job=Jbin_uN64__rtabmap__ubuntu_noble_amd64__binary" alt="Build Status"/></td>
-        </tr>
-        <tr>
-            <td>Kilted</td>
-            <td><a href="http://build.ros2.org/job/Lbin_uR64__rtabmap__ubuntu_resolute_amd64__binary/"><img src="http://build.ros2.org/buildStatus/icon?job=Lbin_uR64__rtabmap__ubuntu_resolute_amd64__binary" alt="Build Status"/></td>
-        </tr>
-        <tr>
-            <td>Lyrical</td>
-            <td><a href="http://build.ros2.org/job/Kbin_uN64__rtabmap__ubuntu_noble_amd64__binary/"><img src="http://build.ros2.org/buildStatus/icon?job=Kbin_uN64__rtabmap__ubuntu_noble_amd64__binary" alt="Build Status"/></td>
-        </tr>
-        <tr>
-            <td>Rolling</td>
-            <td><a href="http://build.ros2.org/job/Rbin_uJ64__rtabmap__ubuntu_jammy_amd64__binary/"><img src="http://build.ros2.org/buildStatus/icon?job=Rbin_uJ64__rtabmap__ubuntu_jammy_amd64__binary" alt="Build Status"/></td>
-        </tr>
-        <tr>
-           <td>Docker</td>
-           <td>
-             <a href="https://hub.docker.com/r/introlab3it/rtabmap">rtabmap</a>
-           </td>
-           <td><img src="https://img.shields.io/docker/pulls/introlab3it/rtabmap" alt="Docker Pulls"/></td>
-        </tr>
-    </tbody>
-</table>
+The App Store listing is [RTAB-Map 3D LiDAR Scanner](https://apps.apple.com/ca/app/rtab-map-3d-lidar-scanner/id1564774365).

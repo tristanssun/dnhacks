@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - master
+      - main
     paths: &ios_paths
       - '.github/workflows/ios.yml'
       - 'app/ios/**'
