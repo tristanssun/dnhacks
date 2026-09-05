@@ -52,7 +52,8 @@ final class LocAREngine {
 
     private var hypotheses: [Hypothesis]
     private var lastLocalPosition: SIMD3<Float>?
-    private var lastLocalTime: Date?
+    /// ARKit frame timestamp of the last accepted local pose.
+    private var lastLocalTime: TimeInterval?
     private var lastRemotePose: [MCPeerID: (position: SIMD3<Float>, yaw: Float)] = [:]
     private(set) var localYaw: Float = 0
     private var cameraTransform = matrix_identity_float4x4
@@ -86,10 +87,9 @@ final class LocAREngine {
         guard pose.isReliable else { return }
         cameraTransform = pose.transform
         localYaw = pose.yaw
-        let now = Date()
         defer {
             lastLocalPosition = pose.position
-            lastLocalTime = now
+            lastLocalTime = pose.timestamp
             hasLocal = true
         }
         guard let last = lastLocalPosition, let lastTime = lastLocalTime else {
@@ -101,7 +101,9 @@ final class LocAREngine {
             reorigin(to: pose.position)
             return
         }
-        let dt = Float(now.timeIntervalSince(lastTime))
+        // Capture-time dt: process noise scales with real elapsed motion time,
+        // not with how late the main thread got around to this frame.
+        let dt = Float(max(pose.timestamp - lastTime, 0))
         let step = max(min(sqrt(dt / 0.1), 3), 0.2)
         for i in hypotheses.indices {
             hypotheses[i].x += delta.x + gauss(sigmaXYZ * step)

@@ -92,7 +92,6 @@ final class PeerManager: NSObject, ObservableObject {
     private var bearingConfidence: [MCPeerID: Float] = [:]
     /// Filter expected range at the last tracker nudge, per peer.
     private var rangeBaseline: [MCPeerID: Float] = [:]
-    private var vioFrame = 0
     private var lastNIDirection: [MCPeerID: (direction: simd_float3, date: Date)] = [:]
     /// Latest body azimuth to each peer (0 forward, positive right), radians.
     private var lastBearing: [MCPeerID: (angle: Float, date: Date)] = [:]
@@ -194,10 +193,8 @@ final class PeerManager: NSObject, ObservableObject {
         }
         let now = Date()
         locar.setLocal(pose)
-        vioFrame += 1
-        if vioFrame % 3 == 0 {
-            deadReckon(at: now)
-        }
+        // Poses already arrive thinned to ~20 Hz by VIOTracker.
+        deadReckon(at: now)
         if now.timeIntervalSince(lastVIOSend) >= 0.1 {
             lastVIOSend = now
             sendVIO(pose)
