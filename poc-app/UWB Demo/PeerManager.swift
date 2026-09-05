@@ -774,13 +774,40 @@ final class PeerManager: NSObject, ObservableObject {
         }
     }
 
-    private func invite(_ peerID: MCPeerID, force: Bool = false) {
+    /// The lower discovery ID owns invitations for a pair. Both sides advertise
+    /// and accept, but only one sends, so two invites can never cross.
+    ///
+    /// This used to be bypassed by a `force` flag on reconnect. Both devices see
+    /// the same disconnect at the same instant and ran the same schedule, so
+    /// both reached the forced path together, each invited the other, and each
+    /// accepted — two overlapping attempts for one pair, one of which dies as
+    /// "error in connectedHandler [Unable to connect]". The roles are now
+    /// separated in time instead: see `scheduleReconnect`.
+    private func isInitiator(for peerID: MCPeerID) -> Bool {
+        guard let remoteID = knownRemoteIDs[peerID] else { return true }
+        return discoveryID < remoteID
+    }
+
+    private func invite(_ peerID: MCPeerID) {
         guard let mcSession, !mcSession.connectedPeers.contains(peerID) else { return }
-        if !force, let remoteID = knownRemoteIDs[peerID], discoveryID >= remoteID {
-            return
-        }
         let context = discoveryID.data(using: .utf8)
         browser?.invitePeer(peerID, to: mcSession, withContext: context, timeout: 12)
+    }
+
+    /// The peer left the browse. Stop chasing it: a reconnect task that keeps
+    /// inviting a peer that is gone — app killed, rebuilt, or walked out of
+    /// range — fails every time, and each failure drives another `.notConnected`
+    /// which schedules yet another round.
+    ///
+    /// A reinstall makes this worse: `storedPeerID` mints a fresh `MCPeerID`,
+    /// so the stale one held here can never connect again. Dropping the remote
+    /// ID too means the pair re-tiebreaks from scratch when it reappears.
+    private func handleLostPeer(_ peerID: MCPeerID) {
+        // MC can drop a browse entry for a peer whose session is still healthy.
+        guard mcSession?.connectedPeers.contains(peerID) != true else { return }
+        reconnectTasks[peerID]?.cancel()
+        reconnectTasks[peerID] = nil
+        knownRemoteIDs[peerID] = nil
     }
 
     private func refreshDiscovery() {
@@ -789,26 +816,35 @@ final class PeerManager: NSObject, ObservableObject {
         browser?.startBrowsingForPeers()
     }
 
+    /// Retry schedule, separated by role so the two sides never invite at once.
+    /// The initiator retries promptly; the other side stays quiet until well
+    /// past the initiator's last attempt, and only then takes over — which is
+    /// what keeps recovery working when the initiator is the device that died.
     private func scheduleReconnect(_ peerID: MCPeerID) {
         reconnectTasks[peerID]?.cancel()
+        let delays: [Duration] = isInitiator(for: peerID)
+            ? [.seconds(1), .seconds(2.5)]
+            : [.seconds(12)]
         reconnectTasks[peerID] = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(1))
-            guard let manager = self, !Task.isCancelled else { return }
-            await MainActor.run {
-                manager.attemptReconnect(peerID, force: false)
-            }
-            try? await Task.sleep(for: .seconds(2.5))
-            guard let manager = self, !Task.isCancelled else { return }
-            await MainActor.run {
-                manager.attemptReconnect(peerID, force: true)
+            for delay in delays {
+                try? await Task.sleep(for: delay)
+                guard let manager = self, !Task.isCancelled else { return }
+                let connected = await MainActor.run {
+                    manager.attemptReconnect(peerID)
+                }
+                if connected { return }
             }
         }
     }
 
-    private func attemptReconnect(_ peerID: MCPeerID, force: Bool) {
-        guard mcSession?.connectedPeers.contains(peerID) != true else { return }
+    /// Returns true once the peer is connected, so the retry loop can stop.
+    private func attemptReconnect(_ peerID: MCPeerID) -> Bool {
+        if mcSession?.connectedPeers.contains(peerID) == true {
+            return true
+        }
         refreshDiscovery()
-        invite(peerID, force: force)
+        invite(peerID)
+        return false
     }
 
     private func handlePeerState(_ peerID: MCPeerID, _ state: MCSessionState) {
@@ -1088,11 +1124,21 @@ extension PeerManager: MCNearbyServiceBrowserDelegate {
         let remoteID = info?["id"]
         Task { @MainActor in
             self.remember(peerID, remoteID: remoteID)
-            self.invite(peerID)
+            if self.isInitiator(for: peerID) {
+                self.invite(peerID)
+            } else {
+                // Stay quiet and let the initiator lead, but arm the delayed
+                // takeover in case it never manages to reach us.
+                self.scheduleReconnect(peerID)
+            }
         }
     }
 
-    nonisolated func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {}
+    nonisolated func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {
+        Task { @MainActor in
+            self.handleLostPeer(peerID)
+        }
+    }
 
     nonisolated func browser(_ browser: MCNearbyServiceBrowser, didNotStartBrowsingForPeers error: Error) {
         Task { @MainActor in
