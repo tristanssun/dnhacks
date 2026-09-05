@@ -1,0 +1,13 @@
+.venv/
+outputs/
+uploads/
+*.log
+__pycache__/
+.gradio/
+
+# Phone captures are local input data, not source code.
+*.MOV
+*.mov
+*.MP4
+*.mp4
+*.pdf

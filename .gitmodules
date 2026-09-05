@@ -1,0 +1,3 @@
+[submodule "vendor/map-anything"]
+	path = vendor/map-anything
+	url = https://github.com/facebookresearch/map-anything.git
