@@ -85,6 +85,7 @@ final class PeerManager: NSObject, ObservableObject {
     /// `shouldIngest`. 10 Hz matches the paper's own UWB polling rate (§5.2).
     /// Peers whose ranging just resumed after a dropout; they get one calibrate
     /// that bypasses `calibrationInterval`. See `track` and `calibrateIfDue`.
+    private var lastDiscoveryRefresh = Date.distantPast
     private var pendingRecalibration: Set<MCPeerID> = []
     private var lastRangeIngest: [MCPeerID: Date] = [:]
     private var lastBearingIngest: [MCPeerID: Date] = [:]
@@ -194,6 +195,7 @@ final class PeerManager: NSObject, ObservableObject {
             self?.readConnectedRSSI()
             self?.shareRanges()
             self?.calibrateAllDue()
+            self?.refreshDiscoveryIfIdle()
             self?.setNeedsPublish()
         }
         publishTimer = Timer.scheduledTimer(withTimeInterval: Self.publishInterval, repeats: true) { [weak self] _ in
@@ -810,6 +812,18 @@ final class PeerManager: NSObject, ObservableObject {
         knownRemoteIDs[peerID] = nil
     }
 
+    /// Recovers a browser that has silently stopped finding peers — the one case
+    /// `didNotStartBrowsingForPeers` does not cover. Only while nothing is
+    /// connected, and rarely, so it cannot disturb an invitation in flight the
+    /// way the per-attempt refresh did.
+    private func refreshDiscoveryIfIdle() {
+        guard mcSession?.connectedPeers.isEmpty != false else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastDiscoveryRefresh) >= 30 else { return }
+        lastDiscoveryRefresh = now
+        refreshDiscovery()
+    }
+
     private func refreshDiscovery() {
         advertiser?.startAdvertisingPeer()
         browser?.stopBrowsingForPeers()
@@ -842,7 +856,10 @@ final class PeerManager: NSObject, ObservableObject {
         if mcSession?.connectedPeers.contains(peerID) == true {
             return true
         }
-        refreshDiscovery()
+        // No `refreshDiscovery()` here. It restarted the browser and invited
+        // through it in the same breath, before the peer had been rediscovered,
+        // and it could invalidate an invitation still inside its 12 s timeout.
+        // The wedged-browser safety net lives in `refreshDiscoveryIfIdle`.
         invite(peerID)
         return false
     }
