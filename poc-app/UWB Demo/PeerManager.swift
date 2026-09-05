@@ -26,19 +26,37 @@ final class PeerManager: NSObject, ObservableObject {
         var hint: String?
         /// Pairing stage reached with this peer, e.g. "mc tok ni run cam".
         var link: String?
+        /// A peer that can range this one has shared an estimate of it recently.
+        var isRelayed = false
 
         var id: MCPeerID { peerID }
 
         /// Distance to draw at `date` and whether it is backed by live UWB.
-        func displayDistance(at date: Date) -> (meters: Float, isLive: Bool)? {
+        /// Where a rendered distance actually came from. `relayed` is worth
+        /// separating from the rest: it is not a degraded measurement of ours,
+        /// it is another device's measurement reaching us second-hand, which is
+        /// the normal and expected state for a peer beyond our own UWB range.
+        enum DistanceSource {
+            /// Local UWB, inside `liveWindow`.
+            case live
+            /// Local UWB that has aged past `liveWindow` but is not stale yet.
+            case aging
+            /// No usable UWB of our own; a peer that can range this device has
+            /// shared its estimate recently.
+            case relayed
+            /// Filter dead reckoning or Bluetooth RSSI — no measurement behind it.
+            case inferred
+        }
+
+        func displayDistance(at date: Date) -> (meters: Float, source: DistanceSource)? {
             if let range, !range.isStale(at: date) {
-                return (range.value(at: date), range.isLive(at: date))
+                return (range.value(at: date), range.isLive(at: date) ? .live : .aging)
             }
             if let estimatedDistance {
-                return (estimatedDistance, false)
+                return (estimatedDistance, isRelayed ? .relayed : .inferred)
             }
             if let bluetoothDistance {
-                return (bluetoothDistance, false)
+                return (bluetoothDistance, .inferred)
             }
             return nil
         }
@@ -106,6 +124,8 @@ final class PeerManager: NSObject, ObservableObject {
     /// Last ingest per (anchor, target) pair. See `shouldIngestRelative`.
     private var relativeIngestDates: [MCPeerID: [MCPeerID: Date]] = [:]
     private let relativeIngestInterval: TimeInterval = 0.5
+    /// How recently a shared estimate must have arrived to mark a peer relayed.
+    private let relayWindow: TimeInterval = 3
     private let ingestInterval: TimeInterval = 0.1
     /// Set by anything that changes filter state; drained by `publishTimer`.
     private var needsPublish = false
@@ -726,6 +746,7 @@ final class PeerManager: NSObject, ObservableObject {
             peer.range = tracks[id]
             peer.estimatedDistance = estimate?.distance
             peer.link = linkStatus(for: id)
+            peer.isRelayed = hasRecentRelay(for: id, at: now)
 
             if let estimate, estimate.bearingConfidence > 0.6 {
                 peer.locarDirection = estimate.direction
@@ -1183,6 +1204,19 @@ final class PeerManager: NSObject, ObservableObject {
                 self.sendDiscoveryToken(to: peerID, force: true)
             }
         }
+    }
+
+    /// Whether some peer has recently told us where this one is. Read across
+    /// every anchor, since any device that can range the target may be the one
+    /// relaying it. The window is generous relative to the 2 Hz broadcast so a
+    /// single dropped `.unreliable` packet doesn't flicker the marker.
+    private func hasRecentRelay(for peerID: MCPeerID, at now: Date) -> Bool {
+        for (_, targets) in relativeEstimateDates {
+            if let date = targets[peerID], now.timeIntervalSince(date) < relayWindow {
+                return true
+            }
+        }
+        return false
     }
 
     /// Compact pairing state per peer, so a failure can be read off the screen

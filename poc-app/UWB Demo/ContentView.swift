@@ -92,7 +92,7 @@ struct ContentView: View {
         let id: String
         let peer: PeerManager.Peer
         let distance: Float
-        let isLive: Bool
+        let source: PeerManager.Peer.DistanceSource
         let direction: simd_float3?
         let latencyMs: Int?
     }
@@ -203,7 +203,7 @@ struct ContentView: View {
                 id: "\(peer.displayName)-\(peer.id.hashValue)",
                 peer: peer,
                 distance: display.meters,
-                isLive: display.isLive,
+                source: display.source,
                 direction: peer.locarDirection,
                 latencyMs: peer.uwbLatencyMs ?? peer.bluetoothLatencyMs
             )
@@ -247,7 +247,15 @@ struct ContentView: View {
     private static func distanceLabel(for mark: Mark) -> String {
         let feet = Double(mark.distance) * 3.28084
         var text = String(format: "%.1f ft", feet)
-        if !mark.isLive {
+        switch mark.source {
+        case .live:
+            break
+        case .relayed:
+            // Not our measurement gone stale — someone else's, arriving
+            // second-hand. That is the expected state past our own UWB range,
+            // so it reads differently from a reading we let go cold.
+            text = "!" + text
+        case .aging, .inferred:
             text = "~" + text
         }
         return mark.direction == nil ? "\(text)?" : text
