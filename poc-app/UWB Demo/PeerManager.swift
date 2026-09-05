@@ -268,16 +268,29 @@ final class PeerManager: NSObject, ObservableObject {
 
     private func handleUpdate(sessionID: ObjectIdentifier, distance: Float?, direction: simd_float3?) {
         guard let peerID = peerID(for: sessionID), var peer = peers[peerID] else { return }
-        peer.distance = distance
-        peer.direction = direction
+        if let distance {
+            peer.distance = distance
+        }
+        if let direction {
+            peer.direction = direction
+        }
         peers[peerID] = peer
     }
 
     private func handleRemove(sessionID: ObjectIdentifier) {
-        guard let peerID = peerID(for: sessionID), var peer = peers[peerID] else { return }
-        peer.distance = nil
-        peer.direction = nil
-        peers[peerID] = peer
+        guard let peerID = peerID(for: sessionID) else { return }
+        restartRanging(peerID)
+    }
+
+    private func restartRanging(_ peerID: MCPeerID) {
+        if let session = niSessions[peerID],
+           let configuration = configurations[peerID] ?? session.configuration as? NINearbyPeerConfiguration {
+            session.run(configuration)
+            return
+        }
+        if mcSession?.connectedPeers.contains(peerID) == true {
+            sendDiscoveryToken(to: peerID, force: true)
+        }
     }
 
     private func handleSuspensionEnded(sessionID: ObjectIdentifier) {
@@ -293,11 +306,6 @@ final class PeerManager: NSObject, ObservableObject {
         niSessions[peerID] = nil
         configurations[peerID] = nil
         sentTokenTo.remove(peerID)
-        if var peer = peers[peerID] {
-            peer.distance = nil
-            peer.direction = nil
-            peers[peerID] = peer
-        }
         if mcSession?.connectedPeers.contains(peerID) == true {
             sendDiscoveryToken(to: peerID, force: true)
         }

@@ -29,9 +29,9 @@ struct ContentView: View {
         let peers = Array(manager.peers.values).sorted { $0.displayName < $1.displayName }
 
         return ZStack(alignment: .topLeading) {
-            Image(systemName: "arrowtriangle.up.fill")
-                .font(.system(size: 16))
-                .offset(x: local.x - 8, y: local.y - 8)
+            ArrowMark()
+                .frame(width: 16, height: 28)
+                .offset(x: local.x - 8, y: local.y - 14)
 
             ForEach(Array(peers.enumerated()), id: \.element.id) { index, peer in
                 let point = Self.clampedPoint(
@@ -45,15 +45,15 @@ struct ContentView: View {
                     maxY: maxY
                 )
                 let rotation = Self.rotation(for: peer, localHeading: manager.localHeading)
-                Image(systemName: "arrowtriangle.up.fill")
-                    .font(.system(size: 14))
+                ArrowMark()
+                    .frame(width: 14, height: 26)
                     .rotationEffect(.radians(Double(rotation)))
-                    .offset(x: point.x - 7, y: point.y - 7)
+                    .offset(x: point.x - 7, y: point.y - 13)
                 Text(Self.label(for: peer))
                     .font(.caption)
                     .multilineTextAlignment(.center)
                     .frame(width: 140)
-                    .offset(x: point.x - 70, y: min(point.y + 14, maxY - 4))
+                    .offset(x: point.x - 70, y: min(point.y + 18, maxY - 4))
             }
         }
         .frame(width: size.width, height: size.height, alignment: .topLeading)
@@ -76,7 +76,7 @@ struct ContentView: View {
             let meters = CGFloat(distance)
             if let direction = peer.direction {
                 x = local.x + CGFloat(direction.x) * meters * scale
-                y = local.y + CGFloat(direction.z) * meters * scale
+                y = local.y - CGFloat(direction.y) * meters * scale
             } else {
                 y = local.y - meters * scale
             }
@@ -105,5 +105,31 @@ struct ContentView: View {
     private static func rotation(for peer: PeerManager.Peer, localHeading: Float) -> Float {
         guard let heading = peer.heading else { return 0 }
         return heading - localHeading
+    }
+}
+
+private struct ArrowMark: View {
+    var body: some View {
+        ArrowShape()
+            .fill(Color.primary)
+    }
+}
+
+private struct ArrowShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        let width = rect.width
+        let height = rect.height
+        let stem = width * 0.32
+        let head = height * 0.42
+        var path = Path()
+        path.move(to: CGPoint(x: width / 2, y: 0))
+        path.addLine(to: CGPoint(x: width, y: head))
+        path.addLine(to: CGPoint(x: width / 2 + stem / 2, y: head))
+        path.addLine(to: CGPoint(x: width / 2 + stem / 2, y: height))
+        path.addLine(to: CGPoint(x: width / 2 - stem / 2, y: height))
+        path.addLine(to: CGPoint(x: width / 2 - stem / 2, y: head))
+        path.addLine(to: CGPoint(x: 0, y: head))
+        path.closeSubpath()
+        return path
     }
 }
