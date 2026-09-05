@@ -86,14 +86,18 @@ struct ContentView: View {
                     Text(Self.distanceLabel(for: mark))
                     Text(Self.latency(mark.latencyMs))
                     if mark.direction == nil {
+                        // This is the only actionable line on screen and it was
+                        // rendered as quiet secondary text below the label, so a
+                        // camera-assistance convergence stuck on "Move a little"
+                        // for a whole session read as the app simply not working.
                         // Nearby Interaction's own reason when it has one,
-                        // otherwise the thing that resolves a bearing without
-                        // it: parallax. Successive ranges taken from different
+                        // otherwise parallax: successive ranges from different
                         // vantage points triangulate the peer, so stepping
-                        // sideways gives the filter everything and walking
-                        // straight at them gives it nothing.
+                        // sideways feeds the filter and walking straight at them
+                        // does not.
                         Text(mark.peer.hint ?? "Step side to side")
-                            .foregroundStyle(.secondary)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color.orange)
                     }
                     if let link = mark.peer.link {
                         Text(link)

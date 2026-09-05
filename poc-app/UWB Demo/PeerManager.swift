@@ -790,7 +790,15 @@ final class PeerManager: NSObject, ObservableObject {
 
     private func handleConvergence(sessionID: ObjectIdentifier, hint: String?) {
         guard let peerID = peerID(for: sessionID), var peer = peers[peerID] else { return }
-        guard peer.hint != hint else { return }
+        guard peer.hint != hint else {
+            // Re-log a state that persists. Logging only transitions made a
+            // convergence stuck on one reason for 40 s look identical to a
+            // delegate that never fired again.
+            if let hint {
+                bearingLog("convergence-stuck", peerID, hint)
+            }
+            return
+        }
         // A nil hint means converged — but so did a delegate that never fired,
         // which is a completely different situation. Logging the transition
         // separates them.
