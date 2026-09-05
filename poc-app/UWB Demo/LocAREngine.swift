@@ -63,6 +63,8 @@ final class LocAREngine {
     /// the hardware has: ~11°/min of self-inflicted spread, 1.7 m of lateral
     /// error at 9 m.
     private let sigmaTheta: Float = 0.002
+    /// Two independent bearings, each at `sigmaBearing`, combine in quadrature.
+    private let sigmaThetaObservation: Float = 0.17
     /// Half-width of the compass agreement band, radians. Wide because indoor
     /// magnetic bias is tens of degrees; this is a floor on how bad θ can get,
     /// not a source of precision.
@@ -184,6 +186,66 @@ final class LocAREngine {
             }
             hypotheses[i].targets[peerID] = particles
         }
+    }
+
+    /// θ measured directly, from a bearing taken on each side of the link.
+    ///
+    /// Both devices are gravity-aligned, so their frames differ by yaw alone —
+    /// that is θ, and it is the only unknown in their relative orientation. If
+    /// ψ_us is the azimuth of us→peer in our frame and ψ_them is the azimuth of
+    /// peer→us in theirs, both describe one physical line pointing opposite
+    /// ways, so rotating their frame into ours must reconcile them:
+    ///
+    ///     ψ_them + θ = ψ_us + π   ⟹   θ = ψ_us − ψ_them + π
+    ///
+    /// One equation, one unknown, solved outright. No motion and no range
+    /// needed, which is what separates this from every other θ information
+    /// source here: the rotation term in `ingestRemoteVIO` only discriminates
+    /// in proportion to peer displacement, so a peer standing still teaches
+    /// nothing, and `ingestRelativeEstimate` rotates an incoming vector *by* θ
+    /// and therefore consumes it rather than measuring it.
+    ///
+    /// Independent exchanges average as σ/√N, so ~10° from one becomes ~3° from
+    /// ten — against a compass floor of tens of degrees.
+    func ingestThetaObservation(peerID: MCPeerID, theta: Float) {
+        guard hasTargets(peerID), theta.isFinite else { return }
+        let limit = 3 * sigmaThetaObservation
+        let inlierProbability = 1 - nlosProbability
+        for i in hypotheses.indices {
+            guard var particles = hypotheses[i].targets[peerID] else { continue }
+            var inliers: Float = 0
+            for k in particles.indices {
+                let error = abs(Self.wrap(particles[k].theta - theta))
+                let inside = error <= limit
+                if inside {
+                    inliers += particles[k].weight
+                }
+                particles[k].weight *= inside ? inlierProbability : nlosProbability
+            }
+            normalize(&particles)
+            // A measured θ the cloud cannot represent means the cloud is wrong
+            // about θ, not that the measurement is. Re-seed the angle around it
+            // while leaving positions alone — θ and position are separate state
+            // and a bad θ should not throw away a good fix.
+            if inliers < 0.15 {
+                for k in particles.indices where Float.random(in: 0...1) < 0.3 {
+                    particles[k].theta = Self.wrap(theta + gauss(sigmaThetaObservation))
+                }
+                normalize(&particles)
+            } else if effectiveCount(particles) < Float(Self.targetCount) * 0.5 {
+                resample(&particles)
+            }
+            hypotheses[i].targets[peerID] = particles
+        }
+    }
+
+    /// This device's world-frame azimuth for a body-frame bearing, which is the
+    /// ψ that goes on the wire for `ingestThetaObservation`.
+    func worldAzimuth(bodyAngle: Float) -> Float? {
+        guard hasLocal, bodyAngle.isFinite else { return nil }
+        let world = worldBearing(bodyAngle: bodyAngle)
+        guard world.x.isFinite, world.y.isFinite, simd_length(world) > 0.05 else { return nil }
+        return atan2(world.x, world.y)
     }
 
     /// Weak absolute anchor on θ from the two compasses, applied only once the
@@ -775,6 +837,9 @@ final class LocAREngine {
         }
         return result
     }
+
+    /// Wrapping is needed by callers solving θ before it reaches the filter.
+    static func wrapAngle(_ angle: Float) -> Float { wrap(angle) }
 
     private static func wrap(_ angle: Float) -> Float {
         var value = angle

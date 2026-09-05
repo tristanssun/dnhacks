@@ -133,6 +133,7 @@ final class PeerManager: NSObject, ObservableObject {
     /// filter. See `shouldIngest`. 10 Hz matches the paper's UWB rate (§5.2).
     private var lastRangeIngest: [MCPeerID: Date] = [:]
     private var lastBearingIngest: [MCPeerID: Date] = [:]
+    private var lastThetaIngest: [MCPeerID: Date] = [:]
     /// Last ingest per (anchor, target) pair. See `shouldIngestRelative`.
     private var relativeIngestDates: [MCPeerID: [MCPeerID: Date]] = [:]
     private let relativeIngestInterval: TimeInterval = 1.0 / 3
@@ -416,6 +417,48 @@ final class PeerManager: NSObject, ObservableObject {
 
     /// 0x52 | range (Float32) | age in ms (UInt16). Age lets the receiver keep
     /// its own freshness clock without synchronizing clocks between phones.
+    /// 0x58 | psi (Float32, our world-frame azimuth to this peer) | age ms.
+    ///
+    /// Addressed to one peer and carrying only the bearing for that link, so
+    /// unlike 0x57 there is no UUID and no list — an exchange only ever
+    /// concerns the pair that made it.
+    private func sendBearing(_ angle: Float, at date: Date, to peerID: MCPeerID) {
+        guard let psi = locar.worldAzimuth(bodyAngle: angle) else { return }
+        var data = Data([0x58])
+        var value = psi
+        var age = UInt16(clamping: Int(Date().timeIntervalSince(date) * 1000))
+        withUnsafeBytes(of: &value) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: &age) { data.append(contentsOf: $0) }
+        send(data, to: [peerID], mode: .unreliable, label: "bearing")
+    }
+
+    /// Solves θ from the pair of bearings and feeds it to the filter.
+    ///
+    /// Rotation between the two measurements is harmless — both ψ are already
+    /// world-referenced — but translation is not: a device moving d across the
+    /// line shifts its bearing by about d/r. So the tolerated lag scales with
+    /// range, which conveniently loosens exactly where θ error matters most.
+    private func handleBearingExchange(_ data: Data, from peerID: MCPeerID) {
+        let theirPsi = data.subdata(in: 1..<5).withUnsafeBytes { $0.load(as: Float.self) }
+        let ageMs = data.subdata(in: 5..<7).withUnsafeBytes { $0.load(as: UInt16.self) }
+        guard theirPsi.isFinite else { return }
+        let now = Date()
+        guard let mine = lastBearing[peerID],
+              let ourPsi = locar.worldAzimuth(bodyAngle: mine.angle) else { return }
+
+        let range = lastEstimate[peerID]?.distance ?? tracks[peerID]?.range ?? 3
+        let maxLag = min(max(0.08 * Double(range), 0.15), 0.7)
+        let theirAge = Double(ageMs) / 1000
+        let ourAge = now.timeIntervalSince(mine.date)
+        guard theirAge < maxLag, ourAge < maxLag else { return }
+        guard shouldIngest(peerID, .theta, at: now) else { return }
+
+        let theta = LocAREngine.wrapAngle(ourPsi - theirPsi + .pi)
+        locar.ingestThetaObservation(peerID: peerID, theta: theta)
+        mcLog("theta-obs", peerID, String(format: "%.0f deg", theta * 180 / .pi))
+        setNeedsPublish()
+    }
+
     private func sendRawRange(_ sample: RangeSample, to peerID: MCPeerID) {
         let ageMs = UInt16(clamping: Int(Date().timeIntervalSince(sample.date) * 1000))
         var data = Data([0x52])
@@ -618,6 +661,7 @@ final class PeerManager: NSObject, ObservableObject {
     private enum IngestChannel {
         case range
         case bearing
+        case theta
     }
 
     /// Keyed by the (anchor, target) pair, not by target alone: N senders each
@@ -653,6 +697,7 @@ final class PeerManager: NSObject, ObservableObject {
         switch channel {
         case .range: last = lastRangeIngest[peerID]
         case .bearing: last = lastBearingIngest[peerID]
+        case .theta: last = lastThetaIngest[peerID]
         }
         if let last, now.timeIntervalSince(last) < ingestInterval {
             return false
@@ -660,6 +705,7 @@ final class PeerManager: NSObject, ObservableObject {
         switch channel {
         case .range: lastRangeIngest[peerID] = now
         case .bearing: lastBearingIngest[peerID] = now
+        case .theta: lastThetaIngest[peerID] = now
         }
         return true
     }
@@ -1375,6 +1421,10 @@ final class PeerManager: NSObject, ObservableObject {
             }
             return
         }
+        if data.count == 7, data.first == 0x58 {
+            handleBearingExchange(data, from: peerID)
+            return
+        }
         if data.count == 7, data.first == 0x52 {
             handleRemoteRange(data, from: peerID)
             return
@@ -1551,6 +1601,7 @@ final class PeerManager: NSObject, ObservableObject {
         lastEstimate[peerID] = nil
         lastRangeIngest[peerID] = nil
         lastBearingIngest[peerID] = nil
+        lastThetaIngest[peerID] = nil
         relativeIngestDates[peerID] = nil
         for anchor in Array(relativeIngestDates.keys) {
             relativeIngestDates[anchor]?[peerID] = nil
@@ -1592,6 +1643,7 @@ final class PeerManager: NSObject, ObservableObject {
         var changed = false
         if let angle = bodyAngle(horizontalAngle: horizontalAngle, direction: direction) {
             lastBearing[peerID] = (angle, now)
+            sendBearing(angle, at: now, to: peerID)
             // Gated separately from range: bearing is a different information
             // channel and shouldn't be starved by range traffic, or vice versa.
             if shouldIngest(peerID, .bearing, at: now) {
