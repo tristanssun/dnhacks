@@ -21,6 +21,13 @@ final class LocAREngine {
         /// Near 1 the cloud agrees on a bearing; near 0 it is a uniform ring.
         var bearingConfidence: Float
         var worldPosition: SIMD3<Float>
+        /// Circular mean of the yaw offset between this peer's ARKit frame and
+        /// ours, radians.
+        var theta: Float
+        /// Mean resultant length of that distribution, 0...1. Near 0 the clouds
+        /// disagree about θ entirely, which is where the bearing error that
+        /// grows with distance comes from.
+        var thetaConfidence: Float
     }
 
     private struct TargetParticle {
@@ -66,6 +73,14 @@ final class LocAREngine {
     private(set) var localYaw: Float = 0
     private var cameraTransform = matrix_identity_float4x4
     private(set) var hasLocal = false
+    /// Coarse θ per peer from the two compasses, set by `PeerManager`. Used only
+    /// to seed: `seedSphere` otherwise drew θ uniformly over the full circle, so
+    /// a cold cloud started with no idea of the peer's frame orientation at all.
+    private var thetaPrior: [MCPeerID: Float] = [:]
+    /// Indoor magnetometers are far too biased to measure θ — that is why the
+    /// filter does not treat this as an observation — but ±30° of prior beats a
+    /// uniform circle, and it costs nothing.
+    private let thetaPriorSigma: Float = 0.52
 
     init() {
         let count = Self.displayCount
@@ -75,8 +90,14 @@ final class LocAREngine {
         }
     }
 
+    /// Radians, or nil to fall back to a uniform draw.
+    func setThetaPrior(_ radians: Float?, for peerID: MCPeerID) {
+        thetaPrior[peerID] = radians
+    }
+
     func forget(_ peerID: MCPeerID) {
         lastRemotePose[peerID] = nil
+        thetaPrior[peerID] = nil
         for i in hypotheses.indices {
             hypotheses[i].targets[peerID] = nil
         }
@@ -387,10 +408,17 @@ final class LocAREngine {
     /// cloud is collapsed onto that 3D fix. Without direction, the cloud is only
     /// pulled onto the range sphere if it disagrees with the range by > 0.5 m.
     /// Returns true if anything was changed.
+    ///
+    /// Particle weights are deliberately preserved rather than flattened. A
+    /// direction fix observes position, not θ, and θ's only credibility lives in
+    /// the weights — each particle carries its own θ, and which ones are right
+    /// is encoded purely in how much weight they hold. Resetting to uniform
+    /// every two seconds erased that, so θ could never converge and instead
+    /// random-walked around whatever `seedSphere` drew. That is the state
+    /// variable behind bearing error that grows with range.
     func calibrate(peerID: MCPeerID, range: Float, direction: simd_float3?) -> Bool {
         guard hasLocal, range > 0.05, range < 25 else { return false }
         ensureTargets(peerID, range: range)
-        let uniform = 1 / Float(Self.targetCount)
 
         if let direction, let world = niDirectionInWorld(direction) {
             for i in hypotheses.indices {
@@ -403,8 +431,8 @@ final class LocAREngine {
                         particles[k].y = target.y + gauss(0.05)
                         particles[k].z = target.z + gauss(0.08)
                     }
-                    particles[k].weight = uniform
                 }
+                normalize(&particles)
                 hypotheses[i].targets[peerID] = particles
             }
             return true
@@ -427,8 +455,8 @@ final class LocAREngine {
                 particles[k].x = origin.x + radial.x + gauss(0.08)
                 particles[k].y = origin.y + radial.y + gauss(0.08)
                 particles[k].z = origin.z + radial.z + gauss(0.08)
-                particles[k].weight = uniform
             }
+            normalize(&particles)
             hypotheses[i].targets[peerID] = particles
         }
         return true
@@ -471,6 +499,11 @@ final class LocAREngine {
             ? simd_float3(right / planar, forward / planar, 0)
             : simd_float3(0, 1, 0)
         let theta = atan2(sinSum, cosSum)
+        // Mean resultant length of the θ distribution. Free here, since the
+        // sums are already computed, and it is the only window onto the state
+        // variable that drives the range-dependent bearing error: a θ error ε
+        // misplaces a peer by about r·sin(ε), invisible at 1 m and metres at 9.
+        let thetaConfidence = min(hypot(sinSum, cosSum) / total, 1)
         let remoteYaw = lastRemotePose[peerID]?.yaw ?? 0
         let facing = SIMD3<Float>(sin(remoteYaw + theta), 0, cos(remoteYaw + theta))
         let (facingRight, facingForward) = bodyAxes(facing)
@@ -479,7 +512,9 @@ final class LocAREngine {
             direction: direction,
             heading: atan2(facingRight, facingForward),
             bearingConfidence: confidence,
-            worldPosition: world / total
+            worldPosition: world / total,
+            theta: theta,
+            thetaConfidence: thetaConfidence
         )
     }
 
@@ -609,21 +644,27 @@ final class LocAREngine {
     private func ensureTargets(_ peerID: MCPeerID, range: Float) {
         for i in hypotheses.indices where hypotheses[i].targets[peerID] == nil {
             let origin = SIMD3<Float>(hypotheses[i].x, hypotheses[i].y, hypotheses[i].z)
-            hypotheses[i].targets[peerID] = seedSphere(origin: origin, range: range)
+            hypotheses[i].targets[peerID] = seedSphere(origin: origin, range: range, theta: thetaPrior[peerID])
         }
     }
 
-    private func seedSphere(origin: SIMD3<Float>, range: Float) -> [TargetParticle] {
+    private func seedSphere(origin: SIMD3<Float>, range: Float, theta prior: Float? = nil) -> [TargetParticle] {
         let count = Self.targetCount
         let weight = 1 / Float(count)
         return (0..<count).map { _ in
             let radius = max(range + gauss(sigmaRange), 0.2)
             let point = origin + randomUnitVector() * radius
+            // Spread around the compass prior when there is one, so the cloud
+            // starts within roughly a quadrant of the truth instead of anywhere
+            // on the circle. θ is only observable through translated peer VIO,
+            // so a cold uniform draw can persist for as long as nobody walks.
+            let theta = prior.map { Self.wrap($0 + gauss(thetaPriorSigma)) }
+                ?? Float.random(in: 0..<(2 * .pi))
             return TargetParticle(
                 x: point.x,
                 y: point.y,
                 z: point.z,
-                theta: Float.random(in: 0..<(2 * .pi)),
+                theta: theta,
                 weight: weight
             )
         }

@@ -98,6 +98,8 @@ final class PeerManager: NSObject, ObservableObject {
     private let locar = LocAREngine()
     private var lastVIOSend = Date.distantPast
     private var lastDeadReckonPosition: SIMD3<Float>?
+    /// Peer's ARKit yaw from 0x56, half of the compass θ prior.
+    private var lastRemoteYaw: [MCPeerID: Float] = [:]
     /// Most recent estimate per peer. `publishLocAR` computes these; everything
     /// else reuses them rather than walking the particle clouds again.
     private var lastEstimate: [MCPeerID: LocAREngine.Estimate] = [:]
@@ -321,6 +323,8 @@ final class PeerManager: NSObject, ObservableObject {
         let yaw = data.subdata(in: 13..<17).withUnsafeBytes { $0.load(as: Float.self) }
         let isReset = data[data.startIndex + 17] & 1 == 1
         locar.ingestRemoteVIO(peerID: peerID, position: SIMD3<Float>(x, y, z), yaw: yaw, isReset: isReset)
+        lastRemoteYaw[peerID] = yaw
+        updateThetaPrior(for: peerID)
         if peers[peerID] == nil {
             peers[peerID] = Peer(peerID: peerID)
         }
@@ -711,6 +715,7 @@ final class PeerManager: NSObject, ObservableObject {
         pendingRecalibration.remove(peerID)
         pendingInvites[peerID] = nil
         lastInviteReceived[peerID] = nil
+        lastRemoteYaw[peerID] = nil
         let direction = freshDirection(for: peerID, at: now)
         if locar.calibrate(peerID: peerID, range: range, direction: direction) {
             lastCalibration[peerID] = now
@@ -1205,6 +1210,26 @@ final class PeerManager: NSObject, ObservableObject {
         }
     }
 
+    /// Coarse θ from the two compasses, as a seeding prior only.
+    ///
+    /// Each device has a fixed offset between its ARKit yaw and magnetic north:
+    /// `heading - yaw`. θ maps that peer's frame into ours, so it is the
+    /// difference of the two offsets. Both terms come from data already on the
+    /// wire — their heading over 0x48, their ARKit yaw over 0x56.
+    ///
+    /// Indoor magnetometers are far too biased for this to be an observation.
+    /// As a prior it is still worth a lot: it replaces a uniform draw over the
+    /// whole circle with roughly a quadrant, and θ is otherwise only observable
+    /// through translated peer VIO — so a cold cloud can stay uniform for as
+    /// long as nobody happens to walk.
+    private func updateThetaPrior(for peerID: MCPeerID) {
+        guard let theirHeading = peers[peerID]?.heading,
+              let theirYaw = lastRemoteYaw[peerID] else { return }
+        let ourOffset = localHeading - locar.localYaw
+        let theirOffset = theirHeading - theirYaw
+        locar.setThetaPrior(theirOffset - ourOffset, for: peerID)
+    }
+
     /// Whether some peer has recently told us where this one is. Read across
     /// every anchor, since any device that can range the target may be the one
     /// relaying it. The window is generous relative to the 2 Hz broadcast so a
@@ -1228,6 +1253,17 @@ final class PeerManager: NSObject, ObservableObject {
         parts.append(configurations[peerID] != nil ? "run" : "run✗")
         if cameraAssistedPeer == peerID {
             parts.append("cam")
+        }
+        // θ and how tightly the cloud agrees on it. This is the state variable
+        // behind bearing error that grows with range, and nothing else exposes
+        // it: a low confidence here predicts a large miss at distance even when
+        // the range itself is perfect.
+        if let estimate = lastEstimate[peerID] {
+            parts.append(String(
+                format: "θ%.0f/%.2f",
+                estimate.theta * 180 / .pi,
+                estimate.thetaConfidence
+            ))
         }
         if let error = niErrors[peerID] {
             parts.append(error)
@@ -1325,6 +1361,7 @@ final class PeerManager: NSObject, ObservableObject {
             } else {
                 peers[peerID] = Peer(peerID: peerID, heading: heading)
             }
+            updateThetaPrior(for: peerID)
             return
         }
         guard let token = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NIDiscoveryToken.self, from: data) else { return }
