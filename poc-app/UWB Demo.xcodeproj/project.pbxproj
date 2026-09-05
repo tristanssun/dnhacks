@@ -271,13 +271,11 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "UWB Demo/Info.plist";
 				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "UWBDemo uses Bluetooth to discover and connect to nearby devices.";
-				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "UWBDemo uses the compass to show which way nearby phones are facing.";
 				INFOPLIST_KEY_NSBluetoothPeripheralUsageDescription = "UWBDemo uses Bluetooth to discover and connect to nearby devices.";
-				INFOPLIST_KEY_NSBonjourServices = (
-					"_uwbdemo._tcp",
-					"_uwbdemo._udp",
-				);
+				INFOPLIST_KEY_NSBonjourServices = "_uwbdemo._tcp _uwbdemo._udp";
+				INFOPLIST_KEY_NSCameraUsageDescription = "UWBDemo uses the camera for visual-inertial tracking so nearby phones stay located when Ultra Wideband direction drops.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "UWBDemo uses the local network to discover and connect to nearby devices.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "UWBDemo uses the compass to show which way nearby phones are facing.";
 				INFOPLIST_KEY_NSNearbyInteractionUsageDescription = "UWBDemo uses Ultra Wideband to show the relative position of nearby devices.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -314,13 +312,11 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "UWB Demo/Info.plist";
 				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "UWBDemo uses Bluetooth to discover and connect to nearby devices.";
-				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "UWBDemo uses the compass to show which way nearby phones are facing.";
 				INFOPLIST_KEY_NSBluetoothPeripheralUsageDescription = "UWBDemo uses Bluetooth to discover and connect to nearby devices.";
-				INFOPLIST_KEY_NSBonjourServices = (
-					"_uwbdemo._tcp",
-					"_uwbdemo._udp",
-				);
+				INFOPLIST_KEY_NSBonjourServices = "_uwbdemo._tcp _uwbdemo._udp";
+				INFOPLIST_KEY_NSCameraUsageDescription = "UWBDemo uses the camera for visual-inertial tracking so nearby phones stay located when Ultra Wideband direction drops.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "UWBDemo uses the local network to discover and connect to nearby devices.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "UWBDemo uses the compass to show which way nearby phones are facing.";
 				INFOPLIST_KEY_NSNearbyInteractionUsageDescription = "UWBDemo uses Ultra Wideband to show the relative position of nearby devices.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;

@@ -1,4 +1,6 @@
+import ARKit
 import Combine
+import CoreBluetooth
 import CoreLocation
 import MultipeerConnectivity
 import NearbyInteraction
@@ -11,6 +13,12 @@ final class PeerManager: NSObject, ObservableObject {
         var distance: Float?
         var direction: simd_float3?
         var heading: Float?
+        var uwbLatencyMs: Int?
+        var bluetoothDistance: Float?
+        var bluetoothLatencyMs: Int?
+        var locarDistance: Float?
+        var locarDirection: simd_float3?
+        var locarHeading: Float?
 
         var id: MCPeerID { peerID }
         var displayName: String { peerID.displayName }
@@ -37,6 +45,36 @@ final class PeerManager: NSObject, ObservableObject {
     private let locationManager = CLLocationManager()
     private var lastSentHeading: Float?
     private var lastHeadingSend = Date.distantPast
+    private let bleService = CBUUID(string: "55574244-4445-4D4F-8055-574244454D4F")
+    private var bleCentral: CBCentralManager?
+    private var blePeripheral: CBPeripheralManager?
+    private var lastUWBUpdate: [MCPeerID: Date] = [:]
+    private var pingSentAt: [MCPeerID: Date] = [:]
+    private var pingTimer: Timer?
+    private var bleFilters: [MCPeerID: BLEFilter] = [:]
+    private var blePeripherals: [UUID: CBPeripheral] = [:]
+    private var blePeripheralPeer: [UUID: MCPeerID] = [:]
+    private var bleConnected: Set<UUID> = []
+    private let vio = VIOTracker()
+    private let locar = LocAREngine()
+    private var lastVIOSend = Date.distantPast
+    private var lastLocarPublish = Date.distantPast
+    private var useCameraAssistance = true
+    private var lastUWBSample: [MCPeerID: (range: Float, direction: simd_float3?, date: Date)] = [:]
+    private var remoteRange: [MCPeerID: Float] = [:]
+    private var sharedRange: [MCPeerID: Float] = [:]
+
+    private struct BLESample {
+        let rssi: Double
+        let date: Date
+    }
+
+    private struct BLEFilter {
+        var samples: [BLESample] = []
+        var rssi: Double?
+        var variance: Double = 16
+        var meters: Float?
+    }
 
     override init() {
         discoveryID = Self.storedDiscoveryID()
@@ -90,6 +128,254 @@ final class PeerManager: NSObject, ObservableObject {
         browser.startBrowsingForPeers()
         self.browser = browser
         startHeading()
+        startBluetooth()
+        startVIO()
+        pingTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+            self?.sendPings()
+            self?.readConnectedRSSI()
+            self?.shareRanges()
+            self?.calibrateFromUWB()
+        }
+    }
+
+    private func startVIO() {
+        vio.onPose = { [weak self] pose in
+            self?.handleLocalVIO(pose)
+        }
+        vio.start()
+    }
+
+    private func handleLocalVIO(_ pose: VIOTracker.Pose) {
+        locar.setLocal(position: pose.position, yaw: pose.yaw, transform: pose.transform)
+        localHeading = pose.yaw
+        let now = Date()
+        if now.timeIntervalSince(lastVIOSend) >= 0.1 {
+            lastVIOSend = now
+            sendVIO(pose)
+        }
+        if now.timeIntervalSince(lastLocarPublish) >= 0.07 {
+            publishLocAR()
+        }
+    }
+
+    private func sendVIO(_ pose: VIOTracker.Pose) {
+        guard let peers = mcSession?.connectedPeers, !peers.isEmpty else { return }
+        var data = Data([0x56])
+        var x = pose.position.x
+        var y = pose.position.y
+        var z = pose.position.z
+        var yaw = pose.yaw
+        withUnsafeBytes(of: &x) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: &y) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: &z) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: &yaw) { data.append(contentsOf: $0) }
+        try? mcSession?.send(data, toPeers: peers, with: .unreliable)
+    }
+
+    private func handleRemoteVIO(_ data: Data, from peerID: MCPeerID) {
+        let x = data.subdata(in: 1..<5).withUnsafeBytes { $0.load(as: Float.self) }
+        let y = data.subdata(in: 5..<9).withUnsafeBytes { $0.load(as: Float.self) }
+        let z = data.subdata(in: 9..<13).withUnsafeBytes { $0.load(as: Float.self) }
+        let yaw = data.subdata(in: 13..<17).withUnsafeBytes { $0.load(as: Float.self) }
+        locar.ingestRemoteVIO(peerID: peerID, position: SIMD3<Float>(x, y, z), yaw: yaw)
+        if var peer = peers[peerID] {
+            peer.heading = yaw
+            peers[peerID] = peer
+        } else {
+            peers[peerID] = Peer(peerID: peerID, heading: yaw)
+        }
+        publishLocAR()
+    }
+
+    private func publishLocAR() {
+        lastLocarPublish = Date()
+        for id in peers.keys {
+            guard var peer = peers[id], let distance = sharedRange[id] else { continue }
+            let estimate = locar.estimate(for: id)
+            peer.locarDistance = distance
+            peer.locarDirection = estimate?.direction ?? peer.direction
+            peer.locarHeading = estimate?.heading
+            peers[id] = peer
+        }
+    }
+
+    private func isRangeLeader(for peerID: MCPeerID) -> Bool {
+        let remote = knownRemoteIDs[peerID] ?? peerID.displayName
+        return discoveryID < remote
+    }
+
+    private func shareRanges() {
+        for (peerID, sample) in lastUWBSample {
+            sendRawRange(sample.range, to: peerID)
+            publishSharedRangeIfLeader(for: peerID)
+        }
+    }
+
+    private func sendRawRange(_ range: Float, to peerID: MCPeerID) {
+        var data = Data([0x52])
+        var value = range
+        withUnsafeBytes(of: &value) { data.append(contentsOf: $0) }
+        try? mcSession?.send(data, toPeers: [peerID], with: .unreliable)
+    }
+
+    private func sendSharedRange(_ range: Float, to peerID: MCPeerID) {
+        var data = Data([0x53])
+        var value = range
+        withUnsafeBytes(of: &value) { data.append(contentsOf: $0) }
+        try? mcSession?.send(data, toPeers: [peerID], with: .unreliable)
+    }
+
+    private func publishSharedRangeIfLeader(for peerID: MCPeerID) {
+        guard isRangeLeader(for: peerID) else { return }
+        guard let mine = lastUWBSample[peerID]?.range, let theirs = remoteRange[peerID] else { return }
+        applySharedRange((mine + theirs) / 2, for: peerID, broadcast: true)
+    }
+
+    private func applySharedRange(_ range: Float, for peerID: MCPeerID, broadcast: Bool) {
+        sharedRange[peerID] = range
+        locar.ingestUWB(peerID: peerID, range: range)
+        if let sample = lastUWBSample[peerID] {
+            locar.calibrateIfDue(peerID: peerID, range: range, direction: sample.direction)
+        }
+        if broadcast {
+            sendSharedRange(range, to: peerID)
+        }
+        publishLocAR()
+    }
+
+    private func calibrateFromUWB() {
+        let now = Date()
+        var didCalibrate = false
+        for (peerID, sample) in lastUWBSample {
+            guard now.timeIntervalSince(sample.date) < 0.8, let range = sharedRange[peerID] else { continue }
+            if locar.calibrateIfDue(peerID: peerID, range: range, direction: sample.direction) {
+                didCalibrate = true
+            }
+        }
+        if didCalibrate {
+            publishLocAR()
+        }
+    }
+
+    private func startBluetooth() {
+        bleCentral = CBCentralManager(delegate: self, queue: .main)
+        blePeripheral = CBPeripheralManager(delegate: self, queue: .main)
+    }
+
+    private func sendPings() {
+        guard let session = mcSession, !session.connectedPeers.isEmpty else { return }
+        let now = Date()
+        var payload = Data([0x50])
+        var stamp = now.timeIntervalSince1970
+        withUnsafeBytes(of: &stamp) { payload.append(contentsOf: $0) }
+        for peer in session.connectedPeers {
+            pingSentAt[peer] = now
+        }
+        try? session.send(payload, toPeers: session.connectedPeers, with: .unreliable)
+    }
+
+    private func readConnectedRSSI() {
+        for peripheral in blePeripherals.values where peripheral.state == .connected {
+            peripheral.readRSSI()
+        }
+    }
+
+    private func rememberBLEPeripheral(_ peripheral: CBPeripheral, peerID: MCPeerID) {
+        blePeripherals[peripheral.identifier] = peripheral
+        blePeripheralPeer[peripheral.identifier] = peerID
+        if peripheral.state == .disconnected || peripheral.state == .disconnecting {
+            bleCentral?.connect(peripheral)
+        }
+    }
+
+    private func forgetBluetooth(for peerID: MCPeerID) {
+        bleFilters[peerID] = nil
+        let ids = blePeripheralPeer.filter { $0.value == peerID }.map(\.key)
+        for id in ids {
+            if let peripheral = blePeripherals[id] {
+                bleCentral?.cancelPeripheralConnection(peripheral)
+            }
+            blePeripherals[id] = nil
+            blePeripheralPeer[id] = nil
+            bleConnected.remove(id)
+        }
+    }
+
+    private func applyBluetoothRSSI(_ rssi: Int, to peerID: MCPeerID) {
+        guard (-95..<0).contains(rssi) else { return }
+
+        let now = Date()
+        var filter = bleFilters[peerID] ?? BLEFilter()
+        filter.samples.append(BLESample(rssi: Double(rssi), date: now))
+        filter.samples.removeAll { now.timeIntervalSince($0.date) > 3 }
+        if filter.samples.count > 28 {
+            filter.samples.removeFirst(filter.samples.count - 28)
+        }
+
+        guard filter.samples.count >= 4 else {
+            let instant = Self.meters(fromRSSI: Double(rssi))
+            filter.meters = instant
+            bleFilters[peerID] = filter
+            publishBluetoothDistance(instant, to: peerID)
+            return
+        }
+
+        let measurement = Self.trimmedMean(filter.samples.map(\.rssi))
+        if let estimate = filter.rssi {
+            let process = 0.18
+            var uncertainty = filter.variance + process
+            let noise = abs(measurement - estimate) > 7 ? 48.0 : 14.0
+            let gain = uncertainty / (uncertainty + noise)
+            filter.rssi = estimate + gain * (measurement - estimate)
+            filter.variance = (1 - gain) * uncertainty
+        } else {
+            filter.rssi = measurement
+            filter.variance = 8
+        }
+
+        let raw = Self.meters(fromRSSI: filter.rssi ?? measurement)
+        if let previous = filter.meters {
+            let alpha: Float = abs(raw - previous) > 2 ? 0.05 : 0.1
+            filter.meters = previous + alpha * (raw - previous)
+        } else {
+            filter.meters = raw
+        }
+        bleFilters[peerID] = filter
+        publishBluetoothDistance(filter.meters ?? raw, to: peerID)
+    }
+
+    private func publishBluetoothDistance(_ meters: Float, to peerID: MCPeerID) {
+        if var peer = peers[peerID] {
+            peer.bluetoothDistance = meters
+            peers[peerID] = peer
+        } else {
+            peers[peerID] = Peer(peerID: peerID, bluetoothDistance: meters)
+        }
+    }
+
+    private static func meters(fromRSSI rssi: Double) -> Float {
+        Float(min(max(pow(10, (-59 - rssi) / 22), 0.4), 25))
+    }
+
+    private static func trimmedMean(_ values: [Double]) -> Double {
+        let sorted = values.sorted()
+        guard sorted.count >= 5 else { return sorted[sorted.count / 2] }
+        let drop = max(sorted.count / 5, 1)
+        let kept = sorted.dropFirst(drop).dropLast(drop)
+        return kept.reduce(0, +) / Double(kept.count)
+    }
+
+    private func peerID(forAdvertisedName name: String?) -> MCPeerID? {
+        if let name {
+            if let match = knownRemoteIDs.first(where: { $0.value.hasPrefix(name) || name.hasPrefix($0.value.prefix(8)) }) {
+                return match.key
+            }
+        }
+        let connected = mcSession?.connectedPeers ?? []
+        if connected.count == 1 {
+            return connected[0]
+        }
+        return establishedPeers.count == 1 ? establishedPeers.first : nil
     }
 
     private func startHeading() {
@@ -185,6 +471,9 @@ final class PeerManager: NSObject, ObservableObject {
             }
             sendDiscoveryToken(to: peerID, force: true)
             sendHeading(localHeading)
+            if let pose = vio.pose {
+                sendVIO(pose)
+            }
         case .notConnected:
             guard !isTearingDown else { return }
             if establishedPeers.contains(peerID) {
@@ -221,6 +510,39 @@ final class PeerManager: NSObject, ObservableObject {
     }
 
     private func handleData(_ data: Data, from peerID: MCPeerID) {
+        if data.count == 9, data.first == 0x50 {
+            var reply = Data([0x51])
+            reply.append(data.subdata(in: 1..<9))
+            try? mcSession?.send(reply, toPeers: [peerID], with: .unreliable)
+            return
+        }
+        if data.count == 9, data.first == 0x51 {
+            if let sent = pingSentAt[peerID] {
+                let ms = max(Int(Date().timeIntervalSince(sent) * 1000), 0)
+                if var peer = peers[peerID] {
+                    peer.bluetoothLatencyMs = ms
+                    peers[peerID] = peer
+                }
+            }
+            return
+        }
+        if data.count == 5, data.first == 0x52 {
+            remoteRange[peerID] = data.subdata(in: 1..<5).withUnsafeBytes { $0.load(as: Float.self) }
+            publishSharedRangeIfLeader(for: peerID)
+            return
+        }
+        if data.count == 5, data.first == 0x53 {
+            applySharedRange(
+                data.subdata(in: 1..<5).withUnsafeBytes { $0.load(as: Float.self) },
+                for: peerID,
+                broadcast: false
+            )
+            return
+        }
+        if data.count == 17, data.first == 0x56 {
+            handleRemoteVIO(data, from: peerID)
+            return
+        }
         if data.count == 5, data.first == 0x48 {
             let heading = data.subdata(in: 1..<5).withUnsafeBytes { $0.load(as: Float.self) }
             if var peer = peers[peerID] {
@@ -234,6 +556,7 @@ final class PeerManager: NSObject, ObservableObject {
         guard let token = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NIDiscoveryToken.self, from: data) else { return }
         let session = niSession(for: peerID)
         let configuration = NINearbyPeerConfiguration(peerToken: token)
+        configuration.isCameraAssistanceEnabled = useCameraAssistance
         configurations[peerID] = configuration
         session.run(configuration)
         sendDiscoveryToken(to: peerID)
@@ -245,6 +568,9 @@ final class PeerManager: NSObject, ObservableObject {
         }
         let session = NISession()
         session.delegate = self
+        if useCameraAssistance {
+            session.setARSession(vio.session)
+        }
         niSessions[peerID] = session
         if peers[peerID] == nil {
             peers[peerID] = Peer(peerID: peerID)
@@ -258,6 +584,13 @@ final class PeerManager: NSObject, ObservableObject {
         session?.delegate = nil
         configurations[peerID] = nil
         sentTokenTo.remove(peerID)
+        lastUWBUpdate[peerID] = nil
+        lastUWBSample[peerID] = nil
+        remoteRange[peerID] = nil
+        sharedRange[peerID] = nil
+        pingSentAt[peerID] = nil
+        forgetBluetooth(for: peerID)
+        locar.forget(peerID)
         peers[peerID] = nil
         isTearingDown = false
     }
@@ -274,7 +607,17 @@ final class PeerManager: NSObject, ObservableObject {
         if let direction {
             peer.direction = direction
         }
+        let now = Date()
+        if let last = lastUWBUpdate[peerID] {
+            peer.uwbLatencyMs = max(Int(now.timeIntervalSince(last) * 1000), 0)
+        }
+        lastUWBUpdate[peerID] = now
         peers[peerID] = peer
+        if let distance {
+            lastUWBSample[peerID] = (distance, peer.direction, now)
+            sendRawRange(distance, to: peerID)
+            publishSharedRangeIfLeader(for: peerID)
+        }
     }
 
     private func handleRemove(sessionID: ObjectIdentifier) {
@@ -300,8 +643,11 @@ final class PeerManager: NSObject, ObservableObject {
         }
     }
 
-    private func handleInvalidation(sessionID: ObjectIdentifier) {
+    private func handleInvalidation(sessionID: ObjectIdentifier, error: Error) {
         guard !isTearingDown else { return }
+        if let error = error as? NIError, error.code == .invalidARConfiguration {
+            useCameraAssistance = false
+        }
         guard let peerID = peerID(for: sessionID) else { return }
         niSessions[peerID] = nil
         configurations[peerID] = nil
@@ -394,6 +740,79 @@ extension PeerManager: CLLocationManagerDelegate {
     nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {}
 }
 
+extension PeerManager: CBCentralManagerDelegate, CBPeripheralManagerDelegate, CBPeripheralDelegate {
+    nonisolated func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        Task { @MainActor in
+            guard central.state == .poweredOn else { return }
+            central.scanForPeripherals(
+                withServices: [self.bleService],
+                options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]
+            )
+        }
+    }
+
+    nonisolated func centralManager(
+        _ central: CBCentralManager,
+        didDiscover peripheral: CBPeripheral,
+        advertisementData: [String: Any],
+        rssi RSSI: NSNumber
+    ) {
+        let name = advertisementData[CBAdvertisementDataLocalNameKey] as? String
+        let rssi = RSSI.intValue
+        let id = peripheral.identifier
+        Task { @MainActor in
+            let peerID = self.blePeripheralPeer[id] ?? self.peerID(forAdvertisedName: name)
+            guard let peerID else { return }
+            self.rememberBLEPeripheral(peripheral, peerID: peerID)
+            if !self.bleConnected.contains(id) {
+                self.applyBluetoothRSSI(rssi, to: peerID)
+            }
+        }
+    }
+
+    nonisolated func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        let id = peripheral.identifier
+        Task { @MainActor in
+            peripheral.delegate = self
+            self.bleConnected.insert(id)
+            peripheral.readRSSI()
+        }
+    }
+
+    nonisolated func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
+        Task { @MainActor in
+            self.bleConnected.remove(peripheral.identifier)
+            central.connect(peripheral)
+        }
+    }
+
+    nonisolated func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+        Task { @MainActor in
+            self.bleConnected.remove(peripheral.identifier)
+            central.connect(peripheral)
+        }
+    }
+
+    nonisolated func peripheral(_ peripheral: CBPeripheral, didReadRSSI RSSI: NSNumber, error: Error?) {
+        let id = peripheral.identifier
+        let rssi = RSSI.intValue
+        Task { @MainActor in
+            guard error == nil, let peerID = self.blePeripheralPeer[id] else { return }
+            self.applyBluetoothRSSI(rssi, to: peerID)
+        }
+    }
+
+    nonisolated func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
+        Task { @MainActor in
+            guard peripheral.state == .poweredOn else { return }
+            peripheral.startAdvertising([
+                CBAdvertisementDataServiceUUIDsKey: [self.bleService],
+                CBAdvertisementDataLocalNameKey: String(self.discoveryID.prefix(8))
+            ])
+        }
+    }
+}
+
 extension PeerManager: NISessionDelegate {
     nonisolated func session(_ session: NISession, didUpdate nearbyObjects: [NINearbyObject]) {
         let sessionID = ObjectIdentifier(session)
@@ -423,7 +842,7 @@ extension PeerManager: NISessionDelegate {
     nonisolated func session(_ session: NISession, didInvalidateWith error: Error) {
         let sessionID = ObjectIdentifier(session)
         Task { @MainActor in
-            self.handleInvalidation(sessionID: sessionID)
+            self.handleInvalidation(sessionID: sessionID, error: error)
         }
     }
 }

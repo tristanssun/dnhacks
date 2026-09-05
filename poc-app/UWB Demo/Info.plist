@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>NSCameraUsageDescription</key>
+	<string>UWBDemo uses the camera for visual-inertial tracking so nearby phones stay located when Ultra Wideband direction drops.</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>UWBDemo uses Bluetooth to discover and connect to nearby devices.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
