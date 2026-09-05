@@ -16,14 +16,30 @@ final class PeerManager: NSObject, ObservableObject {
         var uwbLatencyMs: Int?
         var bluetoothDistance: Float?
         var bluetoothLatencyMs: Int?
-        var locarDistance: Float?
+        /// Tracked UWB range. The view extrapolates it to render time.
+        var range: RangeTrack?
+        /// LocAR filter range, used when UWB has dropped out.
+        var estimatedDistance: Float?
         var locarDirection: simd_float3?
         var locarHeading: Float?
-        /// True when `locarDistance` is a fresh UWB range, false when it is the
-        /// VIO-propagated estimate or a stale value.
-        var isLive = false
+        /// Why Nearby Interaction can't give a bearing yet, e.g. "sweep left/right".
+        var hint: String?
 
         var id: MCPeerID { peerID }
+
+        /// Distance to draw at `date` and whether it is backed by live UWB.
+        func displayDistance(at date: Date) -> (meters: Float, isLive: Bool)? {
+            if let range, !range.isStale(at: date) {
+                return (range.value(at: date), range.isLive(at: date))
+            }
+            if let estimatedDistance {
+                return (estimatedDistance, false)
+            }
+            if let bluetoothDistance {
+                return (bluetoothDistance, false)
+            }
+            return nil
+        }
         var displayName: String { peerID.displayName }
     }
 
@@ -72,12 +88,22 @@ final class PeerManager: NSObject, ObservableObject {
 
     private var localRange: [MCPeerID: RangeSample] = [:]
     private var remoteRange: [MCPeerID: RangeSample] = [:]
+    private var tracks: [MCPeerID: RangeTrack] = [:]
+    private var bearingConfidence: [MCPeerID: Float] = [:]
+    /// Filter expected range at the last tracker nudge, per peer.
+    private var rangeBaseline: [MCPeerID: Float] = [:]
+    private var vioFrame = 0
     private var lastNIDirection: [MCPeerID: (direction: simd_float3, date: Date)] = [:]
+    /// Latest body azimuth to each peer (0 forward, positive right), radians.
+    private var lastBearing: [MCPeerID: (angle: Float, date: Date)] = [:]
+    /// Newest peer-to-peer range sample already fed to the filter, keyed "a|b".
+    private var peerRangeDates: [String: Date] = [:]
     private var lastCalibration: [MCPeerID: Date] = [:]
     private let freshWindow: TimeInterval = 0.75
     private let directionWindow: TimeInterval = 0.5
-    private let staleWindow: TimeInterval = 5
     private let calibrationInterval: TimeInterval = 2
+    /// Bearing confidence needed before VIO motion is allowed to dead-reckon range.
+    private let deadReckonConfidence: Float = 0.7
 
     private struct BLESample {
         let rssi: Double
@@ -166,9 +192,12 @@ final class PeerManager: NSObject, ObservableObject {
         if pose.didResume {
             pendingVIOReset = true
         }
-        locar.setLocal(pose)
-        localHeading = pose.yaw
         let now = Date()
+        locar.setLocal(pose)
+        vioFrame += 1
+        if vioFrame % 3 == 0 {
+            deadReckon(at: now)
+        }
         if now.timeIntervalSince(lastVIOSend) >= 0.1 {
             lastVIOSend = now
             sendVIO(pose)
@@ -204,10 +233,48 @@ final class PeerManager: NSObject, ObservableObject {
         let yaw = data.subdata(in: 13..<17).withUnsafeBytes { $0.load(as: Float.self) }
         let isReset = data[data.startIndex + 17] & 1 == 1
         locar.ingestRemoteVIO(peerID: peerID, position: SIMD3<Float>(x, y, z), yaw: yaw, isReset: isReset)
+        deadReckon(at: Date())
         if peers[peerID] == nil {
             peers[peerID] = Peer(peerID: peerID)
         }
         publishLocAR()
+    }
+
+    /// Feeds the range change the filter accumulated since the last baseline
+    /// into each tracker, only when that peer's bearing is resolved (with an
+    /// ambiguous ring the expected range barely moves anyway). Baselines are
+    /// re-taken after every measurement so weight updates aren't counted as motion.
+    private func deadReckon(at now: Date) {
+        for id in tracks.keys {
+            guard let new = locar.expectedRange(id) else { continue }
+            if let base = rangeBaseline[id], (bearingConfidence[id] ?? 0) > deadReckonConfidence {
+                tracks[id]?.nudge(new - base, at: now)
+            }
+            rangeBaseline[id] = new
+        }
+    }
+
+    private func resetBaselines() {
+        for id in tracks.keys {
+            rangeBaseline[id] = locar.expectedRange(id)
+        }
+    }
+
+    // MARK: Peer identity
+
+    private var discoveryUUID: UUID? { UUID(uuidString: discoveryID) }
+
+    /// 0x49 | discoveryID (UTF-8). Sent on connect so both sides know the
+    /// other's stable ID regardless of who browsed and who advertised.
+    private func sendHello(to peerID: MCPeerID) {
+        var data = Data([0x49])
+        data.append(contentsOf: Array(discoveryID.utf8))
+        try? mcSession?.send(data, toPeers: [peerID], with: .reliable)
+    }
+
+    private func peer(forRemoteUUID uuid: UUID) -> MCPeerID? {
+        let text = uuid.uuidString
+        return knownRemoteIDs.first { $0.value.caseInsensitiveCompare(text) == .orderedSame }?.key
     }
 
     // MARK: Range fusion
@@ -254,6 +321,72 @@ final class PeerManager: NSObject, ObservableObject {
         for (peerID, sample) in localRange where now.timeIntervalSince(sample.date) < freshWindow {
             sendRawRange(sample, to: peerID)
         }
+        broadcastRangeList(at: now)
+    }
+
+    /// 0x54 | count (UInt8) | entries of: peer UUID (16 bytes) | range (Float32) | age ms (UInt16).
+    /// Every phone hears every pair's range, which is what lets A↔B and B↔C
+    /// constrain A↔C and lets a blocked pair be placed through a third phone.
+    private func broadcastRangeList(at now: Date) {
+        guard let session = mcSession, session.connectedPeers.count > 1 else { return }
+        var entries = Data()
+        var count: UInt8 = 0
+        for (peerID, sample) in localRange where now.timeIntervalSince(sample.date) < freshWindow {
+            guard let remoteID = knownRemoteIDs[peerID], let uuid = UUID(uuidString: remoteID) else { continue }
+            withUnsafeBytes(of: uuid.uuid) { entries.append(contentsOf: $0) }
+            var range = sample.range
+            var age = UInt16(clamping: Int(now.timeIntervalSince(sample.date) * 1000))
+            withUnsafeBytes(of: &range) { entries.append(contentsOf: $0) }
+            withUnsafeBytes(of: &age) { entries.append(contentsOf: $0) }
+            count += 1
+            if count == 255 { break }
+        }
+        guard count > 0 else { return }
+        var data = Data([0x54, count])
+        data.append(entries)
+        try? session.send(data, toPeers: session.connectedPeers, with: .unreliable)
+    }
+
+    private func handleRangeList(_ data: Data, from sender: MCPeerID) {
+        let bytes = [UInt8](data)
+        guard bytes.count >= 2 else { return }
+        let count = Int(bytes[1])
+        let entrySize = 22
+        guard bytes.count == 2 + count * entrySize else { return }
+        let now = Date()
+        let mine = discoveryUUID
+        var changed = false
+        for index in 0..<count {
+            let base = 2 + index * entrySize
+            let uuid = bytes[base..<(base + 16)].withUnsafeBytes { UUID(uuid: $0.load(as: uuid_t.self)) }
+            let range = bytes[(base + 16)..<(base + 20)].withUnsafeBytes { $0.loadUnaligned(as: Float.self) }
+            let ageMs = bytes[(base + 20)..<(base + 22)].withUnsafeBytes { $0.loadUnaligned(as: UInt16.self) }
+            guard range.isFinite, range > 0 else { continue }
+            let date = now.addingTimeInterval(-Double(ageMs) / 1000)
+
+            if let mine, uuid == mine {
+                // The sender's measurement of the sender↔me range.
+                if let existing = remoteRange[sender], existing.date >= date { continue }
+                remoteRange[sender] = RangeSample(range: range, date: date)
+                track(sender, measurement: range, sigma: RangeTrack.remoteSigma, at: date)
+                if let fused = fusedRange(for: sender, at: now) {
+                    locar.ingestUWB(peerID: sender, range: fused)
+                }
+                changed = true
+                continue
+            }
+
+            guard let other = peer(forRemoteUUID: uuid), other != sender else { continue }
+            let key = [sender.displayName, other.displayName].sorted().joined(separator: "|")
+            if let last = peerRangeDates[key], last >= date { continue }
+            peerRangeDates[key] = date
+            locar.ingestPeerRange(sender, other, range: range)
+            changed = true
+        }
+        if changed {
+            resetBaselines()
+            publishLocAR()
+        }
     }
 
     private func handleRemoteRange(_ data: Data, from peerID: MCPeerID) {
@@ -265,7 +398,17 @@ final class PeerManager: NSObject, ObservableObject {
             return
         }
         remoteRange[peerID] = RangeSample(range: range, date: date)
+        track(peerID, measurement: range, sigma: RangeTrack.remoteSigma, at: date)
         fuse(peerID)
+    }
+
+    private func track(_ peerID: MCPeerID, measurement: Float, sigma: Float, at date: Date) {
+        if var track = tracks[peerID] {
+            track.update(measurement, sigma: sigma, at: date)
+            tracks[peerID] = track
+        } else {
+            tracks[peerID] = RangeTrack(range: measurement, at: date)
+        }
     }
 
     private func fuse(_ peerID: MCPeerID) {
@@ -274,7 +417,63 @@ final class PeerManager: NSObject, ObservableObject {
             locar.ingestUWB(peerID: peerID, range: range)
             calibrateIfDue(peerID, range: range, at: now)
         }
+        resetBaselines()
         publishLocAR()
+    }
+
+    private func freshBearing(for peerID: MCPeerID, at now: Date) -> Float? {
+        guard let sample = lastBearing[peerID], now.timeIntervalSince(sample.date) < directionWindow else {
+            return nil
+        }
+        return sample.angle
+    }
+
+    /// Body azimuth from this NI update. Camera-assisted `horizontalAngle` when
+    /// present (positive = right, matching `asin(direction.x)`), otherwise the
+    /// 3D direction projected through ARKit, otherwise the raw device-frame vector.
+    private func bodyAngle(horizontalAngle: Float?, direction: simd_float3?) -> Float? {
+        if let horizontalAngle, horizontalAngle.isFinite {
+            return horizontalAngle
+        }
+        guard let direction else { return nil }
+        if let angle = locar.bodyAngle(fromNI: direction) {
+            return angle
+        }
+        // No ARKit pose: assume the phone is flat (forward = +Y) or upright (forward = -Z).
+        if hypot(direction.x, direction.y) > 0.2 {
+            return atan2(direction.x, direction.y)
+        }
+        return atan2(direction.x, -direction.z)
+    }
+
+    private static func hint(for convergence: NIAlgorithmConvergence) -> String? {
+        switch convergence.status {
+        case .converged:
+            return nil
+        case .notConverged(let reasons):
+            guard let reason = reasons.first else { return "Move a little" }
+            switch reason {
+            case .insufficientHorizontalSweep:
+                return "Sweep phone left/right"
+            case .insufficientVerticalSweep:
+                return "Tilt phone up/down"
+            case .insufficientMovement:
+                return "Move a little"
+            case .insufficientLighting:
+                return "Needs more light"
+            default:
+                return reason.localizedDescription
+            }
+        @unknown default:
+            return nil
+        }
+    }
+
+    private func handleConvergence(sessionID: ObjectIdentifier, hint: String?) {
+        guard let peerID = peerID(for: sessionID), var peer = peers[peerID] else { return }
+        guard peer.hint != hint else { return }
+        peer.hint = hint
+        peers[peerID] = peer
     }
 
     private func calibrateIfDue(_ peerID: MCPeerID, range: Float, at now: Date) {
@@ -304,29 +503,15 @@ final class PeerManager: NSObject, ObservableObject {
         for id in peers.keys {
             guard var peer = peers[id] else { continue }
             let estimate = locar.estimate(for: id)
+            bearingConfidence[id] = estimate?.bearingConfidence ?? 0
 
-            if let fused = fusedRange(for: id, at: now) {
-                peer.locarDistance = fused
-                peer.isLive = true
-            } else if let estimate {
-                peer.locarDistance = estimate.distance
-                peer.isLive = false
-            } else if let last = localRange[id], now.timeIntervalSince(last.date) < staleWindow {
-                peer.locarDistance = last.range
-                peer.isLive = false
-            } else {
-                peer.locarDistance = nil
-                peer.isLive = false
-            }
+            peer.range = tracks[id]
+            peer.estimatedDistance = estimate?.distance
 
-            let niDirection = freshDirection(for: id, at: now)
             if let estimate, estimate.bearingConfidence > 0.6 {
                 peer.locarDirection = estimate.direction
-            } else if let niDirection, let body = locar.bodyDirection(fromNI: niDirection) {
-                peer.locarDirection = body
-            } else if let niDirection, !locar.hasLocal, hypot(niDirection.x, niDirection.y) > 0.2 {
-                let planar = hypot(niDirection.x, niDirection.y)
-                peer.locarDirection = simd_float3(niDirection.x / planar, niDirection.y / planar, 0)
+            } else if let angle = freshBearing(for: id, at: now) {
+                peer.locarDirection = simd_float3(sin(angle), cos(angle), 0)
             } else {
                 peer.locarDirection = nil
             }
@@ -547,6 +732,7 @@ final class PeerManager: NSObject, ObservableObject {
             if peers[peerID] == nil {
                 peers[peerID] = Peer(peerID: peerID)
             }
+            sendHello(to: peerID)
             sendDiscoveryToken(to: peerID, force: true)
             sendHeading(localHeading)
             if let pose = vio.pose, pose.isReliable {
@@ -609,6 +795,16 @@ final class PeerManager: NSObject, ObservableObject {
             handleRemoteRange(data, from: peerID)
             return
         }
+        if data.count >= 2, data.first == 0x54 {
+            handleRangeList(data, from: peerID)
+            return
+        }
+        if data.count > 1, data.first == 0x49 {
+            if let id = String(data: data.dropFirst(), encoding: .utf8), UUID(uuidString: id) != nil {
+                remember(peerID, remoteID: id)
+            }
+            return
+        }
         if data.count == 18, data.first == 0x56 {
             handleRemoteVIO(data, from: peerID)
             return
@@ -657,7 +853,12 @@ final class PeerManager: NSObject, ObservableObject {
         lastUWBUpdate[peerID] = nil
         localRange[peerID] = nil
         remoteRange[peerID] = nil
+        tracks[peerID] = nil
+        bearingConfidence[peerID] = nil
+        rangeBaseline[peerID] = nil
         lastNIDirection[peerID] = nil
+        lastBearing[peerID] = nil
+        peerRangeDates = peerRangeDates.filter { !$0.key.split(separator: "|").contains(Substring(peerID.displayName)) }
         lastCalibration[peerID] = nil
         pingSentAt[peerID] = nil
         forgetBluetooth(for: peerID)
@@ -670,7 +871,7 @@ final class PeerManager: NSObject, ObservableObject {
         niSessions.first(where: { ObjectIdentifier($0.value) == sessionID })?.key
     }
 
-    private func handleUpdate(sessionID: ObjectIdentifier, distance: Float?, direction: simd_float3?) {
+    private func handleUpdate(sessionID: ObjectIdentifier, distance: Float?, direction: simd_float3?, horizontalAngle: Float?) {
         guard let peerID = peerID(for: sessionID), var peer = peers[peerID] else { return }
         if let distance {
             peer.distance = distance
@@ -687,11 +888,21 @@ final class PeerManager: NSObject, ObservableObject {
         if let direction {
             lastNIDirection[peerID] = (direction, now)
         }
+        var changed = false
+        if let angle = bodyAngle(horizontalAngle: horizontalAngle, direction: direction) {
+            lastBearing[peerID] = (angle, now)
+            locar.ingestBearing(peerID: peerID, bodyAngle: angle)
+            changed = true
+        }
         if let distance, distance.isFinite, distance > 0 {
             let sample = RangeSample(range: distance, date: now)
             localRange[peerID] = sample
+            track(peerID, measurement: distance, sigma: RangeTrack.localSigma, at: now)
             sendRawRange(sample, to: peerID)
             fuse(peerID)
+        } else if changed {
+            resetBaselines()
+            publishLocAR()
         }
     }
 
@@ -759,6 +970,10 @@ extension PeerManager: MCSessionDelegate {
 
 extension PeerManager: MCNearbyServiceAdvertiserDelegate {
     nonisolated func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didReceiveInvitationFromPeer peerID: MCPeerID, withContext context: Data?, invitationHandler: @escaping (Bool, MCSession?) -> Void) {
+        let remoteID = context.flatMap { String(data: $0, encoding: .utf8) }
+        Task { @MainActor in
+            self.remember(peerID, remoteID: remoteID)
+        }
         if invitationSession?.connectedPeers.contains(peerID) == true {
             invitationHandler(false, nil)
             return
@@ -893,8 +1108,17 @@ extension PeerManager: NISessionDelegate {
         let sessionID = ObjectIdentifier(session)
         let distance = nearbyObjects.first?.distance
         let direction = nearbyObjects.first?.direction
+        let horizontalAngle = nearbyObjects.first?.horizontalAngle
         Task { @MainActor in
-            self.handleUpdate(sessionID: sessionID, distance: distance, direction: direction)
+            self.handleUpdate(sessionID: sessionID, distance: distance, direction: direction, horizontalAngle: horizontalAngle)
+        }
+    }
+
+    nonisolated func session(_ session: NISession, didUpdateAlgorithmConvergence convergence: NIAlgorithmConvergence, for object: NINearbyObject?) {
+        let sessionID = ObjectIdentifier(session)
+        let hint = Self.hint(for: convergence)
+        Task { @MainActor in
+            self.handleConvergence(sessionID: sessionID, hint: hint)
         }
     }
 

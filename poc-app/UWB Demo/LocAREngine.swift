@@ -43,8 +43,12 @@ final class LocAREngine {
     private let sigmaXYZ: Float = 0.015
     private let sigmaTheta: Float = 0.008
     private let sigmaRange: Float = 0.18
+    /// Camera-assisted `horizontalAngle` accuracy once converged, radians.
+    private let sigmaBearing: Float = 0.12
     private let nlosProbability: Float = 0.2
     private let jumpLimit: Float = 2.5
+    /// Anchor samples drawn per hypothesis when applying a peer-to-peer range.
+    private static let anchorSamples = 16
 
     private var hypotheses: [Hypothesis]
     private var lastLocalPosition: SIMD3<Float>?
@@ -174,6 +178,105 @@ final class LocAREngine {
         }
     }
 
+    /// Azimuth to the peer in the body frame (0 = forward, positive = right),
+    /// from camera-assisted `horizontalAngle` or a projected NI direction.
+    /// Same uniform-plus-P_nlos form as the range model, applied to bearing.
+    func ingestBearing(peerID: MCPeerID, bodyAngle: Float) {
+        guard hasLocal, hasTargets(peerID), bodyAngle.isFinite else { return }
+        let world = worldBearing(bodyAngle: bodyAngle)
+        let worldAngle = atan2(world.x, world.y)
+        let limit = 3 * sigmaBearing
+        let inlierProbability = 1 - nlosProbability
+
+        for i in hypotheses.indices {
+            let display = SIMD3<Float>(hypotheses[i].x, hypotheses[i].y, hypotheses[i].z)
+            guard var particles = hypotheses[i].targets[peerID] else { continue }
+            var likelihood: Float = 0
+            var inliers: Float = 0
+            var rangeSum: Float = 0
+            for k in particles.indices {
+                let relative = SIMD3<Float>(particles[k].x, particles[k].y, particles[k].z) - display
+                let planar = hypot(relative.x, relative.z)
+                rangeSum += simd_length(relative) * particles[k].weight
+                let inside: Bool
+                if planar < 0.1 {
+                    inside = false
+                } else {
+                    let error = Self.wrap(atan2(relative.x, relative.z) - worldAngle)
+                    inside = abs(error) <= limit
+                }
+                let probability = inside ? inlierProbability : nlosProbability
+                if inside {
+                    inliers += particles[k].weight
+                }
+                likelihood += particles[k].weight * probability
+                particles[k].weight *= probability
+            }
+            normalize(&particles)
+            if inliers < 0.15 {
+                injectRay(into: &particles, origin: display, bearing: world, range: max(rangeSum, 0.3), fraction: 0.3)
+            } else if effectiveCount(particles) < Float(Self.targetCount) * 0.5 {
+                resample(&particles)
+            }
+            hypotheses[i].targets[peerID] = particles
+            hypotheses[i].weight *= max(likelihood, 1e-8)
+        }
+
+        normalizeDisplay()
+        if effectiveDisplayCount() < Float(Self.displayCount) * 0.5 {
+            resampleDisplay()
+        }
+    }
+
+    /// Range between two other peers, z_ab, shared over the network. Each side
+    /// is weighted against samples drawn from the other side's cloud, so two
+    /// unresolved rings still learn the angle between them (triangle rigidity),
+    /// and a peer we can't range ourselves is placed relative to one we can.
+    func ingestPeerRange(_ a: MCPeerID, _ b: MCPeerID, range: Float) {
+        guard hasLocal, a != b, range > 0.05, range < 80 else { return }
+        guard hasTargets(a) || hasTargets(b) else { return }
+        constrain(a, by: b, range: range)
+        constrain(b, by: a, range: range)
+    }
+
+    private func constrain(_ target: MCPeerID, by anchor: MCPeerID, range: Float) {
+        let limit = 3 * sigmaRange
+        let inlierProbability = 1 - nlosProbability
+        for i in hypotheses.indices {
+            guard let anchorCloud = hypotheses[i].targets[anchor] else { continue }
+            let anchors = sample(anchorCloud, count: Self.anchorSamples)
+            guard !anchors.isEmpty else { continue }
+            guard var particles = hypotheses[i].targets[target] else {
+                // First sight of this peer via a third party: seed around the anchor.
+                let origin = anchors[Int.random(in: 0..<anchors.count)]
+                hypotheses[i].targets[target] = seedSphere(origin: origin, range: range)
+                continue
+            }
+            var inliers: Float = 0
+            for k in particles.indices {
+                let point = SIMD3<Float>(particles[k].x, particles[k].y, particles[k].z)
+                var hits = 0
+                for anchorPoint in anchors where abs(simd_length(point - anchorPoint) - range) <= limit {
+                    hits += 1
+                }
+                let fraction = Float(hits) / Float(anchors.count)
+                let probability = nlosProbability + (inlierProbability - nlosProbability) * fraction
+                if hits > 0 {
+                    inliers += particles[k].weight
+                }
+                particles[k].weight *= probability
+            }
+            normalize(&particles)
+            if inliers < 0.15 {
+                let origin = anchors[Int.random(in: 0..<anchors.count)]
+                injectSphere(into: &particles, origin: origin, range: range, fraction: 0.3)
+            } else if effectiveCount(particles) < Float(Self.targetCount) * 0.5 {
+                resample(&particles)
+            }
+            hypotheses[i].targets[target] = particles
+        }
+    }
+
     /// Recurring UWB lock-in. With a fresh Nearby Interaction direction the peer
     /// cloud is collapsed onto that 3D fix. Without direction, the cloud is only
     /// pulled onto the range sphere if it disagrees with the range by > 0.5 m.
@@ -274,6 +377,12 @@ final class LocAREngine {
         )
     }
 
+    /// Body azimuth (0 = forward, positive = right) for an NI direction vector.
+    func bodyAngle(fromNI direction: simd_float3) -> Float? {
+        guard let body = bodyDirection(fromNI: direction) else { return nil }
+        return atan2(body.x, body.y)
+    }
+
     /// Nearby Interaction direction (device frame) converted to the radar's body
     /// frame: x right, y forward, projected onto the horizontal plane.
     func bodyDirection(fromNI direction: simd_float3) -> simd_float3? {
@@ -339,6 +448,60 @@ final class LocAREngine {
         }
     }
 
+    /// World horizontal unit vector (x, z) for a body azimuth, using the display yaw.
+    private func worldBearing(bodyAngle: Float) -> SIMD2<Float> {
+        let forward = SIMD2<Float>(sin(localYaw), cos(localYaw))
+        let right = SIMD2<Float>(-cos(localYaw), sin(localYaw))
+        return forward * cos(bodyAngle) + right * sin(bodyAngle)
+    }
+
+    private func injectRay(into particles: inout [TargetParticle], origin: SIMD3<Float>, bearing: SIMD2<Float>, range: Float, fraction: Float) {
+        let count = max(Int(Float(particles.count) * fraction), 1)
+        let uniform = 1 / Float(particles.count)
+        for i in 0..<count {
+            let radius = max(range + gauss(0.4), 0.2)
+            let angle = gauss(sigmaBearing)
+            let cosine = cos(angle)
+            let sine = sin(angle)
+            let rotated = SIMD2<Float>(bearing.x * cosine + bearing.y * sine, -bearing.x * sine + bearing.y * cosine)
+            particles[i] = TargetParticle(
+                x: origin.x + rotated.x * radius,
+                y: origin.y + gauss(0.2),
+                z: origin.z + rotated.y * radius,
+                theta: Float.random(in: 0..<(2 * .pi)),
+                weight: uniform
+            )
+        }
+        normalize(&particles)
+    }
+
+    /// Systematic sample of `count` positions from a cloud, by weight.
+    private func sample(_ particles: [TargetParticle], count: Int) -> [SIMD3<Float>] {
+        guard !particles.isEmpty else { return [] }
+        var result: [SIMD3<Float>] = []
+        result.reserveCapacity(count)
+        var cumulative: Float = 0
+        var index = 0
+        let start = Float.random(in: 0..<(1 / Float(count)))
+        cumulative = particles[0].weight
+        for step in 0..<count {
+            let probe = start + Float(step) / Float(count)
+            while index < particles.count - 1, probe > cumulative {
+                index += 1
+                cumulative += particles[index].weight
+            }
+            result.append(SIMD3<Float>(particles[index].x, particles[index].y, particles[index].z))
+        }
+        return result
+    }
+
+    private static func wrap(_ angle: Float) -> Float {
+        var value = angle
+        while value > .pi { value -= 2 * .pi }
+        while value < -.pi { value += 2 * .pi }
+        return value
+    }
+
     private func injectSphere(into particles: inout [TargetParticle], origin: SIMD3<Float>, range: Float, fraction: Float) {
         let count = max(Int(Float(particles.count) * fraction), 1)
         let extras = seedSphere(origin: origin, range: range)
@@ -350,7 +513,8 @@ final class LocAREngine {
         normalize(&particles)
     }
 
-    private func expectedRange(_ peerID: MCPeerID) -> Float? {
+    /// E[|V − D|] over the whole cloud. Cheap enough to call per VIO frame.
+    func expectedRange(_ peerID: MCPeerID) -> Float? {
         var sum: Float = 0
         var total: Float = 0
         for hypothesis in hypotheses {

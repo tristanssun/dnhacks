@@ -12,13 +12,15 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             GeometryReader { proxy in
-                radar(size: proxy.size, safeArea: proxy.safeAreaInsets)
+                TimelineView(.animation(paused: manager.peers.isEmpty)) { context in
+                    radar(size: proxy.size, safeArea: proxy.safeAreaInsets, date: context.date)
+                }
             }
             .ignoresSafeArea()
         }
     }
 
-    private func radar(size: CGSize, safeArea: EdgeInsets) -> some View {
+    private func radar(size: CGSize, safeArea: EdgeInsets, date: Date) -> some View {
         let pad: CGFloat = 24
         let local = CGPoint(x: size.width / 2, y: size.height - safeArea.bottom - pad)
         let minX = pad
@@ -27,7 +29,7 @@ struct ContentView: View {
         let maxY = local.y
         let usableHeight = max(maxY - minY, 1)
         let scale = usableHeight / 8
-        let marks = Self.marks(from: Array(manager.peers.values).sorted { $0.displayName < $1.displayName })
+        let marks = Self.marks(from: Array(manager.peers.values).sorted { $0.displayName < $1.displayName }, at: date)
         let placed = Self.placedMarks(
             from: marks,
             local: local,
@@ -46,7 +48,7 @@ struct ContentView: View {
             ForEach(placed) { item in
                 let mark = item.mark
                 let point = item.point
-                let rotation = Self.rotation(for: mark)
+                let rotation = Self.rotation(for: mark, localHeading: manager.localHeading)
                 ArrowMark()
                     .frame(width: 14, height: 26)
                     .rotationEffect(.radians(Double(rotation)))
@@ -55,6 +57,10 @@ struct ContentView: View {
                     Text(mark.peer.displayName)
                     Text(Self.distanceLabel(for: mark))
                     Text(Self.latency(mark.latencyMs))
+                    if mark.direction == nil, let hint = mark.peer.hint {
+                        Text(hint)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 .font(.caption)
                 .multilineTextAlignment(.center)
@@ -70,6 +76,7 @@ struct ContentView: View {
         let id: String
         let peer: PeerManager.Peer
         let distance: Float
+        let isLive: Bool
         let direction: simd_float3?
         let latencyMs: Int?
     }
@@ -171,15 +178,16 @@ struct ContentView: View {
         return result
     }
 
-    private static func marks(from peers: [PeerManager.Peer]) -> [Mark] {
+    private static func marks(from peers: [PeerManager.Peer], at date: Date) -> [Mark] {
         peers.compactMap { peer in
-            guard let distance = peer.locarDistance ?? peer.bluetoothDistance else {
+            guard let display = peer.displayDistance(at: date) else {
                 return nil
             }
             return Mark(
                 id: "\(peer.displayName)-\(peer.id.hashValue)",
                 peer: peer,
-                distance: distance,
+                distance: display.meters,
+                isLive: display.isLive,
                 direction: peer.locarDirection,
                 latencyMs: peer.uwbLatencyMs ?? peer.bluetoothLatencyMs
             )
@@ -212,11 +220,10 @@ struct ContentView: View {
         return CGPoint(x: x, y: y)
     }
 
-    private static func rotation(for mark: Mark) -> Float {
-        if let heading = mark.peer.locarHeading {
-            return heading
-        }
-        return 0
+    /// Peer arrow rotation from compass: their magnetic heading minus ours.
+    private static func rotation(for mark: Mark, localHeading: Float) -> Float {
+        guard let heading = mark.peer.heading else { return 0 }
+        return heading - localHeading
     }
 
     /// "12.4 ft" live UWB. "~12.4 ft" VIO-propagated or stale. Trailing "?" means
@@ -224,7 +231,7 @@ struct ContentView: View {
     private static func distanceLabel(for mark: Mark) -> String {
         let feet = Double(mark.distance) * 3.28084
         var text = String(format: "%.1f ft", feet)
-        if !mark.peer.isLive {
+        if !mark.isLive {
             text = "~" + text
         }
         return mark.direction == nil ? "\(text)?" : text
