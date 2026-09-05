@@ -78,6 +78,7 @@ final class PeerManager: NSObject, ObservableObject {
     private let locar = LocAREngine()
     private var lastVIOSend = Date.distantPast
     private var lastLocarPublish = Date.distantPast
+    private var lastDeadReckonPosition: SIMD3<Float>?
     private var pendingVIOReset = false
     private var useCameraAssistance = NISession.deviceCapabilities.supportsCameraAssistance
 
@@ -90,8 +91,6 @@ final class PeerManager: NSObject, ObservableObject {
     private var remoteRange: [MCPeerID: RangeSample] = [:]
     private var tracks: [MCPeerID: RangeTrack] = [:]
     private var bearingConfidence: [MCPeerID: Float] = [:]
-    /// Filter expected range at the last tracker nudge, per peer.
-    private var rangeBaseline: [MCPeerID: Float] = [:]
     private var lastNIDirection: [MCPeerID: (direction: simd_float3, date: Date)] = [:]
     /// Latest body azimuth to each peer (0 forward, positive right), radians.
     private var lastBearing: [MCPeerID: (angle: Float, date: Date)] = [:]
@@ -194,7 +193,7 @@ final class PeerManager: NSObject, ObservableObject {
         let now = Date()
         locar.setLocal(pose)
         // Poses already arrive thinned to ~20 Hz by VIOTracker.
-        deadReckon(at: now)
+        deadReckon(from: pose, at: now)
         if now.timeIntervalSince(lastVIOSend) >= 0.1 {
             lastVIOSend = now
             sendVIO(pose)
@@ -230,30 +229,31 @@ final class PeerManager: NSObject, ObservableObject {
         let yaw = data.subdata(in: 13..<17).withUnsafeBytes { $0.load(as: Float.self) }
         let isReset = data[data.startIndex + 17] & 1 == 1
         locar.ingestRemoteVIO(peerID: peerID, position: SIMD3<Float>(x, y, z), yaw: yaw, isReset: isReset)
-        deadReckon(at: Date())
         if peers[peerID] == nil {
             peers[peerID] = Peer(peerID: peerID)
         }
         publishLocAR()
     }
 
-    /// Feeds the range change the filter accumulated since the last baseline
-    /// into each tracker, only when that peer's bearing is resolved (with an
-    /// ambiguous ring the expected range barely moves anyway). Baselines are
-    /// re-taken after every measurement so weight updates aren't counted as motion.
-    private func deadReckon(at now: Date) {
-        for id in tracks.keys {
-            guard let new = locar.expectedRange(id) else { continue }
-            if let base = rangeBaseline[id], (bearingConfidence[id] ?? 0) > deadReckonConfidence {
-                tracks[id]?.nudge(new - base, at: now)
-            }
-            rangeBaseline[id] = new
-        }
-    }
+    /// Project local VIO translation onto each resolved LocAR bearing. This is
+    /// physical range change from display motion only; particle reweighting,
+    /// resampling, and loss recovery never leak into the displayed RangeTrack.
+    private func deadReckon(from pose: VIOTracker.Pose, at now: Date) {
+        defer { lastDeadReckonPosition = pose.position }
+        guard !pose.didResume, let previous = lastDeadReckonPosition else { return }
+        let displacement = pose.position - previous
+        let distance = simd_length(displacement)
+        guard distance.isFinite, distance <= 2.5 else { return }
 
-    private func resetBaselines() {
+        let forward = SIMD2<Float>(sin(pose.yaw), cos(pose.yaw))
+        let right = SIMD2<Float>(-cos(pose.yaw), sin(pose.yaw))
         for id in tracks.keys {
-            rangeBaseline[id] = locar.expectedRange(id)
+            guard let estimate = locar.estimate(for: id),
+                  estimate.bearingConfidence > deadReckonConfidence else { continue }
+            let worldBearing = forward * estimate.direction.y + right * estimate.direction.x
+            let rangeDelta = -simd_dot(SIMD2<Float>(displacement.x, displacement.z), worldBearing)
+            guard rangeDelta.isFinite else { continue }
+            tracks[id]?.nudge(rangeDelta, at: now)
         }
     }
 
@@ -381,7 +381,6 @@ final class PeerManager: NSObject, ObservableObject {
             changed = true
         }
         if changed {
-            resetBaselines()
             publishLocAR()
         }
     }
@@ -417,7 +416,6 @@ final class PeerManager: NSObject, ObservableObject {
             locar.ingestUWB(peerID: peerID, range: range)
             calibrateIfDue(peerID, range: range, at: now)
         }
-        resetBaselines()
         publishLocAR()
     }
 
@@ -515,7 +513,7 @@ final class PeerManager: NSObject, ObservableObject {
             } else {
                 peer.locarDirection = nil
             }
-            peer.locarHeading = estimate?.heading
+            peer.locarHeading = (estimate?.bearingConfidence ?? 0) > 0.6 ? estimate?.heading : nil
             peers[id] = peer
         }
     }
@@ -855,7 +853,6 @@ final class PeerManager: NSObject, ObservableObject {
         remoteRange[peerID] = nil
         tracks[peerID] = nil
         bearingConfidence[peerID] = nil
-        rangeBaseline[peerID] = nil
         lastNIDirection[peerID] = nil
         lastBearing[peerID] = nil
         peerRangeDates = peerRangeDates.filter { !$0.key.split(separator: "|").contains(Substring(peerID.displayName)) }
@@ -901,7 +898,6 @@ final class PeerManager: NSObject, ObservableObject {
             sendRawRange(sample, to: peerID)
             fuse(peerID)
         } else if changed {
-            resetBaselines()
             publishLocAR()
         }
     }

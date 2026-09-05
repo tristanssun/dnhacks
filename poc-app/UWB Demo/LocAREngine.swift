@@ -40,7 +40,10 @@ final class LocAREngine {
 
     private static let displayCount = 64
     private static let targetCount = 120
+    /// Position noise after 0.1 m of VIO travel.
     private let sigmaXYZ: Float = 0.015
+    /// Small residual ARKit drift while stationary, metres per sqrt(second).
+    private let staticSigmaXYZ: Float = 0.001
     private let sigmaTheta: Float = 0.008
     private let sigmaRange: Float = 0.18
     /// Camera-assisted `horizontalAngle` accuracy once converged, radians.
@@ -81,8 +84,10 @@ final class LocAREngine {
     // MARK: Motion
 
     /// Display VIO. Propagates D with eqs. (4)–(6), no yaw offset, since this
-    /// motion is already in the display world. A re-origin (ARKit reset or a
-    /// jump) shifts everything so relative vectors are preserved.
+    /// motion is already in the display world. Process variance grows with VIO
+    /// distance travelled, plus a small time floor for genuine static drift.
+    /// A re-origin (ARKit reset or a jump) shifts everything so relative vectors
+    /// are preserved.
     func setLocal(_ pose: VIOTracker.Pose) {
         guard pose.isReliable else { return }
         cameraTransform = pose.transform
@@ -101,15 +106,20 @@ final class LocAREngine {
             reorigin(to: pose.position)
             return
         }
-        // Capture-time dt: process noise scales with real elapsed motion time,
-        // not with how late the main thread got around to this frame.
+        // Capture-time dt: the small static floor follows actual frame time, not
+        // how late the main thread got around to this frame. Independent motion
+        // and static drift variances add in quadrature.
         let dt = Float(max(pose.timestamp - lastTime, 0))
-        let step = max(min(sqrt(dt / 0.1), 3), 0.2)
+        let distance = simd_length(delta)
+        let motionSigma = sigmaXYZ * sqrt(distance / 0.1)
+        let staticSigma = staticSigmaXYZ * sqrt(dt)
+        let processSigma = hypot(motionSigma, staticSigma)
         for i in hypotheses.indices {
-            hypotheses[i].x += delta.x + gauss(sigmaXYZ * step)
-            hypotheses[i].y += delta.y + gauss(sigmaXYZ * step)
-            hypotheses[i].z += delta.z + gauss(sigmaXYZ * step)
+            hypotheses[i].x += delta.x + gauss(processSigma)
+            hypotheses[i].y += delta.y + gauss(processSigma)
+            hypotheses[i].z += delta.z + gauss(processSigma)
         }
+        recenterDisplay(on: pose.position)
     }
 
     /// Peer VIO. Applies eqs. (4)–(7) to every V_i | D_j cloud. A peer reset or
@@ -120,7 +130,9 @@ final class LocAREngine {
         let dx = position.x - last.position.x
         let dy = position.y - last.position.y
         let dz = position.z - last.position.z
-        guard simd_length(SIMD3(dx, dy, dz)) <= jumpLimit else { return }
+        let distance = simd_length(SIMD3(dx, dy, dz))
+        guard distance <= jumpLimit else { return }
+        let translated = distance >= 0.02
         for i in hypotheses.indices {
             guard var particles = hypotheses[i].targets[peerID] else { continue }
             for k in particles.indices {
@@ -130,7 +142,9 @@ final class LocAREngine {
                 particles[k].x += dx * cosine + dz * sine + gauss(sigmaXYZ)
                 particles[k].y += dy + gauss(sigmaXYZ)
                 particles[k].z += dz * cosine - dx * sine + gauss(sigmaXYZ)
-                particles[k].theta += gauss(sigmaTheta)
+                // Eq. (7) is observable only through translated VIO. A stationary
+                // peer therefore neither learns nor diffuses its frame yaw offset.
+                particles[k].theta = Self.wrap(theta + (translated ? gauss(sigmaTheta) : 0))
             }
             hypotheses[i].targets[peerID] = particles
         }
@@ -140,7 +154,8 @@ final class LocAREngine {
 
     /// UWB range z. Uniform ±3σ_r band plus P_nlos, eq. (8). Parent weight is
     /// the marginal P(z | D_j) = Σ_k w_k P(z | V_k, D_j). If almost no particle
-    /// is inside the band, the cloud is lost and fresh sphere samples are injected.
+    /// is inside the band, the cloud is lost and fresh sphere samples are injected;
+    /// routine low ESS only resamples and roughens the surviving cloud.
     func ingestUWB(peerID: MCPeerID, range: Float) {
         guard hasLocal, range > 0.05, range < 80 else { return }
         ensureTargets(peerID, range: range)
@@ -168,7 +183,6 @@ final class LocAREngine {
                 injectSphere(into: &particles, origin: display, range: range, fraction: 0.3)
             } else if effectiveCount(particles) < Float(Self.targetCount) * 0.5 {
                 resample(&particles)
-                injectSphere(into: &particles, origin: display, range: range, fraction: 0.1)
             }
             hypotheses[i].targets[peerID] = particles
             hypotheses[i].weight *= max(likelihood, 1e-8)
@@ -178,6 +192,7 @@ final class LocAREngine {
         if effectiveDisplayCount() < Float(Self.displayCount) * 0.5 {
             resampleDisplay()
         }
+        recenterDisplayOnLocalPose()
     }
 
     /// Azimuth to the peer in the body frame (0 = forward, positive = right),
@@ -228,6 +243,7 @@ final class LocAREngine {
         if effectiveDisplayCount() < Float(Self.displayCount) * 0.5 {
             resampleDisplay()
         }
+        recenterDisplayOnLocalPose()
     }
 
     /// Range between two other peers, z_ab, shared over the network. Each side
@@ -405,6 +421,7 @@ final class LocAREngine {
             hypotheses[i].z = position.z + gauss(0.03)
             hypotheses[i].weight = weight
         }
+        recenterDisplay(on: position)
     }
 
     /// ARKit changed its origin. Move every hypothesis to the new position and
@@ -412,10 +429,50 @@ final class LocAREngine {
     private func reorigin(to position: SIMD3<Float>) {
         for i in hypotheses.indices {
             let old = SIMD3<Float>(hypotheses[i].x, hypotheses[i].y, hypotheses[i].z)
-            let shift = position - old
-            hypotheses[i].x = position.x + gauss(0.02)
-            hypotheses[i].y = position.y + gauss(0.02)
-            hypotheses[i].z = position.z + gauss(0.02)
+            let moved = SIMD3<Float>(
+                position.x + gauss(0.02),
+                position.y + gauss(0.02),
+                position.z + gauss(0.02)
+            )
+            let shift = moved - old
+            hypotheses[i].x = moved.x
+            hypotheses[i].y = moved.y
+            hypotheses[i].z = moved.z
+            for (peer, var particles) in hypotheses[i].targets {
+                for k in particles.indices {
+                    particles[k].x += shift.x
+                    particles[k].y += shift.y
+                    particles[k].z += shift.z
+                }
+                hypotheses[i].targets[peer] = particles
+            }
+        }
+        recenterDisplay(on: position)
+    }
+
+    /// Translation is a gauge freedom of P(D) Π_i P(V_i | D). Pin its weighted
+    /// mean to ARKit after propagation or weighting, applying the same shift to
+    /// every V_i so each relative vector V_i − D is preserved exactly.
+    private func recenterDisplayOnLocalPose() {
+        guard let position = lastLocalPosition else { return }
+        recenterDisplay(on: position)
+    }
+
+    private func recenterDisplay(on position: SIMD3<Float>) {
+        var mean = SIMD3<Float>.zero
+        var total: Float = 0
+        for hypothesis in hypotheses {
+            mean += SIMD3<Float>(hypothesis.x, hypothesis.y, hypothesis.z) * hypothesis.weight
+            total += hypothesis.weight
+        }
+        guard total.isFinite, total > 0 else { return }
+        let shift = position - mean / total
+        guard shift.x.isFinite, shift.y.isFinite, shift.z.isFinite else { return }
+
+        for i in hypotheses.indices {
+            hypotheses[i].x += shift.x
+            hypotheses[i].y += shift.y
+            hypotheses[i].z += shift.z
             for (peer, var particles) in hypotheses[i].targets {
                 for k in particles.indices {
                     particles[k].x += shift.x
@@ -500,7 +557,7 @@ final class LocAREngine {
     private static func wrap(_ angle: Float) -> Float {
         var value = angle
         while value > .pi { value -= 2 * .pi }
-        while value < -.pi { value += 2 * .pi }
+        while value <= -.pi { value += 2 * .pi }
         return value
     }
 
@@ -595,9 +652,15 @@ final class LocAREngine {
         return sumSquares > 0 ? 1 / sumSquares : 0
     }
 
+    /// Systematic resampling followed by Gordon roughening. The jitter follows
+    /// this cloud's own per-axis spread and N^(-1/3), so it restores distinct
+    /// descendants without imposing an absolute position-noise floor.
     private func resample(_ particles: inout [TargetParticle]) {
         let count = particles.count
         guard count > 1 else { return }
+        let standardDeviation = spatialStandardDeviation(particles)
+        let roughening = 0.2 * pow(Float(count), -1 / Float(3))
+        let sigma = standardDeviation * roughening
         var cdf = [Float](repeating: 0, count: count)
         cdf[0] = particles[0].weight
         for i in 1..<count {
@@ -612,14 +675,22 @@ final class LocAREngine {
                 index += 1
             }
             next[step] = particles[index]
+            next[step].x += gauss(sigma.x)
+            next[step].y += gauss(sigma.y)
+            next[step].z += gauss(sigma.z)
             next[step].weight = 1 / Float(count)
         }
         particles = next
     }
 
+    /// Display-particle counterpart of `resample`, using the display cloud's
+    /// adaptive spatial spread rather than a fixed process sigma.
     private func resampleDisplay() {
         let count = hypotheses.count
         guard count > 1 else { return }
+        let standardDeviation = displayStandardDeviation()
+        let roughening = 0.2 * pow(Float(count), -1 / Float(3))
+        let sigma = standardDeviation * roughening
         var cdf = [Float](repeating: 0, count: count)
         cdf[0] = hypotheses[0].weight
         for i in 1..<count {
@@ -635,9 +706,61 @@ final class LocAREngine {
                 index += 1
             }
             next[step] = hypotheses[index]
+            next[step].x += gauss(sigma.x)
+            next[step].y += gauss(sigma.y)
+            next[step].z += gauss(sigma.z)
             next[step].weight = weight
         }
         hypotheses = next
+    }
+
+    private func spatialStandardDeviation(_ particles: [TargetParticle]) -> SIMD3<Float> {
+        var mean = SIMD3<Float>.zero
+        var total: Float = 0
+        for particle in particles {
+            mean += SIMD3<Float>(particle.x, particle.y, particle.z) * particle.weight
+            total += particle.weight
+        }
+        guard total.isFinite, total > 0 else { return .zero }
+        mean /= total
+        guard mean.x.isFinite, mean.y.isFinite, mean.z.isFinite else { return .zero }
+
+        var variance = SIMD3<Float>.zero
+        for particle in particles {
+            let delta = SIMD3<Float>(particle.x, particle.y, particle.z) - mean
+            variance += delta * delta * particle.weight
+        }
+        variance /= total
+        return finiteStandardDeviation(from: variance)
+    }
+
+    private func displayStandardDeviation() -> SIMD3<Float> {
+        var mean = SIMD3<Float>.zero
+        var total: Float = 0
+        for hypothesis in hypotheses {
+            mean += SIMD3<Float>(hypothesis.x, hypothesis.y, hypothesis.z) * hypothesis.weight
+            total += hypothesis.weight
+        }
+        guard total.isFinite, total > 0 else { return .zero }
+        mean /= total
+        guard mean.x.isFinite, mean.y.isFinite, mean.z.isFinite else { return .zero }
+
+        var variance = SIMD3<Float>.zero
+        for hypothesis in hypotheses {
+            let delta = SIMD3<Float>(hypothesis.x, hypothesis.y, hypothesis.z) - mean
+            variance += delta * delta * hypothesis.weight
+        }
+        variance /= total
+        return finiteStandardDeviation(from: variance)
+    }
+
+    private func finiteStandardDeviation(from variance: SIMD3<Float>) -> SIMD3<Float> {
+        guard variance.x.isFinite, variance.y.isFinite, variance.z.isFinite else { return .zero }
+        return SIMD3<Float>(
+            sqrt(max(variance.x, 0)),
+            sqrt(max(variance.y, 0)),
+            sqrt(max(variance.z, 0))
+        )
     }
 
     private func randomUnitVector() -> SIMD3<Float> {
