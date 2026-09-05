@@ -86,6 +86,9 @@ final class PeerManager: NSObject, ObservableObject {
     private var lastDiscoveryRefresh = Date.distantPast
     /// Invitations still inside their timeout, keyed by peer. See `invite`.
     private var pendingInvites: [MCPeerID: Date] = [:]
+    private let launchedAt = CACurrentMediaTime()
+    private var lastSessionState: [MCPeerID: MCSessionState] = [:]
+    private var lastSendFailureLog: [MCPeerID: Date] = [:]
     private let inviteTimeout: TimeInterval = 12
     /// Slow enough not to disturb an invitation inside its 12 s timeout.
     private let discoveryRefreshInterval: TimeInterval = 20
@@ -282,8 +285,9 @@ final class PeerManager: NSObject, ObservableObject {
         withUnsafeBytes(of: &yaw) { data.append(contentsOf: $0) }
         data.append(pendingVIOReset ? 1 : 0)
         do {
-            try mcSession?.send(data, toPeers: peers, with: .unreliable)
-            pendingVIOReset = false
+            if send(data, to: peers, mode: .unreliable, label: "vio") {
+                pendingVIOReset = false
+            }
         } catch {}
     }
 
@@ -334,7 +338,7 @@ final class PeerManager: NSObject, ObservableObject {
     private func sendHello(to peerID: MCPeerID) {
         var data = Data([0x49])
         data.append(contentsOf: Array(discoveryID.utf8))
-        try? mcSession?.send(data, toPeers: [peerID], with: .reliable)
+        send(data, to: [peerID], mode: .reliable, label: "hello")
     }
 
     private func peer(forRemoteUUID uuid: UUID) -> MCPeerID? {
@@ -378,7 +382,7 @@ final class PeerManager: NSObject, ObservableObject {
         var age = ageMs
         withUnsafeBytes(of: &value) { data.append(contentsOf: $0) }
         withUnsafeBytes(of: &age) { data.append(contentsOf: $0) }
-        try? mcSession?.send(data, toPeers: [peerID], with: .unreliable)
+        send(data, to: [peerID], mode: .unreliable, label: "rawRange")
     }
 
     private func shareRanges() {
@@ -409,7 +413,7 @@ final class PeerManager: NSObject, ObservableObject {
         guard count > 0 else { return }
         var data = Data([0x54, count])
         data.append(entries)
-        try? session.send(data, toPeers: session.connectedPeers, with: .unreliable)
+        send(data, to: session.connectedPeers, mode: .unreliable, label: "rangeList")
     }
 
     private func handleRangeList(_ data: Data, from sender: MCPeerID) {
@@ -485,7 +489,7 @@ final class PeerManager: NSObject, ObservableObject {
         guard count > 0 else { return }
         var data = Data([0x57, count])
         data.append(entries)
-        try? session.send(data, toPeers: session.connectedPeers, with: .unreliable)
+        send(data, to: session.connectedPeers, mode: .unreliable, label: "estimates")
     }
 
     private func handleRelativeEstimates(_ data: Data, from sender: MCPeerID) {
@@ -745,7 +749,7 @@ final class PeerManager: NSObject, ObservableObject {
         for peer in session.connectedPeers {
             pingSentAt[peer] = now
         }
-        try? session.send(payload, toPeers: session.connectedPeers, with: .unreliable)
+        send(payload, to: session.connectedPeers, mode: .unreliable, label: "ping")
     }
 
     private func readConnectedRSSI() {
@@ -876,7 +880,7 @@ final class PeerManager: NSObject, ObservableObject {
         guard let peers = mcSession?.connectedPeers, !peers.isEmpty else { return }
         var data = Data([0x48])
         withUnsafeBytes(of: heading) { data.append(contentsOf: $0) }
-        try? mcSession?.send(data, toPeers: peers, with: .unreliable)
+        send(data, to: peers, mode: .unreliable, label: "heading")
     }
 
     private func replaceSession() {
@@ -917,6 +921,7 @@ final class PeerManager: NSObject, ObservableObject {
         // Recorded so a discovery refresh cannot bounce the browser out from
         // under this invitation before the peer's acceptance comes back.
         pendingInvites[peerID] = Date()
+        mcLog("invite-sent", peerID, isInitiator(for: peerID) ? "initiator" : "fallback")
         browser?.invitePeer(peerID, to: mcSession, withContext: context, timeout: 12)
     }
 
@@ -929,6 +934,7 @@ final class PeerManager: NSObject, ObservableObject {
     /// so the stale one held here can never connect again. Dropping the remote
     /// ID too means the pair re-tiebreaks from scratch when it reappears.
     private func handleLostPeer(_ peerID: MCPeerID) {
+        mcLog("lost", peerID)
         // MC can drop a browse entry for a peer whose session is still healthy.
         guard mcSession?.connectedPeers.contains(peerID) != true else { return }
         reconnectTasks[peerID]?.cancel()
@@ -965,6 +971,7 @@ final class PeerManager: NSObject, ObservableObject {
         let now = Date()
         guard now.timeIntervalSince(lastDiscoveryRefresh) >= discoveryRefreshInterval else { return }
         lastDiscoveryRefresh = now
+        mcLog("refresh", nil, hasPendingInvite() ? "advertiser only" : "advertiser+browser")
         refreshDiscovery()
     }
 
@@ -1024,7 +1031,58 @@ final class PeerManager: NSObject, ObservableObject {
         return false
     }
 
+    /// Multipeer timeline, prefixed `MCLOG` so it filters out of the console the
+    /// way `LOCARPERF` does. Every failure in this layer has so far been
+    /// diagnosed indirectly, from Apple's own log messages plus inference; these
+    /// lines make the sequence readable instead.
+    ///
+    /// Columns: elapsed, event, peer, detail.
+    private func mcLog(_ event: String, _ peerID: MCPeerID? = nil, _ detail: String = "") {
+        let elapsed = CACurrentMediaTime() - launchedAt
+        print(String(format: "MCLOG,%.2f,%@,%@,%@", elapsed, event, peerID?.displayName ?? "-", detail))
+    }
+
+    private static func name(_ state: MCSessionState?) -> String {
+        switch state {
+        case .none: return "none"
+        case .some(.notConnected): return "notConnected"
+        case .some(.connecting): return "connecting"
+        case .some(.connected): return "connected"
+        @unknown default: return "unknown"
+        }
+    }
+
+    /// Logged failures are throttled per peer, since a dead link fails at the
+    /// full send rate and would bury everything else.
+    private func logSendFailure(_ label: String, _ peerID: MCPeerID?, _ error: Error) {
+        let key = peerID ?? localPeerID
+        let now = Date()
+        if let last = lastSendFailureLog[key], now.timeIntervalSince(last) < 1 { return }
+        lastSendFailureLog[key] = now
+        mcLog("send-fail", peerID, "\(label) \(error.localizedDescription)")
+    }
+
+    /// Single send path so every failure is visible. `try?` at ten call sites
+    /// meant a wedged link looked identical to a healthy idle one.
+    @discardableResult
+    private func send(_ data: Data, to peers: [MCPeerID], mode: MCSessionSendDataMode, label: String) -> Bool {
+        guard let mcSession, !peers.isEmpty else { return false }
+        do {
+            try mcSession.send(data, toPeers: peers, with: mode)
+            return true
+        } catch {
+            logSendFailure(label, peers.first, error)
+            return false
+        }
+    }
+
     private func handlePeerState(_ peerID: MCPeerID, _ state: MCSessionState) {
+        // The previous state is what distinguishes a handshake that never
+        // completed (connecting -> notConnected) from an established session
+        // that died (connected -> notConnected). MC's delegate only reports the
+        // new one, so the transition has to be reconstructed here.
+        mcLog("state", peerID, "\(Self.name(lastSessionState[peerID])) -> \(Self.name(state))")
+        lastSessionState[peerID] = state
         switch state {
         case .connected:
             reconnectTasks[peerID]?.cancel()
@@ -1101,19 +1159,35 @@ final class PeerManager: NSObject, ObservableObject {
             // and nothing else retriggers this path. Returning silently
             // deadlocks the pair: each side sits waiting for a token the other
             // will never send, which looks exactly like "no NI at all".
+            mcLog("token-nil", peerID)
             scheduleTokenRetry(peerID)
             return
         }
-        guard let data = try? NSKeyedArchiver.archivedData(withRootObject: token, requiringSecureCoding: true) else { return }
-        do {
-            try mcSession?.send(data, toPeers: [peerID], with: .reliable)
+        guard let data = try? NSKeyedArchiver.archivedData(withRootObject: token, requiringSecureCoding: true) else {
+            mcLog("token-archive-fail", peerID)
+            return
+        }
+        // `sentTokenTo` is only set on a send that actually succeeded. It used
+        // to be set on the retry regardless of outcome, so `tok` in the on-screen
+        // link status could read as sent while the token never left — exactly
+        // the case worth diagnosing.
+        if send(data, to: [peerID], mode: .reliable, label: "token") {
             sentTokenTo.insert(peerID)
-        } catch {
-            Task { [weak self] in
-                try? await Task.sleep(for: .milliseconds(400))
-                guard let self else { return }
-                try? self.mcSession?.send(data, toPeers: [peerID], with: .reliable)
-                self.sentTokenTo.insert(peerID)
+            mcLog("token-sent", peerID)
+            return
+        }
+        mcLog("token-send-failed", peerID, "retrying")
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            guard let self, !Task.isCancelled else { return }
+            await MainActor.run {
+                guard self.mcSession?.connectedPeers.contains(peerID) == true else { return }
+                if self.send(data, to: [peerID], mode: .reliable, label: "token-retry") {
+                    self.sentTokenTo.insert(peerID)
+                    self.mcLog("token-sent", peerID, "retry")
+                } else {
+                    self.mcLog("token-send-failed", peerID, "gave up")
+                }
             }
         }
     }
@@ -1122,7 +1196,7 @@ final class PeerManager: NSObject, ObservableObject {
         if data.count == 9, data.first == 0x50 {
             var reply = Data([0x51])
             reply.append(data.subdata(in: 1..<9))
-            try? mcSession?.send(reply, toPeers: [peerID], with: .unreliable)
+            send(reply, to: [peerID], mode: .unreliable, label: "pong")
             return
         }
         if data.count == 9, data.first == 0x51 {
@@ -1168,6 +1242,7 @@ final class PeerManager: NSObject, ObservableObject {
             return
         }
         guard let token = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NIDiscoveryToken.self, from: data) else { return }
+        mcLog("token-recv", peerID)
         let session = niSession(for: peerID)
         let configuration = NINearbyPeerConfiguration(peerToken: token)
         configuration.isCameraAssistanceEnabled = usesCameraAssistance(peerID)
@@ -1388,6 +1463,7 @@ final class PeerManager: NSObject, ObservableObject {
         }
         guard let peerID = peerID(for: sessionID) else { return }
         niErrors[peerID] = Self.shortError(error)
+        mcLog("ni-invalid", peerID, Self.shortError(error))
         niSessions[peerID] = nil
         configurations[peerID] = nil
         sentTokenTo.remove(peerID)
@@ -1440,10 +1516,20 @@ extension PeerManager: MCSessionDelegate {
 extension PeerManager: MCNearbyServiceAdvertiserDelegate {
     nonisolated func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didReceiveInvitationFromPeer peerID: MCPeerID, withContext context: Data?, invitationHandler: @escaping (Bool, MCSession?) -> Void) {
         let remoteID = context.flatMap { String(data: $0, encoding: .utf8) }
+        let alreadyConnected = invitationSession?.connectedPeers.contains(peerID) == true
         Task { @MainActor in
             self.remember(peerID, remoteID: remoteID)
+            // Logged with whether we also had an invitation of our own in
+            // flight: both sides inviting at once is what produces duplicate
+            // sessions, and the loser is torn down with a connection reset.
+            let crossed = self.pendingInvites[peerID] != nil
+            self.mcLog(
+                alreadyConnected ? "invite-recv-reject" : "invite-recv-accept",
+                peerID,
+                crossed ? "CROSSED with our own invite" : ""
+            )
         }
-        if invitationSession?.connectedPeers.contains(peerID) == true {
+        if alreadyConnected {
             invitationHandler(false, nil)
             return
         }
@@ -1463,6 +1549,7 @@ extension PeerManager: MCNearbyServiceBrowserDelegate {
         let remoteID = info?["id"]
         Task { @MainActor in
             self.remember(peerID, remoteID: remoteID)
+            self.mcLog("found", peerID, remoteID == nil ? "no discoveryInfo" : "")
             if self.isInitiator(for: peerID) {
                 self.invite(peerID)
             } else {
