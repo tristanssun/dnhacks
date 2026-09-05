@@ -29,6 +29,13 @@ ssh -J USER@LOGIN-HOST -L 7860:localhost:7860 USER@COMPUTE-NODE
 
 For a workstation with CUDA, run `./scripts/run.sh` directly.
 
+Run the lightweight ingestion test with:
+
+```bash
+. .venv/bin/activate
+python tests/smoke_test.py
+```
+
 ## Capture tips
 
 Move slowly, keep the same scene visible, use diffuse lighting, avoid zooming,
