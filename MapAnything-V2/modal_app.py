@@ -1,4 +1,4 @@
-"""Modal deployment for the MapAnything Gradio application.
+"""Modal deployment for the MapAnything growing-world web UI.
 
 Development: modal serve modal_app.py
 Persistent:  modal deploy modal_app.py
@@ -69,5 +69,5 @@ data_volume = modal.Volume.from_name("dnhacks-mapanything-data", create_if_missi
 @modal.concurrent(max_inputs=32)
 @modal.web_server(PORT, startup_timeout=20 * 60)
 def ui():
-    """Launch the GPU-backed Gradio server."""
+    """Launch the GPU-backed growing-world web server."""
     subprocess.Popen(["python", "app.py"], cwd=APP_DIR)

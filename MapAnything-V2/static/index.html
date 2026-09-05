@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MapAnything · Growing World</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "/static/vendor/three.module.js"
+    }
+  }
+  </script>
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="mark" aria-hidden="true"></span>
+      <div>
+        <strong>MapAnything</strong>
+        <span>Growing world from many viewpoints</span>
+      </div>
+    </div>
+    <div class="top-meta">
+      <span id="runtime-pill" class="pill">Checking GPU</span>
+      <code id="world-id">no world</code>
+      <button type="button" id="new-world">New world</button>
+    </div>
+  </header>
+
+  <main>
+    <aside>
+      <section class="drop" id="drop" tabindex="0">
+        <input id="file-input" type="file" accept="image/*,video/*,.mov,.mp4,.webm,.mkv,.avi,.m4v,.jpg,.jpeg,.png,.webp,.tif,.tiff,.bmp" multiple />
+        <p class="drop-kicker">Photos and videos</p>
+        <h2>Drop viewpoints from any angle</h2>
+        <p>You do not set poses. Each new source is localized by the model and fused into one mesh.</p>
+        <button type="button" id="browse" class="primary">Add sources</button>
+      </section>
+
+      <section class="sources-panel">
+        <div class="panel-head">
+          <h3>Viewpoints</h3>
+          <span id="source-count">0</span>
+        </div>
+        <ul id="sources" class="sources"></ul>
+      </section>
+
+      <details class="settings">
+        <summary>Reconstruction settings</summary>
+        <label>
+          Seconds between video frames
+          <input id="interval" type="range" min="0.25" max="5" step="0.25" value="1.5" />
+          <output id="interval-out">1.5</output>
+        </label>
+        <label>
+          Max frames per video
+          <input id="max-frames" type="range" min="2" max="200" step="1" value="40" />
+          <output id="max-frames-out">40</output>
+        </label>
+        <label>
+          Filter lowest-confidence %
+          <input id="confidence" type="range" min="0" max="50" step="1" value="10" />
+          <output id="confidence-out">10</output>
+        </label>
+        <label class="check">
+          <input id="as-mesh" type="checkbox" />
+          Connect points as a mesh
+        </label>
+      </details>
+    </aside>
+
+    <section class="stage">
+      <canvas id="view"></canvas>
+      <div id="empty" class="empty">
+        <p class="empty-kicker">Empty world</p>
+        <h2>Build a digital twin that grows</h2>
+        <p>Add a walkthrough, a clip from another room, or stills of a missed corner. MapAnything estimates where each source belongs and appends the new geometry.</p>
+      </div>
+      <div class="hud">
+        <p id="status">Waiting for sources.</p>
+        <dl id="stats" class="stats">
+          <div><dt>Clips</dt><dd id="stat-videos">0</dd></div>
+          <div><dt>Photos</dt><dd id="stat-photos">0</dd></div>
+          <div><dt>Localized</dt><dd id="stat-localized">0</dd></div>
+          <div><dt>Updates</dt><dd id="stat-updates">0</dd></div>
+        </dl>
+        <div class="hud-actions">
+          <label class="check tight">
+            <input id="show-cameras" type="checkbox" checked />
+            Show cameras
+          </label>
+          <button type="button" id="fit">Frame world</button>
+          <a id="download" class="hidden" download>Download GLB</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>

@@ -1,6 +1,6 @@
 # Modal deployment
 
-This package runs the MapAnything UI on an H200 without Slurm. Modal supplies a
+This package runs the MapAnything growing-world web UI on an H200 without Slurm. Modal supplies a
 public HTTPS URL, while a persistent Volume stores uploads, live sessions, GLBs,
 Hugging Face weights, and Torch caches.
 
@@ -57,7 +57,7 @@ modal volume ls dnhacks-mapanything-data
 modal volume get dnhacks-mapanything-data outputs/live-SESSION.glb ./twin.glb
 ```
 
-Browser uploads still pass through Modal and Gradio request limits. If a very
+Browser uploads still pass through Modal request limits. If a very
 large upload cannot finish reliably, upload it directly to the Volume with the
 Modal CLI and add a server-side import workflow; the current UI does not scan
 arbitrary Volume files automatically.

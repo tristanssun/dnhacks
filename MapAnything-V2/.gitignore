@@ -1,4 +1,5 @@
 .venv/
+.browser-fixtures/
 outputs/
 uploads/
 live_sessions/
