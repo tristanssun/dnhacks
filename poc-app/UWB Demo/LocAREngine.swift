@@ -334,34 +334,51 @@ final class LocAREngine {
                 return sample.position + rotated
             }
             guard implied.allSatisfy({ $0.x.isFinite && $0.y.isFinite && $0.z.isFinite }) else { continue }
+
+            // Summarise the anchor's uncertainty as a mean and a spread instead
+            // of testing every particle against every implied point. That inner
+            // loop was 120 x 16 per hypothesis, 122,880 per ingest — 16x the
+            // cost of `ingestUWB` — and at several ingests per second it
+            // saturated the main thread, which starves the Multipeer transport
+            // and NI session setup rather than failing visibly here.
+            //
+            // Folding the sample spread into the acceptance radius keeps the
+            // constraint honest: an anchor we are unsure of widens the ball
+            // rather than pretending its mean is exact.
+            var mean = SIMD3<Float>.zero
+            for point in implied {
+                mean += point
+            }
+            mean /= Float(implied.count)
+            var variance: Float = 0
+            for point in implied {
+                variance += simd_length_squared(point - mean)
+            }
+            variance /= Float(implied.count)
+            let spread = sqrt(max(variance, 0))
+            guard mean.x.isFinite, mean.y.isFinite, mean.z.isFinite, spread.isFinite else { continue }
+            let acceptance = limit + spread
+
             guard var particles = hypotheses[i].targets[target] else {
                 // First sight through a third party must start near its implied
                 // position; half the acceptance radius keeps seeds inside the
                 // shared estimate without pretending it is an exact point fix.
-                let position = implied[Int.random(in: 0..<implied.count)]
-                hypotheses[i].targets[target] = seedSphere(origin: position, range: limit * 0.5)
+                hypotheses[i].targets[target] = seedSphere(origin: mean, range: acceptance * 0.5)
                 continue
             }
             var inliers: Float = 0
             for k in particles.indices {
                 let point = SIMD3<Float>(particles[k].x, particles[k].y, particles[k].z)
-                var hits = 0
-                for impliedPoint in implied where simd_length(point - impliedPoint) <= limit {
-                    hits += 1
-                }
-                let denominator = Float(implied.count)
-                guard denominator.isFinite, denominator > 0 else { continue }
-                let fraction = Float(hits) / denominator
-                let probability = nlosProbability + (inlierProbability - nlosProbability) * fraction
-                if hits > 0 {
+                // Same uniform-plus-P_nlos form as eq. (8), one test per particle.
+                let inside = simd_length(point - mean) <= acceptance
+                if inside {
                     inliers += particles[k].weight
                 }
-                particles[k].weight *= probability
+                particles[k].weight *= inside ? inlierProbability : nlosProbability
             }
             normalize(&particles)
             if inliers < 0.15 {
-                let position = implied[Int.random(in: 0..<implied.count)]
-                injectSphere(into: &particles, origin: position, range: limit * 0.5, fraction: 0.3)
+                injectSphere(into: &particles, origin: mean, range: acceptance * 0.5, fraction: 0.3)
             } else if effectiveCount(particles) < Float(Self.targetCount) * 0.5 {
                 resample(&particles)
             }

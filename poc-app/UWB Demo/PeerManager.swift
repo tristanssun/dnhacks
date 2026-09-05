@@ -91,7 +91,9 @@ final class PeerManager: NSObject, ObservableObject {
     /// filter. See `shouldIngest`. 10 Hz matches the paper's UWB rate (§5.2).
     private var lastRangeIngest: [MCPeerID: Date] = [:]
     private var lastBearingIngest: [MCPeerID: Date] = [:]
-    private var lastRelativeEstimateIngest: [MCPeerID: Date] = [:]
+    /// Last ingest per (anchor, target) pair. See `shouldIngestRelative`.
+    private var relativeIngestDates: [MCPeerID: [MCPeerID: Date]] = [:]
+    private let relativeIngestInterval: TimeInterval = 0.5
     private let ingestInterval: TimeInterval = 0.1
     /// Set by anything that changes filter state; drained by `publishTimer`.
     private var needsPublish = false
@@ -506,7 +508,7 @@ final class PeerManager: NSObject, ObservableObject {
             guard now.timeIntervalSince(date) < freshWindow else { continue }
             if let last = dates[target], last >= date { continue }
             dates[target] = date
-            guard shouldIngest(target, .relativeEstimate, at: now) else { continue }
+            guard shouldIngestRelative(anchor: sender, target: target, at: now) else { continue }
             locar.ingestRelativeEstimate(
                 target: target,
                 anchor: sender,
@@ -566,7 +568,22 @@ final class PeerManager: NSObject, ObservableObject {
     private enum IngestChannel {
         case range
         case bearing
-        case relativeEstimate
+    }
+
+    /// Keyed by the (anchor, target) pair, not by target alone: N senders each
+    /// reporting M peers fans in as N x M, so a per-target gate still lets the
+    /// rate scale with the number of devices.
+    ///
+    /// 2 Hz rather than the 10 Hz the direct channels use. A shared estimate is
+    /// a slow correction built from someone else's filter, not a primary
+    /// observation, and it does not carry 10 Hz of new information.
+    private func shouldIngestRelative(anchor: MCPeerID, target: MCPeerID, at now: Date) -> Bool {
+        if let last = relativeIngestDates[anchor]?[target],
+           now.timeIntervalSince(last) < relativeIngestInterval {
+            return false
+        }
+        relativeIngestDates[anchor, default: [:]][target] = now
+        return true
     }
 
     /// Gate on feeding the filter, per peer and per channel.
@@ -586,7 +603,6 @@ final class PeerManager: NSObject, ObservableObject {
         switch channel {
         case .range: last = lastRangeIngest[peerID]
         case .bearing: last = lastBearingIngest[peerID]
-        case .relativeEstimate: last = lastRelativeEstimateIngest[peerID]
         }
         if let last, now.timeIntervalSince(last) < ingestInterval {
             return false
@@ -594,7 +610,6 @@ final class PeerManager: NSObject, ObservableObject {
         switch channel {
         case .range: lastRangeIngest[peerID] = now
         case .bearing: lastBearingIngest[peerID] = now
-        case .relativeEstimate: lastRelativeEstimateIngest[peerID] = now
         }
         return true
     }
@@ -1238,7 +1253,13 @@ final class PeerManager: NSObject, ObservableObject {
         lastEstimate[peerID] = nil
         lastRangeIngest[peerID] = nil
         lastBearingIngest[peerID] = nil
-        lastRelativeEstimateIngest[peerID] = nil
+        relativeIngestDates[peerID] = nil
+        for anchor in Array(relativeIngestDates.keys) {
+            relativeIngestDates[anchor]?[peerID] = nil
+            if relativeIngestDates[anchor]?.isEmpty == true {
+                relativeIngestDates[anchor] = nil
+            }
+        }
         pendingRecalibration.remove(peerID)
         tokenRetries[peerID]?.cancel()
         tokenRetries[peerID] = nil
