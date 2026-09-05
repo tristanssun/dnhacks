@@ -22,7 +22,12 @@ struct ContentView: View {
             }
             .ignoresSafeArea()
             .overlay(alignment: .top) {
-                PerfHUD(perf: manager.perf)
+                VStack(spacing: 2) {
+                    PerfHUD(perf: manager.perf)
+                    Text("ARKit \(manager.trackingState)")
+                        .font(.system(size: 10).monospaced())
+                        .foregroundStyle(manager.trackingState == "normal" ? Color.secondary : Color.red)
+                }
             }
         }
     }

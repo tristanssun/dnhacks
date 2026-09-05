@@ -12,6 +12,13 @@ final class VIOTracker: NSObject, ARSessionDelegate {
         var timestamp: TimeInterval
         /// False while ARKit is initializing, relocalizing, or has no tracking.
         var isReliable: Bool
+        /// True only for `.normal`. Camera assistance requires it, while the
+        /// filter is content with `.limited` for reasons other than
+        /// initializing or relocalizing — so `isReliable` being true says
+        /// nothing about whether `horizontalAngle` can ever appear.
+        var isNormal: Bool
+        /// Short tracking-state label for display.
+        var trackingLabel: String
         /// True on the first reliable frame after tracking was lost. The world
         /// origin may have changed, so the delta from the previous pose is not motion.
         var didResume: Bool
@@ -70,18 +77,36 @@ final class VIOTracker: NSObject, ARSessionDelegate {
         perfCounters.recordARFrame()
         let transform = frame.camera.transform
         let reliable: Bool
+        let normal: Bool
+        let label: String
         switch frame.camera.trackingState {
         case .normal:
             reliable = true
+            normal = true
+            label = "normal"
         case .limited(let reason):
+            normal = false
             switch reason {
-            case .initializing, .relocalizing:
+            case .initializing:
                 reliable = false
-            default:
+                label = "init"
+            case .relocalizing:
+                reliable = false
+                label = "reloc"
+            case .excessiveMotion:
                 reliable = true
+                label = "motion"
+            case .insufficientFeatures:
+                reliable = true
+                label = "features"
+            @unknown default:
+                reliable = true
+                label = "limited"
             }
         case .notAvailable:
             reliable = false
+            normal = false
+            label = "none"
         }
         // Thin the stream before paying the actor hop, but never drop a frame
         // where reliability flipped: `didResume` depends on seeing the transition.
@@ -109,6 +134,8 @@ final class VIOTracker: NSObject, ARSessionDelegate {
                 transform: transform,
                 timestamp: timestamp,
                 isReliable: reliable,
+                isNormal: normal,
+                trackingLabel: label,
                 didResume: resumed
             )
             self.pose = next

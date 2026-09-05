@@ -66,6 +66,11 @@ final class PeerManager: NSObject, ObservableObject {
     @Published var peers: [MCPeerID: Peer] = [:]
     @Published var localHeading: Float = 0
     @Published var unsupportedMessage: String?
+    /// ARKit tracking state. Camera assistance only converges at `normal`, and
+    /// `isReliable` deliberately accepts `limited` for the filter's sake, so
+    /// this is the only signal that says whether `horizontalAngle` is even
+    /// possible on this device.
+    @Published var trackingState = "init"
 
     private let serviceType = "uwbdemo"
     private nonisolated let discoveryID: String
@@ -297,6 +302,10 @@ final class PeerManager: NSObject, ObservableObject {
     }
 
     private func handleLocalVIO(_ pose: VIOTracker.Pose) {
+        if trackingState != pose.trackingLabel {
+            mcLog("arkit", nil, "\(trackingState) -> \(pose.trackingLabel)")
+            trackingState = pose.trackingLabel
+        }
         guard pose.isReliable else { return }
         if pose.didResume {
             pendingVIOReset = true
@@ -782,6 +791,10 @@ final class PeerManager: NSObject, ObservableObject {
     private func handleConvergence(sessionID: ObjectIdentifier, hint: String?) {
         guard let peerID = peerID(for: sessionID), var peer = peers[peerID] else { return }
         guard peer.hint != hint else { return }
+        // A nil hint means converged — but so did a delegate that never fired,
+        // which is a completely different situation. Logging the transition
+        // separates them.
+        mcLog("convergence", peerID, hint ?? "converged")
         peer.hint = hint
         peers[peerID] = peer
     }
