@@ -22,9 +22,11 @@ To publish the same API on Cloudflare Workers instead, see `Server/README.md`.
 
 ## How to Use
 
-Prepare two iPhones on the same network as the server and follow these steps:
+Use the **UWB** / **Bluetooth** switcher at the top of the app. UWB uses Nearby Interaction and needs the token server. Bluetooth estimates distance from BLE signal strength and does not need the server.
 
-1. Confirm the Server URL field matches the running token server.
+Prepare two iPhones and follow these steps:
+
+1. For UWB, confirm the Server URL field matches the running token server. Bluetooth mode can skip this.
 2. Launch the app on one iPhone and tap **Get my code**. If you see a message like "Your code: 1234," the process has succeeded.
 3. Launch the app on the other iPhone and tap **Get my code**.
 4. On each iPhone, enter the four-digit code displayed on the other device into the **Peer Code** field.

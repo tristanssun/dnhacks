@@ -8,8 +8,25 @@ struct HTTPResponseBody: Decodable {
   let success: Bool
 }
 
+enum DistanceMode: String, CaseIterable, Identifiable {
+  case uwb
+  case bluetooth
+
+  var id: String { self.rawValue }
+
+  var title: String {
+    switch self {
+    case .uwb:
+      return "UWB"
+    case .bluetooth:
+      return "Bluetooth"
+    }
+  }
+}
+
 class InteractionManager: NSObject, ObservableObject {
   private static let apiURLDefaultsKey = "apiURL"
+  private static let modeDefaultsKey = "distanceMode"
 
   static var defaultAPIURL: String {
     #if targetEnvironment(simulator)
@@ -30,14 +47,32 @@ class InteractionManager: NSObject, ObservableObject {
       UserDefaults.standard.set(self.apiURL, forKey: Self.apiURLDefaultsKey)
     }
   }
+  @Published var mode: DistanceMode {
+    didSet {
+      guard oldValue != self.mode else { return }
+      UserDefaults.standard.set(self.mode.rawValue, forKey: Self.modeDefaultsKey)
+      self.handleModeChange()
+    }
+  }
   @Published var myTokenId: Int = 0
   @Published var isSupported: Bool = false
   @Published var isPeerReady: Bool = false
   @Published var statusMessage: String = "Start the token server, then get your code."
 
+  var distanceCaption: String {
+    switch self.mode {
+    case .uwb:
+      return "UWB"
+    case .bluetooth:
+      return "Bluetooth (approximate)"
+    }
+  }
+
   private var session: NISession? = nil
   private var peerToken: NIDiscoveryToken? = nil
+  private var peerBluetoothId: Int? = nil
   private var shouldStartWhenPeerReady = false
+  private let bluetoothRanger = BluetoothRangingManager()
 
   override init() {
     if let stored = UserDefaults.standard.string(forKey: Self.apiURLDefaultsKey), !stored.isEmpty {
@@ -45,7 +80,20 @@ class InteractionManager: NSObject, ObservableObject {
     } else {
       self.apiURL = Self.defaultAPIURL
     }
+    if let storedMode = UserDefaults.standard.string(forKey: Self.modeDefaultsKey),
+      let mode = DistanceMode(rawValue: storedMode)
+    {
+      self.mode = mode
+    } else {
+      self.mode = .uwb
+    }
     super.init()
+    self.bluetoothRanger.onDistance = { [weak self] meters in
+      self?.distanceSubject.send(meters)
+    }
+    self.bluetoothRanger.onStatus = { [weak self] message in
+      self?.statusMessage = message
+    }
     self.prepare()
     #if DEBUG
       if ProcessInfo.processInfo.arguments.contains("-autoGetCode") {
@@ -70,9 +118,13 @@ class InteractionManager: NSObject, ObservableObject {
     #endif
 
     self.isSupported = supported
+    if self.mode == .bluetooth {
+      self.statusMessage = "Bluetooth mode uses signal strength, not UWB. Get your code to begin."
+      return
+    }
     if !supported {
       self.statusMessage =
-        "This device cannot measure UWB distance. Token exchange still works if the server is running."
+        "This device cannot measure UWB distance. Switch to Bluetooth, or use token exchange on a supported iPhone."
       return
     }
 
@@ -81,6 +133,11 @@ class InteractionManager: NSObject, ObservableObject {
   }
 
   func getMyToken() {
+    if self.mode == .bluetooth {
+      self.assignBluetoothCode()
+      return
+    }
+
     self.statusMessage = "Publishing discovery token…"
 
     guard let myTokenData = self.archivedDiscoveryToken() else {
@@ -140,6 +197,17 @@ class InteractionManager: NSObject, ObservableObject {
   }
 
   func getPeerToken(id: Int) {
+    if self.mode == .bluetooth {
+      self.peerBluetoothId = id
+      self.isPeerReady = true
+      self.statusMessage = "Peer code set. Tap Start on both phones."
+      if self.shouldStartWhenPeerReady {
+        self.shouldStartWhenPeerReady = false
+        self.startBluetoothIfPossible()
+      }
+      return
+    }
+
     self.isPeerReady = false
     self.peerToken = nil
     self.statusMessage = "Looking up peer code \(String(format: "%04d", id))…"
@@ -212,6 +280,15 @@ class InteractionManager: NSObject, ObservableObject {
   }
 
   func run(peerId: Int? = nil) {
+    if self.mode == .bluetooth {
+      if let peerId = peerId {
+        self.peerBluetoothId = peerId
+        self.isPeerReady = true
+      }
+      self.startBluetoothIfPossible()
+      return
+    }
+
     if self.peerToken != nil {
       self.startSessionIfPossible()
       return
@@ -225,7 +302,46 @@ class InteractionManager: NSObject, ObservableObject {
   }
 
   func invalidate() {
-    self.session?.invalidate()
+    self.bluetoothRanger.stop()
+    if let session = self.session {
+      session.delegate = nil
+      session.invalidate()
+      self.session = nil
+    }
+  }
+
+  private func handleModeChange() {
+    self.shouldStartWhenPeerReady = false
+    self.peerToken = nil
+    self.peerBluetoothId = nil
+    self.isPeerReady = false
+    self.myTokenId = 0
+    self.invalidate()
+    self.prepare()
+  }
+
+  private func assignBluetoothCode() {
+    self.myTokenId = 1000 + Int.random(in: 0..<9000)
+    self.statusMessage = String(
+      format: "Your code is %04d. Enter the other phone's code.", self.myTokenId)
+  }
+
+  private func startBluetoothIfPossible() {
+    guard self.myTokenId != 0 else {
+      self.statusMessage = "Get your code first."
+      return
+    }
+    guard let peerId = self.peerBluetoothId else {
+      self.statusMessage = "Enter a 4-digit peer code first."
+      return
+    }
+
+    if let session = self.session {
+      session.delegate = nil
+      session.invalidate()
+      self.session = nil
+    }
+    self.bluetoothRanger.start(myCode: self.myTokenId, peerCode: peerId)
   }
 
   private func startSessionIfPossible() {
@@ -243,6 +359,7 @@ class InteractionManager: NSObject, ObservableObject {
       return
     }
 
+    self.bluetoothRanger.stop()
     session.run(NINearbyPeerConfiguration(peerToken: peerToken))
     self.statusMessage = "Nearby Interaction session started."
   }
@@ -278,10 +395,12 @@ class InteractionManager: NSObject, ObservableObject {
 extension InteractionManager: NISessionDelegate {
   func sessionDidStartRunning(_ session: NISession) {
     DispatchQueue.main.async {
+      guard self.mode == .uwb else { return }
       self.statusMessage = "Session is running. Move the phones to update distance."
     }
   }
   func session(_ session: NISession, didUpdate: [NINearbyObject]) {
+    guard self.mode == .uwb else { return }
     for update in didUpdate {
       guard let distance = update.distance else {
         continue
@@ -313,6 +432,7 @@ extension InteractionManager: NISessionDelegate {
   }
   func session(_ session: NISession, didInvalidateWith error: Error) {
     DispatchQueue.main.async {
+      guard self.mode == .uwb else { return }
       self.statusMessage = "Session ended: \(error.localizedDescription)"
       self.peerToken = nil
       self.isPeerReady = false

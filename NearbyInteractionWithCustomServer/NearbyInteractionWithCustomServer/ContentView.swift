@@ -8,6 +8,14 @@ struct ContentView: View {
 
   var body: some View {
     VStack {
+      Picker("Ranging", selection: self.$interactionManager.mode) {
+        ForEach(DistanceMode.allCases) { mode in
+          Text(mode.title).tag(mode)
+        }
+      }
+      .pickerStyle(.segmented)
+      .padding(.horizontal)
+      .padding(.top)
       Text(
         self.interactionManager.myTokenId == 0
           ? "Please get your code"
@@ -51,13 +59,19 @@ struct ContentView: View {
           .padding()
       }
       Text(String(format: "Distance: %.1f m", self.distance))
-        .padding()
-      TextField("Server URL", text: self.$interactionManager.apiURL)
-        .textInputAutocapitalization(.never)
-        .disableAutocorrection(true)
-        .keyboardType(.URL)
-        .font(.footnote)
-        .padding(.horizontal)
+        .padding(.top)
+      Text(self.interactionManager.distanceCaption)
+        .font(.caption)
+        .foregroundColor(.secondary)
+        .padding(.bottom)
+      if self.interactionManager.mode == .uwb {
+        TextField("Server URL", text: self.$interactionManager.apiURL)
+          .textInputAutocapitalization(.never)
+          .disableAutocorrection(true)
+          .keyboardType(.URL)
+          .font(.footnote)
+          .padding(.horizontal)
+      }
       Text(self.interactionManager.statusMessage)
         .font(.footnote)
         .foregroundColor(.secondary)
@@ -73,6 +87,9 @@ struct ContentView: View {
       }
 
       self.distance = distanceValue
+    }
+    .onChange(of: self.interactionManager.mode) { _ in
+      self.distance = 0
     }
   }
   func hideKeyboard() {
