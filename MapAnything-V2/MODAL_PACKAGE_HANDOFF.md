@@ -21,7 +21,7 @@ The Modal-ready package is available as:
 
 ```bash
 unzip DNHacks_V2_Modal.zip
-cd DNHacks
+cd MapAnything-V2
 python -m pip install modal
 modal setup
 modal serve modal_app.py
