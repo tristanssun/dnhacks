@@ -86,6 +86,10 @@ final class PeerManager: NSObject, ObservableObject {
     private var lastDiscoveryRefresh = Date.distantPast
     /// Invitations still inside their timeout, keyed by peer. See `invite`.
     private var pendingInvites: [MCPeerID: Date] = [:]
+    /// When each peer last invited us. The non-initiator uses this to tell an
+    /// initiator that is still trying from one that has given up.
+    private var lastInviteReceived: [MCPeerID: Date] = [:]
+    private let initiatorGrace: TimeInterval = 15
     private let launchedAt = CACurrentMediaTime()
     private var lastSessionState: [MCPeerID: MCSessionState] = [:]
     private var lastSendFailureLog: [MCPeerID: Date] = [:]
@@ -687,6 +691,7 @@ final class PeerManager: NSObject, ObservableObject {
         // the estimate already agrees with the range, which needs no retry.
         pendingRecalibration.remove(peerID)
         pendingInvites[peerID] = nil
+        lastInviteReceived[peerID] = nil
         let direction = freshDirection(for: peerID, at: now)
         if locar.calibrate(peerID: peerID, range: range, direction: direction) {
             lastCalibration[peerID] = now
@@ -1003,9 +1008,12 @@ final class PeerManager: NSObject, ObservableObject {
     /// what keeps recovery working when the initiator is the device that died.
     private func scheduleReconnect(_ peerID: MCPeerID) {
         reconnectTasks[peerID]?.cancel()
+        // The non-initiator keeps checking rather than taking one shot at 12 s.
+        // Each check defers while the initiator is still trying, so the takeover
+        // has to be able to come back later — see `attemptReconnect`.
         let delays: [Duration] = isInitiator(for: peerID)
             ? [.seconds(1), .seconds(2.5)]
-            : [.seconds(12)]
+            : [.seconds(12), .seconds(15), .seconds(15)]
         reconnectTasks[peerID] = Task { [weak self] in
             for delay in delays {
                 try? await Task.sleep(for: delay)
@@ -1022,6 +1030,18 @@ final class PeerManager: NSObject, ObservableObject {
     private func attemptReconnect(_ peerID: MCPeerID) -> Bool {
         if mcSession?.connectedPeers.contains(peerID) == true {
             return true
+        }
+        // The takeover is conditional, not timed. The initiator re-arms its own
+        // retry on every failure, so it keeps inviting indefinitely; a fallback
+        // on a fixed clock lands in the middle of that and both sides invite at
+        // once. Duplicate sessions follow, and MC resolves them by tearing one
+        // down — which in the logs killed an already-connected link. So the
+        // non-initiator only steps in once the initiator has actually gone quiet.
+        if !isInitiator(for: peerID),
+           let last = lastInviteReceived[peerID],
+           Date().timeIntervalSince(last) < initiatorGrace {
+            mcLog("fallback-deferred", peerID, "initiator still trying")
+            return false
         }
         // No `refreshDiscovery()` here. It restarted the browser and invited
         // through it in the same breath, before the peer had been rediscovered,
@@ -1282,13 +1302,23 @@ final class PeerManager: NSObject, ObservableObject {
         let candidates = niSessions.keys.sorted { $0.displayName < $1.displayName }
         guard candidates.count > 1, let index = candidates.firstIndex(of: current) else { return }
 
-        let held = Date().timeIntervalSince(cameraAssistanceGrantedAt)
+        let now = Date()
+        let held = now.timeIntervalSince(cameraAssistanceGrantedAt)
         // A nil hint means NIAlgorithmConvergence reported `.converged`.
         let converged = peers[current]?.hint == nil
         let due = held >= (converged ? cameraAssistanceMinHold : cameraAssistanceMaxHold)
         guard due else { return }
 
-        moveCameraAssistance(to: candidates[(index + 1) % candidates.count], from: current)
+        let next = candidates[(index + 1) % candidates.count]
+        // Rotating re-runs both configurations, and re-running a configuration
+        // restarts that peer's ranging. On a clock that manufactures a dropout
+        // every cycle — the tilde flicker was partly self-inflicted. Rotate into
+        // a gap instead: only hand the camera to a peer that has no live range
+        // and therefore actually needs the help, and never interrupt one that is
+        // already ranging cleanly.
+        guard tracks[next]?.isLive(at: now) != true else { return }
+
+        moveCameraAssistance(to: next, from: current)
     }
 
     /// Re-running a configuration briefly interrupts that peer's ranging, which
@@ -1519,6 +1549,7 @@ extension PeerManager: MCNearbyServiceAdvertiserDelegate {
         let alreadyConnected = invitationSession?.connectedPeers.contains(peerID) == true
         Task { @MainActor in
             self.remember(peerID, remoteID: remoteID)
+            self.lastInviteReceived[peerID] = Date()
             // Logged with whether we also had an invitation of our own in
             // flight: both sides inviting at once is what produces duplicate
             // sessions, and the loser is torn down with a connection reset.

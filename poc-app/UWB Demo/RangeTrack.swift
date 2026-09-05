@@ -43,7 +43,13 @@ struct RangeTrack {
     static let remoteSigma: Float = 0.15
     static let maxRate: Float = 3
     static let maxExtrapolation: TimeInterval = 0.35
-    static let liveWindow: TimeInterval = 0.75
+    /// How recent a measurement has to be to render without the stale marker.
+    ///
+    /// 0.75 s was tighter than Nearby Interaction's own cadence near the edge of
+    /// its range, where samples arrive sparsely and irregularly, so ordinary
+    /// jitter at 8-9 m was being drawn as a failure. A 1.5 s old UWB reading is
+    /// still a measurement; `staleWindow` at 5 s still covers genuinely gone.
+    static let liveWindow: TimeInterval = 1.5
     static let staleWindow: TimeInterval = 5
 
     init(range: Float, at date: Date, mode: Mode = .uwbFirst) {
