@@ -72,6 +72,15 @@ struct RangeTrack {
     /// Take the UWB sample as-is. The only rejection is a physically impossible
     /// jump (faster than `maxRate`), and even that is accepted after 3 in a row.
     private mutating func snap(_ measurement: Float, at date: Date) {
+        // Ranging returning after a dropout. The held value is dead-reckoned
+        // rather than measured, so there is nothing to reconcile against, and
+        // the jump gate below would reject the truth for three samples running
+        // — longer in practice, since `outliers` resets on any accepted sample
+        // and marginal-range readings interleave good with bad. Start clean.
+        if isStale(at: date) {
+            self = RangeTrack(range: measurement, at: date, mode: mode)
+            return
+        }
         let dt = Float(max(date.timeIntervalSince(updatedAt), 0.02))
         let previous = range
         let jump = measurement - value(at: date)
@@ -98,6 +107,12 @@ struct RangeTrack {
     /// Kalman fuse of a range measurement taken at `date`. Late samples are
     /// shifted by the current rate so a 50 ms old value doesn't drag the estimate.
     private mutating func fuse(_ measurement: Float, sigma: Float, at date: Date) {
+        // Same reasoning as `snap`, and it also avoids running `predict` across
+        // a multi-second gap, where the q*dt^4 covariance term explodes.
+        if isStale(at: date) {
+            self = RangeTrack(range: measurement, at: date, mode: mode)
+            return
+        }
         predict(to: date)
         let lag = Float(max(predictedAt.timeIntervalSince(date), 0))
         let z = measurement + rate * min(lag, 0.25)

@@ -83,6 +83,9 @@ final class PeerManager: NSObject, ObservableObject {
     private var lastEstimate: [MCPeerID: LocAREngine.Estimate] = [:]
     /// Last time each peer's range / bearing was fed to the filter. See
     /// `shouldIngest`. 10 Hz matches the paper's own UWB polling rate (§5.2).
+    /// Peers whose ranging just resumed after a dropout; they get one calibrate
+    /// that bypasses `calibrationInterval`. See `track` and `calibrateIfDue`.
+    private var pendingRecalibration: Set<MCPeerID> = []
     private var lastRangeIngest: [MCPeerID: Date] = [:]
     private var lastBearingIngest: [MCPeerID: Date] = [:]
     private let ingestInterval: TimeInterval = 0.1
@@ -438,6 +441,12 @@ final class PeerManager: NSObject, ObservableObject {
 
     private func track(_ peerID: MCPeerID, measurement: Float, from source: RangeTrack.Source, at date: Date) {
         if var track = tracks[peerID] {
+            // Stale -> fresh means UWB just came back after a dropout, during
+            // which the filter had only dead reckoning. Snap the cloud now
+            // rather than up to `calibrationInterval` later.
+            if track.isStale(at: date) {
+                pendingRecalibration.insert(peerID)
+            }
             track.update(measurement, from: source, at: date)
             tracks[peerID] = track
         } else if source == .local || trackMode == .smoothed {
@@ -545,9 +554,13 @@ final class PeerManager: NSObject, ObservableObject {
     }
 
     private func calibrateIfDue(_ peerID: MCPeerID, range: Float, at now: Date) {
-        if let last = lastCalibration[peerID], now.timeIntervalSince(last) < calibrationInterval {
+        let forced = pendingRecalibration.contains(peerID)
+        if !forced, let last = lastCalibration[peerID], now.timeIntervalSince(last) < calibrationInterval {
             return
         }
+        // Cleared on the attempt, not on success: `calibrate` also declines when
+        // the estimate already agrees with the range, which needs no retry.
+        pendingRecalibration.remove(peerID)
         let direction = freshDirection(for: peerID, at: now)
         if locar.calibrate(peerID: peerID, range: range, direction: direction) {
             lastCalibration[peerID] = now
@@ -939,6 +952,7 @@ final class PeerManager: NSObject, ObservableObject {
         lastEstimate[peerID] = nil
         lastRangeIngest[peerID] = nil
         lastBearingIngest[peerID] = nil
+        pendingRecalibration.remove(peerID)
         locar.forget(peerID)
         peers[peerID] = nil
         isTearingDown = false
