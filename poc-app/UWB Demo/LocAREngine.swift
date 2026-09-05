@@ -303,6 +303,72 @@ final class LocAREngine {
         }
     }
 
+    /// A peer's estimate of target − anchor (§8), expressed in the anchor's
+    /// ARKit frame. Sampling both anchor position and θ preserves their joint
+    /// uncertainty: θ is the transform that rotates the shared vector into this
+    /// display's frame before it can constrain the target cloud.
+    func ingestRelativeEstimate(target: MCPeerID, anchor: MCPeerID, vector: SIMD3<Float>, confidence: Float) {
+        guard hasLocal, target != anchor, hasTargets(anchor),
+              vector.x.isFinite, vector.y.isFinite, vector.z.isFinite,
+              confidence.isFinite else { return }
+        let boundedConfidence = min(max(confidence, 0), 1)
+        // Linear interpolation gives a camera-resolved estimate a roughly 0.5 m
+        // acceptance ball while an unresolved estimate remains a useful but soft
+        // 3 m constraint. Clamping above keeps the radius finite and positive.
+        let limit: Float = 3.0 - 2.5 * boundedConfidence
+        guard limit.isFinite, limit > 0 else { return }
+        let inlierProbability = 1 - nlosProbability
+
+        for i in hypotheses.indices {
+            guard let anchorCloud = hypotheses[i].targets[anchor] else { continue }
+            let anchors = samplePoses(anchorCloud, count: Self.anchorSamples)
+            guard !anchors.isEmpty else { continue }
+            let implied = anchors.map { sample -> SIMD3<Float> in
+                let cosine = cos(sample.theta)
+                let sine = sin(sample.theta)
+                let rotated = SIMD3<Float>(
+                    vector.x * cosine + vector.z * sine,
+                    vector.y,
+                    vector.z * cosine - vector.x * sine
+                )
+                return sample.position + rotated
+            }
+            guard implied.allSatisfy({ $0.x.isFinite && $0.y.isFinite && $0.z.isFinite }) else { continue }
+            guard var particles = hypotheses[i].targets[target] else {
+                // First sight through a third party must start near its implied
+                // position; half the acceptance radius keeps seeds inside the
+                // shared estimate without pretending it is an exact point fix.
+                let position = implied[Int.random(in: 0..<implied.count)]
+                hypotheses[i].targets[target] = seedSphere(origin: position, range: limit * 0.5)
+                continue
+            }
+            var inliers: Float = 0
+            for k in particles.indices {
+                let point = SIMD3<Float>(particles[k].x, particles[k].y, particles[k].z)
+                var hits = 0
+                for impliedPoint in implied where simd_length(point - impliedPoint) <= limit {
+                    hits += 1
+                }
+                let denominator = Float(implied.count)
+                guard denominator.isFinite, denominator > 0 else { continue }
+                let fraction = Float(hits) / denominator
+                let probability = nlosProbability + (inlierProbability - nlosProbability) * fraction
+                if hits > 0 {
+                    inliers += particles[k].weight
+                }
+                particles[k].weight *= probability
+            }
+            normalize(&particles)
+            if inliers < 0.15 {
+                let position = implied[Int.random(in: 0..<implied.count)]
+                injectSphere(into: &particles, origin: position, range: limit * 0.5, fraction: 0.3)
+            } else if effectiveCount(particles) < Float(Self.targetCount) * 0.5 {
+                resample(&particles)
+            }
+            hypotheses[i].targets[target] = particles
+        }
+    }
+
     /// Recurring UWB lock-in. With a fresh Nearby Interaction direction the peer
     /// cloud is collapsed onto that 3D fix. Without direction, the cloud is only
     /// pulled onto the range sphere if it disagrees with the range by > 0.5 m.
@@ -401,6 +467,37 @@ final class LocAREngine {
             bearingConfidence: confidence,
             worldPosition: world / total
         )
+    }
+
+    /// E[V − D] in this device's full 3D ARKit frame. `Estimate.direction`
+    /// deliberately drops height, so it cannot carry the §8 shared constraint.
+    func relativeVector(for peerID: MCPeerID) -> (vector: SIMD3<Float>, confidence: Float)? {
+        guard hasLocal, hasTargets(peerID) else { return nil }
+        var relativeMean = SIMD3<Float>.zero
+        var bearingMean = SIMD2<Float>.zero
+        var total: Float = 0
+        for hypothesis in hypotheses {
+            guard let particles = hypothesis.targets[peerID] else { continue }
+            let display = SIMD3<Float>(hypothesis.x, hypothesis.y, hypothesis.z)
+            for particle in particles {
+                let relative = SIMD3<Float>(particle.x, particle.y, particle.z) - display
+                let weight = hypothesis.weight * particle.weight
+                guard weight.isFinite, relative.x.isFinite, relative.y.isFinite, relative.z.isFinite else { continue }
+                relativeMean += relative * weight
+                let planar = hypot(relative.x, relative.z)
+                if planar.isFinite, planar > 0.02 {
+                    bearingMean += SIMD2<Float>(relative.x, relative.z) / planar * weight
+                }
+                total += weight
+            }
+        }
+        guard total.isFinite, total > 0 else { return nil }
+        relativeMean /= total
+        bearingMean /= total
+        let confidence = simd_length(bearingMean)
+        guard relativeMean.x.isFinite, relativeMean.y.isFinite, relativeMean.z.isFinite,
+              confidence.isFinite else { return nil }
+        return (relativeMean, min(max(confidence, 0), 1))
     }
 
     /// Body azimuth (0 = forward, positive = right) for an NI direction vector.
@@ -564,6 +661,28 @@ final class LocAREngine {
                 cumulative += particles[index].weight
             }
             result.append(SIMD3<Float>(particles[index].x, particles[index].y, particles[index].z))
+        }
+        return result
+    }
+
+    /// Systematic sample retaining the frame transform needed by §8 vectors.
+    private func samplePoses(_ particles: [TargetParticle], count: Int) -> [(position: SIMD3<Float>, theta: Float)] {
+        guard !particles.isEmpty, count > 0 else { return [] }
+        var result: [(position: SIMD3<Float>, theta: Float)] = []
+        result.reserveCapacity(count)
+        var index = 0
+        let denominator = Float(count)
+        guard denominator.isFinite, denominator > 0 else { return [] }
+        let start = Float.random(in: 0..<(1 / denominator))
+        var cumulative = particles[0].weight
+        for step in 0..<count {
+            let probe = start + Float(step) / denominator
+            while index < particles.count - 1, probe > cumulative {
+                index += 1
+                cumulative += particles[index].weight
+            }
+            let particle = particles[index]
+            result.append((SIMD3<Float>(particle.x, particle.y, particle.z), particle.theta))
         }
         return result
     }

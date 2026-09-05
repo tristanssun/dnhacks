@@ -83,14 +83,15 @@ final class PeerManager: NSObject, ObservableObject {
     /// Most recent estimate per peer. `publishLocAR` computes these; everything
     /// else reuses them rather than walking the particle clouds again.
     private var lastEstimate: [MCPeerID: LocAREngine.Estimate] = [:]
-    /// Last time each peer's range / bearing was fed to the filter. See
-    /// `shouldIngest`. 10 Hz matches the paper's own UWB polling rate (§5.2).
+    private var lastDiscoveryRefresh = Date.distantPast
     /// Peers whose ranging just resumed after a dropout; they get one calibrate
     /// that bypasses `calibrationInterval`. See `track` and `calibrateIfDue`.
-    private var lastDiscoveryRefresh = Date.distantPast
     private var pendingRecalibration: Set<MCPeerID> = []
+    /// Last time each peer's range, bearing, and shared estimate reached the
+    /// filter. See `shouldIngest`. 10 Hz matches the paper's UWB rate (§5.2).
     private var lastRangeIngest: [MCPeerID: Date] = [:]
     private var lastBearingIngest: [MCPeerID: Date] = [:]
+    private var lastRelativeEstimateIngest: [MCPeerID: Date] = [:]
     private let ingestInterval: TimeInterval = 0.1
     /// Set by anything that changes filter state; drained by `publishTimer`.
     private var needsPublish = false
@@ -130,6 +131,8 @@ final class PeerManager: NSObject, ObservableObject {
     private var lastBearing: [MCPeerID: (angle: Float, date: Date)] = [:]
     /// Newest peer-to-peer range sample already fed to the filter, keyed "a|b".
     private var peerRangeDates: [String: Date] = [:]
+    /// Newest §8 estimate per anchor and target; unreliable packets may reorder.
+    private var relativeEstimateDates: [MCPeerID: [MCPeerID: Date]] = [:]
     private var lastCalibration: [MCPeerID: Date] = [:]
     private let freshWindow: TimeInterval = 0.75
     /// Bearings arrive sparsely at range, and a usable one was being discarded
@@ -211,6 +214,7 @@ final class PeerManager: NSObject, ObservableObject {
             self?.sendPings()
             self?.readConnectedRSSI()
             self?.shareRanges()
+            self?.broadcastRelativeEstimates()
             self?.calibrateAllDue()
             self?.refreshDiscoveryIfIdle()
             self?.rotateCameraAssistanceIfDue()
@@ -443,6 +447,80 @@ final class PeerManager: NSObject, ObservableObject {
         }
     }
 
+    /// 0x57 | count (UInt8) | entries of: peer UUID (16 bytes) | target − self
+    /// (three Float32s in our ARKit frame) | confidence (Float32) | age ms (UInt16).
+    /// Only peers with a fresh direct UWB range are included: §8 estimates remain
+    /// single-hop evidence and can never circle back through another estimator.
+    private func broadcastRelativeEstimates() {
+        guard let session = mcSession, session.connectedPeers.count > 1 else { return }
+        let now = Date()
+        var entries = Data()
+        var count: UInt8 = 0
+        for (peerID, sample) in localRange where now.timeIntervalSince(sample.date) < freshWindow {
+            guard let remoteID = knownRemoteIDs[peerID], let uuid = UUID(uuidString: remoteID),
+                  let estimate = locar.relativeVector(for: peerID), estimate.confidence > 0.6,
+                  estimate.vector.x.isFinite, estimate.vector.y.isFinite, estimate.vector.z.isFinite,
+                  estimate.confidence.isFinite else { continue }
+            withUnsafeBytes(of: uuid.uuid) { entries.append(contentsOf: $0) }
+            var dx = estimate.vector.x
+            var dy = estimate.vector.y
+            var dz = estimate.vector.z
+            var confidence = estimate.confidence
+            var age = UInt16(clamping: Int(now.timeIntervalSince(sample.date) * 1000))
+            withUnsafeBytes(of: &dx) { entries.append(contentsOf: $0) }
+            withUnsafeBytes(of: &dy) { entries.append(contentsOf: $0) }
+            withUnsafeBytes(of: &dz) { entries.append(contentsOf: $0) }
+            withUnsafeBytes(of: &confidence) { entries.append(contentsOf: $0) }
+            withUnsafeBytes(of: &age) { entries.append(contentsOf: $0) }
+            count += 1
+            if count == 255 { break }
+        }
+        guard count > 0 else { return }
+        var data = Data([0x57, count])
+        data.append(entries)
+        try? session.send(data, toPeers: session.connectedPeers, with: .unreliable)
+    }
+
+    private func handleRelativeEstimates(_ data: Data, from sender: MCPeerID) {
+        let bytes = [UInt8](data)
+        guard bytes.count >= 2 else { return }
+        let count = Int(bytes[1])
+        let entrySize = 34
+        guard bytes.count == 2 + count * entrySize else { return }
+        let now = Date()
+        let mine = discoveryUUID
+        var dates = relativeEstimateDates[sender] ?? [:]
+        var changed = false
+        for index in 0..<count {
+            let base = 2 + index * entrySize
+            let uuid = bytes[base..<(base + 16)].withUnsafeBytes { UUID(uuid: $0.load(as: uuid_t.self)) }
+            let dx = bytes[(base + 16)..<(base + 20)].withUnsafeBytes { $0.loadUnaligned(as: Float.self) }
+            let dy = bytes[(base + 20)..<(base + 24)].withUnsafeBytes { $0.loadUnaligned(as: Float.self) }
+            let dz = bytes[(base + 24)..<(base + 28)].withUnsafeBytes { $0.loadUnaligned(as: Float.self) }
+            let confidence = bytes[(base + 28)..<(base + 32)].withUnsafeBytes { $0.loadUnaligned(as: Float.self) }
+            let ageMs = bytes[(base + 32)..<(base + 34)].withUnsafeBytes { $0.loadUnaligned(as: UInt16.self) }
+            guard dx.isFinite, dy.isFinite, dz.isFinite, confidence.isFinite else { continue }
+            guard mine == nil || uuid != mine else { continue }
+            guard let target = peer(forRemoteUUID: uuid), target != sender else { continue }
+            let date = now.addingTimeInterval(-Double(ageMs) / 1000)
+            guard now.timeIntervalSince(date) < freshWindow else { continue }
+            if let last = dates[target], last >= date { continue }
+            dates[target] = date
+            guard shouldIngest(target, .relativeEstimate, at: now) else { continue }
+            locar.ingestRelativeEstimate(
+                target: target,
+                anchor: sender,
+                vector: SIMD3<Float>(dx, dy, dz),
+                confidence: confidence
+            )
+            changed = true
+        }
+        relativeEstimateDates[sender] = dates
+        if changed {
+            setNeedsPublish()
+        }
+    }
+
     private func handleRemoteRange(_ data: Data, from peerID: MCPeerID) {
         let range = data.subdata(in: 1..<5).withUnsafeBytes { $0.load(as: Float.self) }
         let ageMs = data.subdata(in: 5..<7).withUnsafeBytes { $0.load(as: UInt16.self) }
@@ -488,6 +566,7 @@ final class PeerManager: NSObject, ObservableObject {
     private enum IngestChannel {
         case range
         case bearing
+        case relativeEstimate
     }
 
     /// Gate on feeding the filter, per peer and per channel.
@@ -507,6 +586,7 @@ final class PeerManager: NSObject, ObservableObject {
         switch channel {
         case .range: last = lastRangeIngest[peerID]
         case .bearing: last = lastBearingIngest[peerID]
+        case .relativeEstimate: last = lastRelativeEstimateIngest[peerID]
         }
         if let last, now.timeIntervalSince(last) < ingestInterval {
             return false
@@ -514,6 +594,7 @@ final class PeerManager: NSObject, ObservableObject {
         switch channel {
         case .range: lastRangeIngest[peerID] = now
         case .bearing: lastBearingIngest[peerID] = now
+        case .relativeEstimate: lastRelativeEstimateIngest[peerID] = now
         }
         return true
     }
@@ -1001,6 +1082,10 @@ final class PeerManager: NSObject, ObservableObject {
             handleRangeList(data, from: peerID)
             return
         }
+        if data.count >= 2, data.first == 0x57 {
+            handleRelativeEstimates(data, from: peerID)
+            return
+        }
         if data.count > 1, data.first == 0x49 {
             if let id = String(data: data.dropFirst(), encoding: .utf8), UUID(uuidString: id) != nil {
                 remember(peerID, remoteID: id)
@@ -1140,12 +1225,20 @@ final class PeerManager: NSObject, ObservableObject {
         lastNIDirection[peerID] = nil
         lastBearing[peerID] = nil
         peerRangeDates = peerRangeDates.filter { !$0.key.split(separator: "|").contains(Substring(peerID.displayName)) }
+        relativeEstimateDates[peerID] = nil
+        for anchor in Array(relativeEstimateDates.keys) {
+            relativeEstimateDates[anchor]?[peerID] = nil
+            if relativeEstimateDates[anchor]?.isEmpty == true {
+                relativeEstimateDates[anchor] = nil
+            }
+        }
         lastCalibration[peerID] = nil
         pingSentAt[peerID] = nil
         forgetBluetooth(for: peerID)
         lastEstimate[peerID] = nil
         lastRangeIngest[peerID] = nil
         lastBearingIngest[peerID] = nil
+        lastRelativeEstimateIngest[peerID] = nil
         pendingRecalibration.remove(peerID)
         tokenRetries[peerID]?.cancel()
         tokenRetries[peerID] = nil
