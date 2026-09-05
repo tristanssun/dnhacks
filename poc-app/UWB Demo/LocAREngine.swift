@@ -56,7 +56,17 @@ final class LocAREngine {
     private let sigmaXYZ: Float = 0.015
     /// Small residual ARKit drift while stationary, metres per sqrt(second).
     private let staticSigmaXYZ: Float = 0.001
-    private let sigmaTheta: Float = 0.008
+    /// θ is the offset between two ARKit frames, so its real process noise is
+    /// ARKit yaw drift — about 2°/min per device, ~0.049 rad/min relative. At
+    /// the 10 Hz remote VIO rate a random walk accumulates as σ·√600, so σ per
+    /// message is 0.049/24.5. The previous 0.008 injected four times the drift
+    /// the hardware has: ~11°/min of self-inflicted spread, 1.7 m of lateral
+    /// error at 9 m.
+    private let sigmaTheta: Float = 0.002
+    /// Half-width of the compass agreement band, radians. Wide because indoor
+    /// magnetic bias is tens of degrees; this is a floor on how bad θ can get,
+    /// not a source of precision.
+    private let thetaAnchorBand: Float = 0.7
     private let sigmaRange: Float = 0.18
     /// Camera-assisted `horizontalAngle` accuracy once converged, radians.
     private let sigmaBearing: Float = 0.12
@@ -172,6 +182,33 @@ final class LocAREngine {
                 // peer therefore neither learns nor diffuses its frame yaw offset.
                 particles[k].theta = Self.wrap(theta + (translated ? gauss(sigmaTheta) : 0))
             }
+            hypotheses[i].targets[peerID] = particles
+        }
+    }
+
+    /// Weak absolute anchor on θ from the two compasses, applied only once the
+    /// cloud has already lost θ.
+    ///
+    /// Indoor magnetic bias is tens of degrees, so applying this continuously
+    /// would make the filter confidently wrong at whatever the local bias is —
+    /// the bias is systematic, and repeated application compounds it rather
+    /// than averaging it out. But θ has no other restoring force: its only
+    /// observation scales with peer displacement, so a peer that stays still
+    /// lets θ random-walk anywhere on the circle with nothing to stop it.
+    ///
+    /// Applying it only on degeneracy makes it a recovery path rather than a
+    /// continuous force: it bounds how bad θ can get without capping how good
+    /// θ can become when real observations are available.
+    func ingestThetaAnchor(peerID: MCPeerID, theta: Float) {
+        guard hasTargets(peerID), theta.isFinite else { return }
+        let inlierProbability = 1 - nlosProbability
+        for i in hypotheses.indices {
+            guard var particles = hypotheses[i].targets[peerID] else { continue }
+            for k in particles.indices {
+                let error = abs(Self.wrap(particles[k].theta - theta))
+                particles[k].weight *= error <= thetaAnchorBand ? inlierProbability : nlosProbability
+            }
+            normalize(&particles)
             hypotheses[i].targets[peerID] = particles
         }
     }

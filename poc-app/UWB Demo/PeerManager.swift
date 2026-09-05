@@ -100,6 +100,11 @@ final class PeerManager: NSObject, ObservableObject {
     private var lastDeadReckonPosition: SIMD3<Float>?
     /// Peer's ARKit yaw from 0x56, half of the compass θ prior.
     private var lastRemoteYaw: [MCPeerID: Float] = [:]
+    /// Last compass θ anchor per peer. See `updateThetaPrior`.
+    private var lastThetaAnchor: [MCPeerID: Date] = [:]
+    private let thetaAnchorInterval: TimeInterval = 2
+    /// θ confidence below which the compass is allowed to intervene.
+    private let thetaAnchorConfidence: Float = 0.3
     /// Most recent estimate per peer. `publishLocAR` computes these; everything
     /// else reuses them rather than walking the particle clouds again.
     private var lastEstimate: [MCPeerID: LocAREngine.Estimate] = [:]
@@ -725,6 +730,7 @@ final class PeerManager: NSObject, ObservableObject {
         pendingInvites[peerID] = nil
         lastInviteReceived[peerID] = nil
         lastRemoteYaw[peerID] = nil
+        lastThetaAnchor[peerID] = nil
         let direction = freshDirection(for: peerID, at: now)
         if locar.calibrate(peerID: peerID, range: range, direction: direction) {
             lastCalibration[peerID] = now
@@ -1249,7 +1255,23 @@ final class PeerManager: NSObject, ObservableObject {
               let theirYaw = lastRemoteYaw[peerID] else { return }
         let ourOffset = localHeading - locar.localYaw
         let theirOffset = theirHeading - theirYaw
-        locar.setThetaPrior(theirOffset - ourOffset, for: peerID)
+        let compassTheta = theirOffset - ourOffset
+        locar.setThetaPrior(compassTheta, for: peerID)
+
+        // Fed as an observation only once θ has degenerated. The compass is
+        // biased, not noisy, so applying it every cycle would drag a converged
+        // θ onto the local magnetic error and hold it there. Gating on low
+        // confidence makes it a floor under drift rather than a ceiling on
+        // accuracy, and rate-limiting keeps a burst of headings from stacking
+        // the same biased evidence several times over.
+        let now = Date()
+        guard let confidence = lastEstimate[peerID]?.thetaConfidence,
+              confidence < thetaAnchorConfidence else { return }
+        if let last = lastThetaAnchor[peerID], now.timeIntervalSince(last) < thetaAnchorInterval {
+            return
+        }
+        lastThetaAnchor[peerID] = now
+        locar.ingestThetaAnchor(peerID: peerID, theta: compassTheta)
     }
 
     /// Whether some peer has recently told us where this one is. Read across
