@@ -1,4 +1,5 @@
 import ARKit
+import QuartzCore
 import simd
 
 final class VIOTracker: NSObject, ARSessionDelegate {
@@ -64,6 +65,9 @@ final class VIOTracker: NSObject, ARSessionDelegate {
     }
 
     nonisolated func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        // Counted before any thinning: this is ARKit's true delivery rate, and
+        // a fall means ARKit is throttling us for holding on to frames.
+        perfCounters.recordARFrame()
         let transform = frame.camera.transform
         let reliable: Bool
         switch frame.camera.trackingState {
@@ -87,7 +91,11 @@ final class VIOTracker: NSObject, ARSessionDelegate {
         lastForwardedReliable = reliable
         let timestamp = frame.timestamp
         let position = SIMD3<Float>(transform.columns.3.x, transform.columns.3.y, transform.columns.3.z)
+        let hopStart = CACurrentMediaTime()
         Task { @MainActor in
+            // Time from handing the pose off to the main actor actually running
+            // it. Rises without bound once arrivals outpace the main thread.
+            perfCounters.recordHop(CACurrentMediaTime() - hopStart)
             let yaw = Self.yaw(from: transform) ?? self.lastYaw
             self.lastYaw = yaw
             let resumed = reliable && !self.wasReliable && self.hasEverTracked

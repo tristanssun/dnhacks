@@ -79,6 +79,9 @@ final class PeerManager: NSObject, ObservableObject {
     private var lastVIOSend = Date.distantPast
     private var lastLocarPublish = Date.distantPast
     private var lastDeadReckonPosition: SIMD3<Float>?
+    /// Most recent estimate per peer, reused by `deadReckon` in A/B arm B.
+    private var lastEstimate: [MCPeerID: LocAREngine.Estimate] = [:]
+    let perf = PerfMonitor()
     private var pendingVIOReset = false
     private var useCameraAssistance = NISession.deviceCapabilities.supportsCameraAssistance
 
@@ -151,6 +154,7 @@ final class PeerManager: NSObject, ObservableObject {
     }
 
     private func start() {
+        perf.start()
         replaceSession()
 
         let advertiser = MCNearbyServiceAdvertiser(
@@ -191,6 +195,7 @@ final class PeerManager: NSObject, ObservableObject {
             pendingVIOReset = true
         }
         let now = Date()
+        locar.isRecenteringEnabled = perf.recentering
         locar.setLocal(pose)
         // Poses already arrive thinned to ~20 Hz by VIOTracker.
         deadReckon(from: pose, at: now)
@@ -248,7 +253,10 @@ final class PeerManager: NSObject, ObservableObject {
         let forward = SIMD2<Float>(sin(pose.yaw), cos(pose.yaw))
         let right = SIMD2<Float>(-cos(pose.yaw), sin(pose.yaw))
         for id in tracks.keys {
-            guard let estimate = locar.estimate(for: id),
+            // A/B arm B reuses the estimate `publishLocAR` already computed
+            // instead of walking every particle a second time.
+            let cached = perf.freshEstimate ? locar.estimate(for: id) : lastEstimate[id]
+            guard let estimate = cached,
                   estimate.bearingConfidence > deadReckonConfidence else { continue }
             let worldBearing = forward * estimate.direction.y + right * estimate.direction.x
             let rangeDelta = -simd_dot(SIMD2<Float>(displacement.x, displacement.z), worldBearing)
@@ -498,9 +506,11 @@ final class PeerManager: NSObject, ObservableObject {
     private func publishLocAR() {
         let now = Date()
         lastLocarPublish = now
+        perfCounters.recordPublish()
         for id in peers.keys {
             guard var peer = peers[id] else { continue }
             let estimate = locar.estimate(for: id)
+            lastEstimate[id] = estimate
             bearingConfidence[id] = estimate?.bearingConfidence ?? 0
 
             peer.range = tracks[id]
@@ -859,6 +869,7 @@ final class PeerManager: NSObject, ObservableObject {
         lastCalibration[peerID] = nil
         pingSentAt[peerID] = nil
         forgetBluetooth(for: peerID)
+        lastEstimate[peerID] = nil
         locar.forget(peerID)
         peers[peerID] = nil
         isTearingDown = false

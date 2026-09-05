@@ -17,10 +17,15 @@ struct ContentView: View {
                 }
             }
             .ignoresSafeArea()
+            .overlay(alignment: .top) {
+                PerfHUD(perf: manager.perf)
+            }
         }
     }
 
     private func radar(size: CGSize, safeArea: EdgeInsets, date: Date) -> some View {
+        // One call per TimelineView tick, so this is the rate the user sees.
+        perfCounters.recordUIFrame()
         let pad: CGFloat = 24
         let local = CGPoint(x: size.width / 2, y: size.height - safeArea.bottom - pad)
         let minX = pad
@@ -240,6 +245,57 @@ struct ContentView: View {
     private static func latency(_ ms: Int?) -> String {
         guard let ms else { return "- ms" }
         return "\(ms) ms"
+    }
+}
+
+/// A/B controls and live counters for the progressive-slowdown test.
+/// Flip a toggle mid-run: the same session, map, and thermal state on both
+/// sides of the switch is a far cleaner comparison than two separate runs.
+private struct PerfHUD: View {
+    @ObservedObject var perf: PerfMonitor
+
+    var body: some View {
+        let snapshot = perf.snapshot
+        VStack(spacing: 5) {
+            HStack(spacing: 12) {
+                metric("AR", snapshot.arHz, "%.0f", "Hz")
+                metric("UI", snapshot.uiHz, "%.0f", "Hz")
+                metric("pub", snapshot.publishHz, "%.0f", "Hz")
+                metric("hop p95", snapshot.hopP95Ms, "%.1f", "ms")
+                metric("recenter", snapshot.recenterMsPerSec, "%.0f", "ms/s")
+                metric("mem", snapshot.memoryMB, "%.0f", "MB")
+                VStack(spacing: 0) {
+                    Text("thermal")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                    Text(PerfMonitor.thermalNames[min(snapshot.thermal, 3)])
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(snapshot.thermal >= 2 ? .red : .primary)
+                }
+            }
+            HStack(spacing: 8) {
+                Toggle("recenter", isOn: $perf.recentering)
+                Toggle("fresh est", isOn: $perf.freshEstimate)
+            }
+            .toggleStyle(.button)
+            .buttonStyle(.bordered)
+            .controlSize(.mini)
+            .font(.caption2)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
+        .padding(.top, 2)
+    }
+
+    private func metric(_ label: String, _ value: Double, _ format: String, _ unit: String) -> some View {
+        VStack(spacing: 0) {
+            Text(label)
+                .font(.system(size: 9))
+                .foregroundStyle(.secondary)
+            Text(String(format: format, value) + unit)
+                .font(.system(size: 12, weight: .medium).monospacedDigit())
+        }
     }
 }
 
