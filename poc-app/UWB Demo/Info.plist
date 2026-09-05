@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>UWBDemo uses Bluetooth to discover and connect to nearby devices.</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>UWBDemo uses Bluetooth to discover and connect to nearby devices.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_uwbdemo._tcp</string>
+		<string>_uwbdemo._udp</string>
+	</array>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>UWBDemo uses the compass to show which way nearby phones are facing.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>UWBDemo uses the local network to discover and connect to nearby devices.</string>
+	<key>NSNearbyInteractionUsageDescription</key>
+	<string>UWBDemo uses Ultra Wideband to show the relative position of nearby devices.</string>
+</dict>
+</plist>
