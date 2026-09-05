@@ -62,8 +62,14 @@ struct ContentView: View {
                     Text(mark.peer.displayName)
                     Text(Self.distanceLabel(for: mark))
                     Text(Self.latency(mark.latencyMs))
-                    if mark.direction == nil, let hint = mark.peer.hint {
-                        Text(hint)
+                    if mark.direction == nil {
+                        // Nearby Interaction's own reason when it has one,
+                        // otherwise the thing that resolves a bearing without
+                        // it: parallax. Successive ranges taken from different
+                        // vantage points triangulate the peer, so stepping
+                        // sideways gives the filter everything and walking
+                        // straight at them gives it nothing.
+                        Text(mark.peer.hint ?? "Step side to side")
                             .foregroundStyle(.secondary)
                     }
                 }

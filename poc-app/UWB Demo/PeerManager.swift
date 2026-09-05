@@ -103,6 +103,12 @@ final class PeerManager: NSObject, ObservableObject {
     private var useCameraAssistance = NISession.deviceCapabilities.supportsCameraAssistance
     /// The single peer whose NISession holds the camera-assistance claim.
     private var cameraAssistedPeer: MCPeerID?
+    private var cameraAssistanceGrantedAt = Date.distantPast
+    /// Hold once converged: long enough for the filter to carry the bearing on
+    /// VIO until this peer's next turn.
+    private let cameraAssistanceMinHold: TimeInterval = 25
+    /// Hold when convergence never arrives, so one bad peer can't starve the rest.
+    private let cameraAssistanceMaxHold: TimeInterval = 45
 
     private struct RangeSample {
         let range: Float
@@ -201,6 +207,7 @@ final class PeerManager: NSObject, ObservableObject {
             self?.shareRanges()
             self?.calibrateAllDue()
             self?.refreshDiscoveryIfIdle()
+            self?.rotateCameraAssistanceIfDue()
             self?.setNeedsPublish()
         }
         publishTimer = Timer.scheduledTimer(withTimeInterval: Self.publishInterval, repeats: true) { [weak self] _ in
@@ -987,8 +994,50 @@ final class PeerManager: NSObject, ObservableObject {
         guard useCameraAssistance else { return false }
         if cameraAssistedPeer == nil {
             cameraAssistedPeer = peerID
+            cameraAssistanceGrantedAt = Date()
         }
         return cameraAssistedPeer == peerID
+    }
+
+    /// Time-multiplex the single claim across peers. Convergence is what makes
+    /// camera assistance worth having, so the holder keeps it until it has
+    /// actually converged — but not forever, since a peer that never converges
+    /// would otherwise starve everyone else.
+    ///
+    /// The filter is what makes this work: it coasts each peer's bearing on VIO
+    /// between observations, so a peer only needs the camera periodically rather
+    /// than continuously.
+    private func rotateCameraAssistanceIfDue() {
+        guard useCameraAssistance, let current = cameraAssistedPeer else { return }
+        let candidates = niSessions.keys.sorted { $0.displayName < $1.displayName }
+        guard candidates.count > 1, let index = candidates.firstIndex(of: current) else { return }
+
+        let held = Date().timeIntervalSince(cameraAssistanceGrantedAt)
+        // A nil hint means NIAlgorithmConvergence reported `.converged`.
+        let converged = peers[current]?.hint == nil
+        let due = held >= (converged ? cameraAssistanceMinHold : cameraAssistanceMaxHold)
+        guard due else { return }
+
+        moveCameraAssistance(to: candidates[(index + 1) % candidates.count], from: current)
+    }
+
+    /// Re-running a configuration briefly interrupts that peer's ranging, which
+    /// is why the hold times are tens of seconds rather than a few.
+    private func moveCameraAssistance(to next: MCPeerID, from current: MCPeerID) {
+        guard next != current else { return }
+        // Release before claiming: two sessions holding the ARSession at once is
+        // the contention this whole mechanism exists to avoid.
+        if let session = niSessions[current], let configuration = configurations[current] {
+            configuration.isCameraAssistanceEnabled = false
+            session.run(configuration)
+        }
+        cameraAssistedPeer = nil
+        guard let session = niSessions[next], let configuration = configurations[next] else { return }
+        cameraAssistedPeer = next
+        cameraAssistanceGrantedAt = Date()
+        session.setARSession(vio.session)
+        configuration.isCameraAssistanceEnabled = true
+        session.run(configuration)
     }
 
     private func usesCameraAssistance(_ peerID: MCPeerID) -> Bool {
@@ -1005,6 +1054,7 @@ final class PeerManager: NSObject, ObservableObject {
               let session = niSessions[next],
               let configuration = configurations[next] else { return }
         cameraAssistedPeer = next
+        cameraAssistanceGrantedAt = Date()
         session.setARSession(vio.session)
         configuration.isCameraAssistanceEnabled = true
         session.run(configuration)
