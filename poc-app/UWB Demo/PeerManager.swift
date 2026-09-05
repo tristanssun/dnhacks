@@ -84,6 +84,9 @@ final class PeerManager: NSObject, ObservableObject {
     /// else reuses them rather than walking the particle clouds again.
     private var lastEstimate: [MCPeerID: LocAREngine.Estimate] = [:]
     private var lastDiscoveryRefresh = Date.distantPast
+    /// Invitations still inside their timeout, keyed by peer. See `invite`.
+    private var pendingInvites: [MCPeerID: Date] = [:]
+    private let inviteTimeout: TimeInterval = 12
     /// Slow enough not to disturb an invitation inside its 12 s timeout.
     private let discoveryRefreshInterval: TimeInterval = 20
     /// Peers whose ranging just resumed after a dropout; they get one calibrate
@@ -679,6 +682,7 @@ final class PeerManager: NSObject, ObservableObject {
         // Cleared on the attempt, not on success: `calibrate` also declines when
         // the estimate already agrees with the range, which needs no retry.
         pendingRecalibration.remove(peerID)
+        pendingInvites[peerID] = nil
         let direction = freshDirection(for: peerID, at: now)
         if locar.calibrate(peerID: peerID, range: range, direction: direction) {
             lastCalibration[peerID] = now
@@ -910,6 +914,9 @@ final class PeerManager: NSObject, ObservableObject {
     private func invite(_ peerID: MCPeerID) {
         guard let mcSession, !mcSession.connectedPeers.contains(peerID) else { return }
         let context = discoveryID.data(using: .utf8)
+        // Recorded so a discovery refresh cannot bounce the browser out from
+        // under this invitation before the peer's acceptance comes back.
+        pendingInvites[peerID] = Date()
         browser?.invitePeer(peerID, to: mcSession, withContext: context, timeout: 12)
     }
 
@@ -926,7 +933,12 @@ final class PeerManager: NSObject, ObservableObject {
         guard mcSession?.connectedPeers.contains(peerID) != true else { return }
         reconnectTasks[peerID]?.cancel()
         reconnectTasks[peerID] = nil
-        knownRemoteIDs[peerID] = nil
+        pendingInvites[peerID] = nil
+        // `knownRemoteIDs` is deliberately kept. It is the tiebreak identity and
+        // it is stable for the life of that install, so clearing it only opens a
+        // window where `isInitiator` falls back to true on both devices at once
+        // and they invite each other simultaneously. A browse entry dropping is
+        // not evidence the peer's identity changed.
     }
 
     /// Recovers a browser that has silently stopped finding peers — the one case
@@ -956,10 +968,26 @@ final class PeerManager: NSObject, ObservableObject {
         refreshDiscovery()
     }
 
+    /// Re-arming the advertiser is harmless and is what actually restores
+    /// discoverability. Restarting the browser is the destructive half: it
+    /// discards the browser's record of invitations it has sent, so a peer's
+    /// acceptance arrives orphaned and MultipeerConnectivity logs "Received an
+    /// invitation response ... but we never sent it an invitation. Aborting!"
+    /// It also fires `lostPeer` for everyone currently visible.
+    ///
+    /// So the browser is only bounced when no invitation is outstanding.
     private func refreshDiscovery() {
         advertiser?.startAdvertisingPeer()
+        guard !hasPendingInvite() else { return }
         browser?.stopBrowsingForPeers()
         browser?.startBrowsingForPeers()
+    }
+
+    /// True while any invitation is still inside its 12 s timeout.
+    private func hasPendingInvite() -> Bool {
+        let now = Date()
+        pendingInvites = pendingInvites.filter { now.timeIntervalSince($0.value) < inviteTimeout }
+        return !pendingInvites.isEmpty
     }
 
     /// Retry schedule, separated by role so the two sides never invite at once.
@@ -1001,6 +1029,7 @@ final class PeerManager: NSObject, ObservableObject {
         case .connected:
             reconnectTasks[peerID]?.cancel()
             reconnectTasks[peerID] = nil
+            pendingInvites[peerID] = nil
             establishedPeers.insert(peerID)
             if peers[peerID] == nil {
                 peers[peerID] = Peer(peerID: peerID)
