@@ -77,10 +77,18 @@ final class PeerManager: NSObject, ObservableObject {
     private let vio = VIOTracker()
     private let locar = LocAREngine()
     private var lastVIOSend = Date.distantPast
-    private var lastLocarPublish = Date.distantPast
     private var lastDeadReckonPosition: SIMD3<Float>?
-    /// Most recent estimate per peer, reused by `deadReckon` in A/B arm B.
+    /// Most recent estimate per peer. `publishLocAR` computes these; everything
+    /// else reuses them rather than walking the particle clouds again.
     private var lastEstimate: [MCPeerID: LocAREngine.Estimate] = [:]
+    /// Set by anything that changes filter state; drained by `publishTimer`.
+    private var needsPublish = false
+    private var publishTimer: Timer?
+    /// Display refresh cap. Publishing is a view concern, so it runs on its own
+    /// clock rather than once per inbound message: the seven call sites used to
+    /// fan in at ~80 Hz with two devices connected, and each publish walks every
+    /// particle and mutates the @Published `peers` map.
+    private static let publishInterval: TimeInterval = 1.0 / 15
     let perf = PerfMonitor()
     private var pendingVIOReset = false
     private var useCameraAssistance = NISession.deviceCapabilities.supportsCameraAssistance
@@ -178,8 +186,23 @@ final class PeerManager: NSObject, ObservableObject {
             self?.readConnectedRSSI()
             self?.shareRanges()
             self?.calibrateAllDue()
-            self?.publishLocAR()
+            self?.setNeedsPublish()
         }
+        publishTimer = Timer.scheduledTimer(withTimeInterval: Self.publishInterval, repeats: true) { [weak self] _ in
+            self?.publishIfNeeded()
+        }
+    }
+
+    /// Request a publish on the next tick. Cheap and idempotent, so callers can
+    /// fire it per message without thinking about rate.
+    private func setNeedsPublish() {
+        needsPublish = true
+    }
+
+    private func publishIfNeeded() {
+        guard needsPublish else { return }
+        needsPublish = false
+        publishLocAR()
     }
 
     private func startVIO() {
@@ -203,9 +226,7 @@ final class PeerManager: NSObject, ObservableObject {
             lastVIOSend = now
             sendVIO(pose)
         }
-        if now.timeIntervalSince(lastLocarPublish) >= 0.07 {
-            publishLocAR()
-        }
+        setNeedsPublish()
     }
 
     /// 0x56 | x y z yaw (Float32 each) | flags (bit0 = ARKit re-origin)
@@ -237,7 +258,7 @@ final class PeerManager: NSObject, ObservableObject {
         if peers[peerID] == nil {
             peers[peerID] = Peer(peerID: peerID)
         }
-        publishLocAR()
+        setNeedsPublish()
     }
 
     /// Project local VIO translation onto each resolved LocAR bearing. This is
@@ -253,10 +274,10 @@ final class PeerManager: NSObject, ObservableObject {
         let forward = SIMD2<Float>(sin(pose.yaw), cos(pose.yaw))
         let right = SIMD2<Float>(-cos(pose.yaw), sin(pose.yaw))
         for id in tracks.keys {
-            // A/B arm B reuses the estimate `publishLocAR` already computed
-            // instead of walking every particle a second time.
-            let cached = perf.freshEstimate ? locar.estimate(for: id) : lastEstimate[id]
-            guard let estimate = cached,
+            // Reuse the estimate `publishLocAR` already computed rather than
+            // walking 64 x 120 particles per peer a second time. At most one
+            // publish interval stale, which is well inside a dead-reckoned gap.
+            guard let estimate = lastEstimate[id],
                   estimate.bearingConfidence > deadReckonConfidence else { continue }
             let worldBearing = forward * estimate.direction.y + right * estimate.direction.x
             let rangeDelta = -simd_dot(SIMD2<Float>(displacement.x, displacement.z), worldBearing)
@@ -389,7 +410,7 @@ final class PeerManager: NSObject, ObservableObject {
             changed = true
         }
         if changed {
-            publishLocAR()
+            setNeedsPublish()
         }
     }
 
@@ -424,7 +445,7 @@ final class PeerManager: NSObject, ObservableObject {
             locar.ingestUWB(peerID: peerID, range: range)
             calibrateIfDue(peerID, range: range, at: now)
         }
-        publishLocAR()
+        setNeedsPublish()
     }
 
     private func freshBearing(for peerID: MCPeerID, at now: Date) -> Float? {
@@ -503,12 +524,16 @@ final class PeerManager: NSObject, ObservableObject {
 
     // MARK: Output
 
+    /// Recomputes every peer's estimate and hands the view one update. The map
+    /// is built locally and assigned once: writing `peers[id]` inside the loop
+    /// published a separate change per peer and invalidated the view tree that
+    /// many times per publish.
     private func publishLocAR() {
         let now = Date()
-        lastLocarPublish = now
         perfCounters.recordPublish()
-        for id in peers.keys {
-            guard var peer = peers[id] else { continue }
+        var updated = peers
+        for id in Array(updated.keys) {
+            guard var peer = updated[id] else { continue }
             let estimate = locar.estimate(for: id)
             lastEstimate[id] = estimate
             bearingConfidence[id] = estimate?.bearingConfidence ?? 0
@@ -524,8 +549,9 @@ final class PeerManager: NSObject, ObservableObject {
                 peer.locarDirection = nil
             }
             peer.locarHeading = (estimate?.bearingConfidence ?? 0) > 0.6 ? estimate?.heading : nil
-            peers[id] = peer
+            updated[id] = peer
         }
+        peers = updated
     }
 
     private func startBluetooth() {
@@ -909,7 +935,7 @@ final class PeerManager: NSObject, ObservableObject {
             sendRawRange(sample, to: peerID)
             fuse(peerID)
         } else if changed {
-            publishLocAR()
+            setNeedsPublish()
         }
     }
 

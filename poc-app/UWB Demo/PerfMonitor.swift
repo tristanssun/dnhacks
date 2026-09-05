@@ -91,12 +91,6 @@ final class PerfMonitor: ObservableObject {
         didSet { note("recentering=\(recentering)") }
     }
 
-    /// Arm A (default true): `deadReckon` recomputes `estimate()` per peer.
-    /// Arm B: reuses the estimate `publishLocAR` already computed.
-    @Published var freshEstimate = true {
-        didSet { note("freshEstimate=\(freshEstimate)") }
-    }
-
     private var timer: Timer?
     private var startedAt = CACurrentMediaTime()
     private var lastTick = CACurrentMediaTime()
@@ -105,7 +99,7 @@ final class PerfMonitor: ObservableObject {
         guard timer == nil else { return }
         startedAt = CACurrentMediaTime()
         lastTick = startedAt
-        print("LOCARPERF,elapsed_s,ar_hz,ui_hz,publish_hz,hop_p50_ms,hop_p95_ms,recenter_ms_per_s,memory_mb,thermal,recentering,fresh_estimate")
+        print("LOCARPERF,elapsed_s,ar_hz,ui_hz,publish_hz,hop_p50_ms,hop_p95_ms,recenter_ms_per_s,memory_mb,thermal,recentering")
         let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
@@ -148,7 +142,7 @@ final class PerfMonitor: ObservableObject {
         snapshot = next
 
         print(String(
-            format: "LOCARPERF,%.1f,%.1f,%.1f,%.1f,%.2f,%.2f,%.1f,%.1f,%d,%d,%d",
+            format: "LOCARPERF,%.1f,%.1f,%.1f,%.1f,%.2f,%.2f,%.1f,%.1f,%d,%d",
             next.elapsed,
             next.arHz,
             next.uiHz,
@@ -158,8 +152,7 @@ final class PerfMonitor: ObservableObject {
             next.recenterMsPerSec,
             next.memoryMB,
             next.thermal,
-            recentering ? 1 : 0,
-            freshEstimate ? 1 : 0
+            recentering ? 1 : 0
         ))
     }
 

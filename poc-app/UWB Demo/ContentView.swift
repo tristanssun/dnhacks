@@ -275,7 +275,6 @@ private struct PerfHUD: View {
             }
             HStack(spacing: 8) {
                 Toggle("recenter", isOn: $perf.recentering)
-                Toggle("fresh est", isOn: $perf.freshEstimate)
             }
             .toggleStyle(.button)
             .buttonStyle(.bordered)
