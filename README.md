@@ -1,49 +1,60 @@
-# Multi-video MapAnything
+# Live multi-video MapAnything
 
-An Apache-2.0 browser interface that turns overlapping phone videos into an
-interactive 3D reconstruction using Meta's
-[MapAnything](https://github.com/facebookresearch/map-anything).
+An Apache-2.0 Gradio interface that turns overlapping phone-video clips into an
+incrementally updated digital twin using Meta's MapAnything.
 
-## What it does
+## Start and access the GPU service
 
-- uploads multiple phone videos at once;
-- samples frames from every video with collision-free names;
-- runs the Apache-licensed `facebook/map-anything-apache` checkpoint on CUDA;
-- previews the reconstruction interactively and exports a portable GLB file.
-
-## Install and run
+One-time setup:
 
 ```bash
 git submodule update --init --recursive
 ./scripts/setup.sh
+```
+
+Submit the UI (six hours by default):
+
+```bash
 ./scripts/submit_gpu.sh
 ```
 
-When Slurm starts the job, inspect `outputs/server-<job-id>.log` for the compute
-node name. Forward the web port from your computer and open
-`http://localhost:7860`:
+For another duration, subject to the partition limit:
 
 ```bash
-ssh -J USER@LOGIN-HOST -L 7860:localhost:7860 USER@COMPUTE-NODE
+SLURM_TIME=12:00:00 ./scripts/submit_gpu.sh
 ```
 
-For a workstation with CUDA, run `./scripts/run.sh` directly.
+Wait until `squeue -j JOB_ID` shows `RUNNING`, then obtain the tunnel command:
 
-Run the lightweight ingestion test with:
+```bash
+./scripts/tunnel.sh JOB_ID USER@LOGIN-HOST
+```
+
+Run the printed `ssh` command **on your laptop**, keep it open, and visit
+<http://localhost:7860>. The service exists only while the Slurm job is running;
+generated GLBs remain on cluster storage afterward.
+
+## Update a digital twin
+
+1. Open **Live incremental twin**, upload overlapping clips, and click **Add clips**.
+2. Leave the page open. It checks every 10 seconds and reconstructs only newly
+   added clips. Their overlapping point cloud is registered to the existing twin
+   with similarity ICP, then appended without reprocessing earlier clips.
+3. Add another overlapping clip the same way; download the updated GLB in the UI.
+
+Inference can take longer than ten seconds, so updates are serialized. This is
+incremental clip ingestion, not continuous webcam streaming. ICP needs substantial
+visual overlap and can drift over many additions; begin with 20–40 frames per clip.
+
+On a CUDA workstation, run `./scripts/run.sh` and open <http://localhost:7860>.
+
+Test without downloading model weights:
 
 ```bash
 . .venv/bin/activate
 python tests/smoke_test.py
 ```
 
-## Capture tips
+The default checkpoint is `facebook/map-anything-apache`.
 
-Move slowly, keep the same scene visible, use diffuse lighting, avoid zooming,
-and aim for substantial overlap between videos. Start with 20–40 frames per
-video. More frames use more GPU memory and do not always improve results.
-
-## Licensing
-
-This interface is Apache-2.0. MapAnything is included as an Apache-2.0 git
-submodule and defaults to its Apache checkpoint. Uploaded videos and generated
-outputs are ignored by Git.
+For deployment without Slurm, see [MODAL.md](MODAL.md).

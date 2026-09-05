@@ -1,9 +1,11 @@
 .venv/
 outputs/
 uploads/
+live_sessions/
 *.log
 __pycache__/
 .gradio/
+*.zip
 
 # Phone captures are local input data, not source code.
 *.MOV
