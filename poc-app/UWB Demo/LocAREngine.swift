@@ -39,13 +39,12 @@ final class LocAREngine {
         var targets: [MCPeerID: [TargetParticle]]
     }
 
-    /// D's own spread is small once `recenterDisplay` pins its mean, so the
-    /// display axis carries less information per particle than the target axis
-    /// and takes the deeper cut. Product is what costs: 64 x 120 -> 32 x 96.
-    private static let displayCount = 32
-    /// Kept high enough to cover a full range-only sphere shell without
-    /// impoverishing; below ~80 the no-bearing regime starts to degenerate.
-    private static let targetCount = 96
+    /// Restored to 64 x 120 after 32 x 96 measurably degraded accuracy on
+    /// device. The filter needs this much representational capacity; recover
+    /// the CPU by making the per-particle work cheaper, not by removing
+    /// particles.
+    private static let displayCount = 64
+    private static let targetCount = 120
     /// Position noise after 0.1 m of VIO travel.
     private let sigmaXYZ: Float = 0.015
     /// Small residual ARKit drift while stationary, metres per sqrt(second).
