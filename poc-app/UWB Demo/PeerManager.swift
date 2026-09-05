@@ -101,6 +101,8 @@ final class PeerManager: NSObject, ObservableObject {
     let perf = PerfMonitor()
     private var pendingVIOReset = false
     private var useCameraAssistance = NISession.deviceCapabilities.supportsCameraAssistance
+    /// The single peer whose NISession holds the camera-assistance claim.
+    private var cameraAssistedPeer: MCPeerID?
 
     private struct RangeSample {
         let range: Float
@@ -118,7 +120,10 @@ final class PeerManager: NSObject, ObservableObject {
     private var peerRangeDates: [String: Date] = [:]
     private var lastCalibration: [MCPeerID: Date] = [:]
     private let freshWindow: TimeInterval = 0.75
-    private let directionWindow: TimeInterval = 0.5
+    /// Bearings arrive sparsely at range, and a usable one was being discarded
+    /// for being 600 ms old. The filter's uniform-plus-NLOS model tolerates the
+    /// extra staleness better than having no bearing at all.
+    private let directionWindow: TimeInterval = 1.5
     private let calibrationInterval: TimeInterval = 2
     /// Bearing confidence needed before VIO motion is allowed to dead-reckon range.
     private let deadReckonConfidence: Float = 0.7
@@ -963,10 +968,46 @@ final class PeerManager: NSObject, ObservableObject {
         guard let token = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NIDiscoveryToken.self, from: data) else { return }
         let session = niSession(for: peerID)
         let configuration = NINearbyPeerConfiguration(peerToken: token)
-        configuration.isCameraAssistanceEnabled = useCameraAssistance
+        configuration.isCameraAssistanceEnabled = usesCameraAssistance(peerID)
         configurations[peerID] = configuration
         session.run(configuration)
         sendDiscoveryToken(to: peerID)
+    }
+
+    /// Camera assistance runs on one NISession at a time. Every session used to
+    /// claim the shared ARSession, so with two or more peers they contended and
+    /// all of them lost bearing — the opposite of the intent, since camera
+    /// assistance is what carries `horizontalAngle` past raw NI direction's
+    /// ~5-8 m ceiling.
+    ///
+    /// The claim is held until the peer goes away rather than rotated between
+    /// peers: reassigning costs a full re-convergence (sweep, movement, light),
+    /// which is worse than leaving one peer unassisted.
+    private func claimCameraAssistance(for peerID: MCPeerID) -> Bool {
+        guard useCameraAssistance else { return false }
+        if cameraAssistedPeer == nil {
+            cameraAssistedPeer = peerID
+        }
+        return cameraAssistedPeer == peerID
+    }
+
+    private func usesCameraAssistance(_ peerID: MCPeerID) -> Bool {
+        useCameraAssistance && cameraAssistedPeer == peerID
+    }
+
+    /// Hand the claim to a peer that is still around, so losing the assisted
+    /// peer doesn't leave everyone on raw NI direction.
+    private func releaseCameraAssistance(from peerID: MCPeerID) {
+        guard cameraAssistedPeer == peerID else { return }
+        cameraAssistedPeer = nil
+        guard useCameraAssistance,
+              let next = niSessions.keys.first,
+              let session = niSessions[next],
+              let configuration = configurations[next] else { return }
+        cameraAssistedPeer = next
+        session.setARSession(vio.session)
+        configuration.isCameraAssistanceEnabled = true
+        session.run(configuration)
     }
 
     private func niSession(for peerID: MCPeerID) -> NISession {
@@ -975,7 +1016,7 @@ final class PeerManager: NSObject, ObservableObject {
         }
         let session = NISession()
         session.delegate = self
-        if useCameraAssistance {
+        if claimCameraAssistance(for: peerID) {
             session.setARSession(vio.session)
         }
         niSessions[peerID] = session
@@ -990,6 +1031,7 @@ final class PeerManager: NSObject, ObservableObject {
         let session = niSessions.removeValue(forKey: peerID)
         session?.delegate = nil
         configurations[peerID] = nil
+        releaseCameraAssistance(from: peerID)
         sentTokenTo.remove(peerID)
         lastUWBUpdate[peerID] = nil
         localRange[peerID] = nil
