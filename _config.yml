@@ -1,0 +1,7 @@
+# GitHub Pages publishes only the MiniMap landing files at the repo root.
+exclude:
+  - MapAnything-V2
+  - NearbyInteractionWithCustomServer
+  - poc-app
+  - rtabmap
+  - .gitmodules
