@@ -177,6 +177,20 @@ public:
 	std::string bakedAtlasPath() const;
 	int bakeIntervalSec() const {return 0;}
 	int meshGeneration() const;
+	// Incremented on room reset. Recordings with this id are the current run
+	// and stay out of History until the next reset. Name is address + start time.
+	int currentRunId() const;
+	std::string currentRunAddress() const;
+	long currentRunStarted() const;
+	std::string currentRunName() const;
+	// First non-empty street address from a phone wins for this run.
+	void noteRunAddress(const std::string & address);
+	// First valid GPS fix from a phone wins for this run (sidebar site map).
+	void noteRunGeo(double lat, double lng);
+	double currentRunLat() const;
+	double currentRunLng() const;
+	// Current plus closed runs (address, timestamps) from runs.json.
+	std::string runsJson() const;
 	// Binary PLY (same layout as map.mesh) of the cached live node meshes with
 	// global id > sinceNode, placed with the latest tag-frame poses. Empty
 	// string when nothing is newer.
@@ -291,6 +305,29 @@ private:
 	int countActiveLocked(long now, long timeoutSec) const;
 	static bool isActiveSeen(long lastSeen, long now, long timeoutSec);
 	void resetRoomLocked();
+	// Copy the current baked (or live) mesh into dataDir/models before a wipe.
+	// Returns the archived file name, or empty if nothing was copied.
+	std::string archiveCurrentModelLocked();
+	// Write run_id onto current-run video sidecars so the next increment
+	// makes them show up under History > Recordings.
+	void stampCurrentRunVideosLocked();
+	void stampCurrentRunVideoAddressesLocked();
+	bool applyRunAddressLocked(const std::string & raw);
+	bool applyRunGeoLocked(double lat, double lng);
+	void noteRunAddressFromJsonLocked(const std::string & jsonBody);
+	void closeCurrentRunLocked(const std::string & modelName);
+	void loadRuns();
+	void saveRunsLocked() const;
+	std::vector<std::string> currentRunUsersLocked() const;
+	std::string runRecordJson(
+		int id,
+		const std::string & address,
+		double lat,
+		double lng,
+		long started,
+		long ended,
+		const std::string & model,
+		const std::vector<std::string> & users) const;
 	void clearSessionCalibrationLocked();
 	// Startup: keep recent real calibrations, drop the rest, recompute the lock.
 	void restoreSessionLockLocked();
@@ -354,6 +391,24 @@ private:
 	// Bumped on every room reset; a bake that started under an older epoch is
 	// thrown away instead of resurrecting the previous room's surface.
 	int roomEpoch_;
+	int runId_;
+	std::string runAddress_;
+	double runLat_;
+	double runLng_;
+	long runStarted_;
+	struct RunRecord
+	{
+		int id;
+		std::string address;
+		double lat;
+		double lng;
+		long started;
+		long ended;
+		std::string model;
+		std::vector<std::string> users;
+	};
+	std::vector<RunRecord> pastRuns_;
+	std::string runsPath_;
 	// Tag-frame poses used by the last live mesh export, so an overlay of
 	// "nodes newer than the bake" can be built from the cache without the db.
 	std::map<int, rtabmap::Transform> livePosesG_;

@@ -29,9 +29,15 @@ SET(SRC_FILES
 	HttpServer.cpp
 	CollabMap.cpp
 	DemoTag.cpp
+	VideoSummary.cpp
 )
 
 ADD_EXECUTABLE(rtabmap-collab-server ${SRC_FILES})
+
+ADD_CUSTOM_COMMAND(TARGET rtabmap-collab-server POST_BUILD
+	COMMAND ${CMAKE_COMMAND} -E copy_if_different
+		${CMAKE_CURRENT_SOURCE_DIR}/video_summarize.py
+		$<TARGET_FILE_DIR:rtabmap-collab-server>/video_summarize.py)
 
 TARGET_LINK_LIBRARIES(rtabmap-collab-server rtabmap::core)
 IF(APPLE)

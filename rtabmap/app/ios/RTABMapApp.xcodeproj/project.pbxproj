@@ -88,6 +88,7 @@
 		4EB1A66625A0D90B0043C7BF /* RTABMap.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EB1A66525A0D90B0043C7BF /* RTABMap.swift */; };
 		C011AB010000000000000002 /* CollabSync.swift in Sources */ = {isa = PBXBuildFile; fileRef = C011AB010000000000000001 /* CollabSync.swift */; };
 		C011AB030000000000000002 /* TagCalibrator.swift in Sources */ = {isa = PBXBuildFile; fileRef = C011AB030000000000000001 /* TagCalibrator.swift */; };
+		C011AB040000000000000002 /* ScanVideoRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C011AB040000000000000001 /* ScanVideoRecorder.swift */; };
 		C011AB020000000000000002 /* CollabServerConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = C011AB020000000000000001 /* CollabServerConfig.swift */; };
 		4EE016B3259BE441008CCE65 /* ViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EE016AF259BE441008CCE65 /* ViewController.swift */; };
 		4EE016B4259BE441008CCE65 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EE016B0259BE441008CCE65 /* SceneDelegate.swift */; };
@@ -191,6 +192,7 @@
 		4EB1A66525A0D90B0043C7BF /* RTABMap.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; name = RTABMap.swift; path = RTABMapApp/RTABMap.swift; sourceTree = "<group>"; };
 		C011AB010000000000000001 /* CollabSync.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; name = CollabSync.swift; path = RTABMapApp/CollabSync.swift; sourceTree = "<group>"; };
 		C011AB030000000000000001 /* TagCalibrator.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; name = TagCalibrator.swift; path = RTABMapApp/TagCalibrator.swift; sourceTree = "<group>"; };
+		C011AB040000000000000001 /* ScanVideoRecorder.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; name = ScanVideoRecorder.swift; path = RTABMapApp/ScanVideoRecorder.swift; sourceTree = "<group>"; };
 		C011AB020000000000000001 /* CollabServerConfig.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; name = CollabServerConfig.swift; path = RTABMapApp/Generated/CollabServerConfig.swift; sourceTree = "<group>"; };
 		C011AB020000000000000005 /* CollabServerConfig.fallback.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; name = CollabServerConfig.fallback.swift; path = RTABMapApp/Generated/CollabServerConfig.fallback.swift; sourceTree = "<group>"; };
 		4ED73AD02D7FECF3007899C2 /* liblaszip.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = liblaszip.a; path = RTABMapApp/Libraries/lib/liblaszip.a; sourceTree = "<group>"; };
@@ -487,6 +489,7 @@
 				4EE016AF259BE441008CCE65 /* ViewController.swift */,
 				C011AB010000000000000001 /* CollabSync.swift */,
 				C011AB030000000000000001 /* TagCalibrator.swift */,
+				C011AB040000000000000001 /* ScanVideoRecorder.swift */,
 				C011AB020000000000000003 /* Generated */,
 				4EE016BF259BE464008CCE65 /* Main.storyboard */,
 				4EE016C1259BE464008CCE65 /* LaunchScreen.storyboard */,
@@ -898,6 +901,7 @@
 				4EE016B3259BE441008CCE65 /* ViewController.swift in Sources */,
 				C011AB010000000000000002 /* CollabSync.swift in Sources */,
 				C011AB030000000000000002 /* TagCalibrator.swift in Sources */,
+				C011AB040000000000000002 /* ScanVideoRecorder.swift in Sources */,
 				C011AB020000000000000002 /* CollabServerConfig.swift in Sources */,
 				4E2C516725A63119005CEDBD /* DatabaseView.swift in Sources */,
 				4EFD0BAA259D501E00575D88 /* triangle.cpp in Sources */,

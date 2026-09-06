@@ -1,8 +1,10 @@
 #include "CollabMap.h"
 #include "DemoTag.h"
 #include "HttpServer.h"
+#include "VideoSummary.h"
 
 #include <rtabmap/utilite/UConversion.h>
+#include <rtabmap/utilite/UDirectory.h>
 #include <rtabmap/utilite/UFile.h>
 #include <rtabmap/utilite/ULogger.h>
 #include <rtabmap/utilite/UTimer.h>
@@ -175,6 +177,25 @@ void usage(const char * argv0)
 		<< "  --delta-id N --delta-x X --delta-y Y --delta-z Z\n";
 }
 
+void noteScanPlace(collab::CollabMap & map, const collab::HttpRequest & req)
+{
+	std::string address = collab::headerValue(req, "X-Address");
+	if(address.empty())
+	{
+		address = collab::headerValue(req, "X-Video-Address");
+	}
+	if(!address.empty())
+	{
+		map.noteRunAddress(address);
+	}
+	const std::string lat = collab::headerValue(req, "X-Latitude");
+	const std::string lng = collab::headerValue(req, "X-Longitude");
+	if(!lat.empty() && !lng.empty())
+	{
+		map.noteRunGeo(uStr2Double(lat), uStr2Double(lng));
+	}
+}
+
 std::string readWholeFile(const std::string & path)
 {
 	if(path.empty())
@@ -283,6 +304,7 @@ int main(int argc, char * argv[])
 		UERROR("%s", error.c_str());
 		return 1;
 	}
+	collab::enqueuePendingModelIndexes(dataDir);
 
 	collab::HttpServer::Handler handler = [&](const collab::HttpRequest & req) -> collab::HttpResponse
 	{
@@ -291,6 +313,7 @@ int main(int argc, char * argv[])
 			if(collab::queryValue(req, "reset") == "1")
 			{
 				map.resetDemoRoom();
+				collab::enqueuePendingModelIndexes(dataDir);
 			}
 			collab::HttpResponse res = collab::HttpResponse::text(200, "text/html; charset=utf-8", collab::adminPageHtml());
 			res.extraHeaders["Cache-Control"] = "no-store";
@@ -325,6 +348,7 @@ int main(int argc, char * argv[])
 			std::string clientId = collab::headerValue(req, "X-Client-Id");
 			std::string body = readWholeFile(req.bodyPath);
 			collab::CalibrateResult result = map.calibrateFromJson(clientId, body);
+			noteScanPlace(map, req);
 			int status = result.ok ? 200 : 400;
 			if(!result.ok)
 			{
@@ -338,6 +362,307 @@ int main(int argc, char * argv[])
 			}
 			std::fflush(stdout);
 			return collab::HttpResponse::json(status, map.calibrateJson(result));
+		}
+		// Scan recordings. The phone uploads its .mp4 when a scan stops; the
+		// admin sidebar Recordings folder lists the current run; after reset
+		// they move into History > Recordings. A click plays them in-page.
+		// Playback needs byte ranges (Safari refuses progressive mp4 without them).
+		if(req.method == "POST" && req.path == "/video")
+		{
+			const std::string clientId = collab::headerValue(req, "X-Client-Id");
+			std::string name = collab::sanitizeVideoName(collab::headerValue(req, "X-Video-Name"));
+			if(name.empty())
+			{
+				name = collab::sanitizeVideoName(uNumber2Str((int)std::time(0)) + ".mp4");
+			}
+			if(req.bodyPath.empty() || req.bodyBytes <= 0 || !UFile::exists(req.bodyPath))
+			{
+				return collab::HttpResponse::error(400, "empty body");
+			}
+			const std::string dir = dataDir + "/videos";
+			if(!UDirectory::exists(dir))
+			{
+				UDirectory::makeDir(dir);
+			}
+			const std::string dest = dir + "/" + name;
+			UFile::erase(dest);
+			if(UFile::rename(req.bodyPath, dest) != 0)
+			{
+				return collab::HttpResponse::error(500, "cannot store video");
+			}
+			const std::string durationStr = collab::headerValue(req, "X-Video-Duration");
+			const double duration = durationStr.empty() ? 0.0 : uStr2Double(durationStr);
+			noteScanPlace(map, req);
+			const std::string address = map.currentRunAddress();
+			const int runId = map.currentRunId();
+			const long started = map.currentRunStarted();
+			{
+				std::ofstream meta((dest + ".json").c_str(), std::ios::trunc);
+				meta << "{\"name\":\"" << collab::jsonEscape(name) << "\""
+					<< ",\"client\":\"" << collab::jsonEscape(clientId) << "\""
+					<< ",\"bytes\":" << req.bodyBytes
+					<< ",\"duration_s\":" << duration
+					<< ",\"uploaded\":" << (long)std::time(0)
+					<< ",\"run\":" << runId
+					<< ",\"address\":\"" << collab::jsonEscape(address) << "\""
+					<< ",\"lat\":" << map.currentRunLat()
+					<< ",\"lng\":" << map.currentRunLng()
+					<< ",\"title\":\"" << collab::jsonEscape(collab::formatRunName(address, started)) << "\""
+					<< ",\"summary_status\":\"pending\"}\n";
+			}
+			std::printf("[collab] POST /video client=%s name=%s bytes=%ld duration=%.1fs\n",
+				clientId.c_str(), name.c_str(), req.bodyBytes, duration);
+			std::fflush(stdout);
+			collab::enqueueVideoSummary(dataDir, dest);
+			return collab::HttpResponse::json(200, std::string("{\"ok\":true,\"name\":\"") + collab::jsonEscape(name) +
+				"\",\"bytes\":" + uNumber2Str((int)req.bodyBytes) + ",\"url\":\"/videos/" + collab::jsonEscape(name) + "\"}");
+		}
+		if(req.method == "GET" && req.path == "/videos")
+		{
+			collab::HttpResponse res = collab::HttpResponse::json(200, collab::listVideosJson(
+				dataDir + "/videos", map.currentRunId(), map.currentRunAddress(), map.currentRunStarted(),
+				map.currentRunLat(), map.currentRunLng()));
+			res.extraHeaders["Cache-Control"] = "no-store";
+			return res;
+		}
+		if(req.method == "GET" && req.path == "/videos/tasks")
+		{
+			collab::HttpResponse res = collab::HttpResponse::json(200, collab::listVideoTasksJson(dataDir + "/videos"));
+			res.extraHeaders["Cache-Control"] = "no-store";
+			return res;
+		}
+		if(req.path.compare(0, 8, "/videos/") == 0)
+		{
+			std::string name;
+			std::string action;
+			if(!collab::splitVideoAction(req.path.substr(8), name, action))
+			{
+				return collab::HttpResponse::error(404, "no such recording");
+			}
+			const std::string path = dataDir + "/videos/" + name;
+			if(action == "analysis" && req.method == "GET")
+			{
+				if(!UFile::exists(path))
+				{
+					return collab::HttpResponse::error(404, "no such recording");
+				}
+				collab::HttpResponse res = collab::HttpResponse::json(200, collab::videoAnalysisHttpBody(path));
+				res.extraHeaders["Cache-Control"] = "no-store";
+				return res;
+			}
+			if(action == "tasks" && req.method == "GET")
+			{
+				if(!UFile::exists(path))
+				{
+					return collab::HttpResponse::error(404, "no such recording");
+				}
+				collab::HttpResponse res = collab::HttpResponse::json(200, collab::videoAnalysisHttpBody(path));
+				res.extraHeaders["Cache-Control"] = "no-store";
+				return res;
+			}
+			if(action == "summarize" && req.method == "POST")
+			{
+				if(!UFile::exists(path))
+				{
+					return collab::HttpResponse::error(404, "no such recording");
+				}
+				collab::enqueueVideoSummary(dataDir, path);
+				collab::HttpResponse res = collab::HttpResponse::json(200, collab::videoAnalysisHttpBody(path));
+				res.extraHeaders["Cache-Control"] = "no-store";
+				return res;
+			}
+			if(!action.empty())
+			{
+				return collab::HttpResponse::error(404, "no such recording");
+			}
+			if(req.method != "GET" && req.method != "HEAD")
+			{
+				return collab::HttpResponse::error(405, "method not allowed");
+			}
+			if(name.empty() || !UFile::exists(path))
+			{
+				return collab::HttpResponse::error(404, "no such recording");
+			}
+			const long total = UFile::length(path);
+			const std::string range = collab::headerValue(req, "Range");
+			long from = 0;
+			long to = total - 1;
+			if(range.compare(0, 6, "bytes=") == 0 && total > 0)
+			{
+				const std::string spec = range.substr(6);
+				const size_t dash = spec.find('-');
+				if(dash != std::string::npos)
+				{
+					const std::string a = spec.substr(0, dash);
+					const std::string b = spec.substr(dash + 1);
+					if(a.empty() && !b.empty())
+					{
+						// suffix range: last N bytes
+						from = std::max(0L, total - uStr2Int(b));
+					}
+					else
+					{
+						from = a.empty() ? 0 : uStr2Int(a);
+						if(!b.empty())
+						{
+							to = std::min(total - 1, (long)uStr2Int(b));
+						}
+					}
+				}
+				if(from < 0 || from >= total || from > to)
+				{
+					collab::HttpResponse res = collab::HttpResponse::text(416, "text/plain", "range not satisfiable");
+					res.statusText = "Range Not Satisfiable";
+					res.extraHeaders["Content-Range"] = "bytes */" + uNumber2Str((int)total);
+					return res;
+				}
+				// Serve at most 16 MB per request; the player asks for the rest.
+				const long kChunk = 16L * 1024L * 1024L;
+				if(to - from + 1 > kChunk)
+				{
+					to = from + kChunk - 1;
+				}
+				std::string body;
+				if(req.method == "GET")
+				{
+					FILE * in = std::fopen(path.c_str(), "rb");
+					if(!in)
+					{
+						return collab::HttpResponse::error(500, "cannot read recording");
+					}
+					body.resize(static_cast<size_t>(to - from + 1));
+					std::fseek(in, from, SEEK_SET);
+					const size_t got = std::fread(&body[0], 1, body.size(), in);
+					std::fclose(in);
+					body.resize(got);
+					to = from + (long)got - 1;
+				}
+				collab::HttpResponse res = collab::HttpResponse::text(206, "video/mp4", body);
+				res.statusText = "Partial Content";
+				res.extraHeaders["Content-Range"] = "bytes " + uNumber2Str((int)from) + "-" + uNumber2Str((int)to) + "/" + uNumber2Str((int)total);
+				res.extraHeaders["Accept-Ranges"] = "bytes";
+				res.extraHeaders["Cache-Control"] = "no-store";
+				return res;
+			}
+			collab::HttpResponse res = collab::HttpResponse::file(200, path, "video/mp4", "");
+			res.extraHeaders["Accept-Ranges"] = "bytes";
+			res.extraHeaders["Cache-Control"] = "no-store";
+			return res;
+		}
+		// Archived room meshes. Saved on reset / new-room so History can show
+		// past 3D models after the live map is wiped.
+		if(req.method == "GET" && req.path == "/runs")
+		{
+			collab::HttpResponse res = collab::HttpResponse::json(200, map.runsJson());
+			res.extraHeaders["Cache-Control"] = "no-store";
+			return res;
+		}
+		if((req.method == "GET" || req.method == "POST") && req.path == "/search")
+		{
+			std::string q = collab::queryValue(req, "q");
+			if(q.empty())
+			{
+				q = collab::jsonFieldString(readWholeFile(req.bodyPath), "q");
+			}
+			collab::HttpResponse res = collab::HttpResponse::json(200, collab::historySearchJson(dataDir, q));
+			res.extraHeaders["Cache-Control"] = "no-store";
+			return res;
+		}
+		if(req.method == "GET" && req.path == "/models")
+		{
+			collab::HttpResponse res = collab::HttpResponse::json(200, collab::listModelsJson(dataDir + "/models"));
+			res.extraHeaders["Cache-Control"] = "no-store";
+			return res;
+		}
+		if(req.method == "GET" && req.path == "/models/index")
+		{
+			collab::HttpResponse res = collab::HttpResponse::json(200, collab::listModelIndexJson(dataDir + "/models"));
+			res.extraHeaders["Cache-Control"] = "no-store";
+			return res;
+		}
+		if(req.path.compare(0, 8, "/models/") == 0)
+		{
+			std::string name;
+			std::string action;
+			if(!collab::splitModelAction(req.path.substr(8), name, action))
+			{
+				return collab::HttpResponse::error(404, "no such model");
+			}
+			const std::string path = dataDir + "/models/" + name;
+			if(action == "analysis" && req.method == "GET")
+			{
+				if(!UFile::exists(path))
+				{
+					return collab::HttpResponse::error(404, "no such model");
+				}
+				collab::HttpResponse res = collab::HttpResponse::json(200, collab::modelAnalysisHttpBody(path));
+				res.extraHeaders["Cache-Control"] = "no-store";
+				return res;
+			}
+			if(action == "index" && req.method == "POST")
+			{
+				if(!UFile::exists(path))
+				{
+					return collab::HttpResponse::error(404, "no such model");
+				}
+				collab::enqueueModelIndex(dataDir, path);
+				collab::HttpResponse res = collab::HttpResponse::json(200, collab::modelAnalysisHttpBody(path));
+				res.extraHeaders["Cache-Control"] = "no-store";
+				return res;
+			}
+			if(!action.empty())
+			{
+				return collab::HttpResponse::error(404, "no such model");
+			}
+			if(req.method != "GET" && req.method != "HEAD")
+			{
+				return collab::HttpResponse::error(405, "method not allowed");
+			}
+			if(name.empty() || !UFile::exists(path) || UFile::length(path) <= 0)
+			{
+				return collab::HttpResponse::error(404, "no such model");
+			}
+			const bool jpg = name.size() >= 4 && name.compare(name.size() - 4, 4, ".jpg") == 0;
+			if(jpg)
+			{
+				collab::HttpResponse res = collab::HttpResponse::file(200, path, "image/jpeg", "");
+				res.extraHeaders["Cache-Control"] = "no-store";
+				return res;
+			}
+			int verts = 0;
+			int faces = 0;
+			bool textured = false;
+			{
+				std::ifstream in(path.c_str());
+				std::string line;
+				while(std::getline(in, line))
+				{
+					if(line.compare(0, 15, "element vertex ") == 0)
+					{
+						verts = uStr2Int(line.substr(15));
+					}
+					else if(line.compare(0, 13, "element face ") == 0)
+					{
+						faces = uStr2Int(line.substr(13));
+					}
+					else if(line.find("property float s") != std::string::npos ||
+						line.find("property float t") != std::string::npos)
+					{
+						textured = true;
+					}
+					else if(line.compare(0, 10, "end_header") == 0)
+					{
+						break;
+					}
+				}
+			}
+			collab::HttpResponse res = collab::HttpResponse::file(200, path, "model/ply", "");
+			res.extraHeaders["Cache-Control"] = "no-store";
+			res.extraHeaders["X-Vertex-Count"] = uNumber2Str(verts);
+			res.extraHeaders["X-Face-Count"] = uNumber2Str(faces);
+			res.extraHeaders["X-Mesh-Kind"] = "archive";
+			res.extraHeaders["X-Mesh-Textured"] = textured ? "1" : "0";
+			return res;
 		}
 		if(req.method == "POST" && req.path == "/bake")
 		{
@@ -382,6 +707,7 @@ int main(int argc, char * argv[])
 		if(req.method == "POST" && req.path == "/reset")
 		{
 			map.resetDemoRoom();
+			collab::enqueuePendingModelIndexes(dataDir);
 			return collab::HttpResponse::json(200, "{\"ok\":true,\"reset\":true}");
 		}
 		if(req.method == "GET" && req.path == "/status")
@@ -651,6 +977,8 @@ int main(int argc, char * argv[])
 			std::printf("[collab] POST /join client=%s bytes=%ld\n", clientId.c_str(), req.bodyBytes);
 			std::fflush(stdout);
 			collab::JoinResult result = map.join(clientId);
+			collab::enqueuePendingModelIndexes(dataDir);
+			noteScanPlace(map, req);
 			int status = result.ok ? 200 : 400;
 			std::printf("[collab] POST /join accepted client=%s ok=%d mode=%s active=%d nodes=%d\n",
 				clientId.c_str(), result.ok ? 1 : 0, result.mode.c_str(), result.activeClients, result.globalNodes);
@@ -662,6 +990,7 @@ int main(int argc, char * argv[])
 			std::string clientId = collab::headerValue(req, "X-Client-Id");
 			std::string body = readWholeFile(req.bodyPath);
 			collab::JoinResult result = map.heartbeat(clientId, body);
+			noteScanPlace(map, req);
 			int status = result.ok ? 200 : 400;
 			return collab::HttpResponse::json(status, map.joinJson(result));
 		}
@@ -670,6 +999,7 @@ int main(int argc, char * argv[])
 			std::string clientId = collab::headerValue(req, "X-Client-Id");
 			std::string body = readWholeFile(req.bodyPath);
 			collab::JoinResult result = map.updateLivePose(clientId, body);
+			noteScanPlace(map, req);
 			int status = result.ok ? 200 : 400;
 			return collab::HttpResponse::json(status, map.joinJson(result));
 		}
@@ -707,6 +1037,7 @@ int main(int argc, char * argv[])
 				result.error = "ingest failed";
 				UERROR("POST /sync ingest threw unknown");
 			}
+			noteScanPlace(map, req);
 			int status = result.ok ? 200 : (result.error.find("missing") != std::string::npos ? 400 : 500);
 			std::printf("[collab] POST /sync accepted=%d last_local_id=%d global_nodes=%d ok=%d error=%s\n",
 				result.accepted, result.lastLocalId, result.globalNodes, result.ok ? 1 : 0, result.error.c_str());

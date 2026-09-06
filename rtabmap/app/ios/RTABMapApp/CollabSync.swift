@@ -162,6 +162,10 @@ class CollabSync {
     private var isSyncing = false
     private var poseInFlight = false
     private var lastLivePose: [String: Any]?
+    private var scanAddress: String = ""
+    private var scanLatitude: Double = 0
+    private var scanLongitude: Double = 0
+    private let addressLock = NSLock()
     private let session: URLSession
 
     init() {
@@ -213,6 +217,40 @@ class CollabSync {
         var calibratedCount: Int
         var thisPhoneLocked: Bool
         var globalNodes: Int
+    }
+
+    func setScanAddress(_ address: String) {
+        addressLock.lock()
+        scanAddress = address
+        addressLock.unlock()
+    }
+
+    func setScanLocation(latitude: Double, longitude: Double) {
+        addressLock.lock()
+        scanLatitude = latitude
+        scanLongitude = longitude
+        addressLock.unlock()
+    }
+
+    private func currentScanAddress() -> String {
+        addressLock.lock()
+        defer { addressLock.unlock() }
+        return scanAddress
+    }
+
+    private func applyAddress(to request: inout URLRequest) {
+        addressLock.lock()
+        let address = scanAddress
+        let lat = scanLatitude
+        let lng = scanLongitude
+        addressLock.unlock()
+        if !address.isEmpty {
+            request.setValue(address, forHTTPHeaderField: "X-Address")
+        }
+        if lat != 0 || lng != 0 {
+            request.setValue(String(lat), forHTTPHeaderField: "X-Latitude")
+            request.setValue(String(lng), forHTTPHeaderField: "X-Longitude")
+        }
     }
 
     func resetForNewScan() {
@@ -300,6 +338,7 @@ class CollabSync {
         request.httpMethod = "POST"
         request.setValue(clientId, forHTTPHeaderField: "X-Client-Id")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        applyAddress(to: &request)
         request.timeoutInterval = 8
 
         let semaphore = DispatchSemaphore(value: 0)
@@ -444,6 +483,7 @@ class CollabSync {
         request.setValue(clientId, forHTTPHeaderField: "X-Client-Id")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        applyAddress(to: &request)
         request.timeoutInterval = 8
         request.httpBody = try? JSONSerialization.data(withJSONObject: pose.jsonBody())
         let semaphore = DispatchSemaphore(value: 0)
@@ -499,6 +539,7 @@ class CollabSync {
         request.setValue(clientId, forHTTPHeaderField: "X-Client-Id")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        applyAddress(to: &request)
         request.timeoutInterval = 2
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         session.dataTask(with: request) { [weak self] _, _, error in
@@ -506,6 +547,48 @@ class CollabSync {
                 NSLog("CollabSync: POST /pose failed: %@", error.localizedDescription)
             }
             self?.queue.async { self?.poseInFlight = false }
+        }.resume()
+    }
+
+    // Upload a scan recording (see ScanVideoRecorder). The server files it under
+    // videos/ and the admin sidebar lists it. Completion on the main queue.
+    func uploadScanVideo(fileURL: URL, name: String, durationSec: Double, completion: @escaping (Bool, String) -> Void) {
+        guard let url = URL(string: normalizedServerURL() + "/video") else {
+            DispatchQueue.main.async { completion(false, "bad server URL") }
+            return
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue(clientId, forHTTPHeaderField: "X-Client-Id")
+        request.setValue(name, forHTTPHeaderField: "X-Video-Name")
+        request.setValue(String(format: "%.1f", durationSec), forHTTPHeaderField: "X-Video-Duration")
+        applyAddress(to: &request)
+        request.setValue("video/mp4", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 600
+        let bytes = (try? FileManager.default.attributesOfItem(atPath: fileURL.path)[.size] as? NSNumber)?.int64Value ?? 0
+        NSLog("CollabSync: POST /video %@ bytes=%lld", name, bytes)
+        // Own session: the shared one caps a whole transfer at 120 s, too short
+        // for a few hundred MB on a slow Wi-Fi.
+        let uploadConfig = URLSessionConfiguration.default
+        uploadConfig.timeoutIntervalForRequest = 120
+        uploadConfig.timeoutIntervalForResource = 900
+        uploadConfig.waitsForConnectivity = true
+        let uploadSession = URLSession(configuration: uploadConfig)
+        uploadSession.uploadTask(with: request, fromFile: fileURL) { data, response, error in
+            uploadSession.finishTasksAndInvalidate()
+            var ok = false
+            var detail = ""
+            if let error = error {
+                detail = error.localizedDescription
+            } else if let http = response as? HTTPURLResponse {
+                ok = http.statusCode == 200
+                detail = "HTTP \(http.statusCode)"
+                if let data = data, let body = String(data: data, encoding: .utf8) {
+                    detail += " " + body.prefix(120)
+                }
+            }
+            NSLog("CollabSync: POST /video %@ ok=%d %@", name, ok ? 1 : 0, detail)
+            DispatchQueue.main.async { completion(ok, detail) }
         }.resume()
     }
 
@@ -517,8 +600,14 @@ class CollabSync {
         request.httpMethod = "POST"
         request.setValue(clientId, forHTTPHeaderField: "X-Client-Id")
         request.timeoutInterval = 10
-        if let pose = lastLivePose,
-           let data = try? JSONSerialization.data(withJSONObject: pose) {
+        applyAddress(to: &request)
+        var body = lastLivePose ?? [:]
+        let address = currentScanAddress()
+        if !address.isEmpty {
+            body["address"] = address
+        }
+        if !body.isEmpty,
+           let data = try? JSONSerialization.data(withJSONObject: body) {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = data
         }
@@ -647,6 +736,7 @@ class CollabSync {
         request.setValue(String(lastSyncedId), forHTTPHeaderField: "X-Since-Id")
         request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
         request.setValue(String(body.count), forHTTPHeaderField: "Content-Length")
+        applyAddress(to: &request)
         request.timeoutInterval = 120
         request.httpBody = body
 

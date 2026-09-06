@@ -50,6 +50,7 @@
 #include <cstring>
 #include <ctime>
 #include <fstream>
+#include <sys/stat.h>
 #include <map>
 #include <set>
 #include <sstream>
@@ -656,6 +657,62 @@ std::string readFile(const std::string & path)
 	return ss.str();
 }
 
+void stampVideoSidecarRun(const std::string & jsonPath, int run)
+{
+	std::string text;
+	if(UFile::exists(jsonPath))
+	{
+		text = readFile(jsonPath);
+	}
+	if(text.find("\"run\":") != std::string::npos)
+	{
+		return;
+	}
+	std::ofstream out(jsonPath.c_str(), std::ios::trunc);
+	if(text.empty())
+	{
+		out << "{\"run\":" << run << "}\n";
+		return;
+	}
+	const size_t end = text.rfind('}');
+	if(end == std::string::npos)
+	{
+		out << "{\"run\":" << run << "}\n";
+		return;
+	}
+	out << text.substr(0, end) << ",\"run\":" << run << "}\n";
+}
+
+void stampVideoSidecarAddress(const std::string & jsonPath, const std::string & address)
+{
+	if(address.empty())
+	{
+		return;
+	}
+	std::string text;
+	if(UFile::exists(jsonPath))
+	{
+		text = readFile(jsonPath);
+	}
+	if(text.find("\"address\":\"") != std::string::npos)
+	{
+		return;
+	}
+	std::ofstream out(jsonPath.c_str(), std::ios::trunc);
+	if(text.empty())
+	{
+		out << "{\"address\":\"" << jsonEscape(address) << "\"}\n";
+		return;
+	}
+	const size_t end = text.rfind('}');
+	if(end == std::string::npos)
+	{
+		out << "{\"address\":\"" << jsonEscape(address) << "\"}\n";
+		return;
+	}
+	out << text.substr(0, end) << ",\"address\":\"" << jsonEscape(address) << "\"}\n";
+}
+
 bool writeFileAtomic(const std::string & path, const std::string & contents)
 {
 	std::string tmp = path + ".tmp";
@@ -1200,6 +1257,145 @@ bool plyFileHasFaces(const std::string & path)
 	return false;
 }
 
+struct PlyCounts
+{
+	int verts;
+	int faces;
+	bool textured;
+	PlyCounts() : verts(0), faces(0), textured(false) {}
+};
+
+PlyCounts readPlyCounts(const std::string & path)
+{
+	PlyCounts c;
+	std::ifstream in(path.c_str());
+	std::string line;
+	while(std::getline(in, line))
+	{
+		if(line.compare(0, 15, "element vertex ") == 0)
+		{
+			c.verts = uStr2Int(line.substr(15));
+		}
+		else if(line.compare(0, 13, "element face ") == 0)
+		{
+			c.faces = uStr2Int(line.substr(13));
+		}
+		else if(line.find("property float s") != std::string::npos ||
+			line.find("property float t") != std::string::npos)
+		{
+			c.textured = true;
+		}
+		else if(line.compare(0, 10, "end_header") == 0)
+		{
+			break;
+		}
+	}
+	return c;
+}
+
+bool copyFileBinary(const std::string & from, const std::string & to)
+{
+	if(!UFile::exists(from) || UFile::length(from) <= 0)
+	{
+		return false;
+	}
+	std::ifstream src(from.c_str(), std::ios::binary);
+	std::ofstream dst(to.c_str(), std::ios::binary | std::ios::trunc);
+	if(!src || !dst)
+	{
+		return false;
+	}
+	dst << src.rdbuf();
+	return dst.good();
+}
+
+bool modelAlreadyArchived(const std::string & dir, long bytes, int nodes)
+{
+	if(!UDirectory::exists(dir) || bytes <= 0)
+	{
+		return false;
+	}
+	UDirectory d(dir, "ply");
+	const std::list<std::string> & names = d.getFileNames();
+	for(std::list<std::string>::const_iterator it = names.begin(); it != names.end(); ++it)
+	{
+		const std::string path = dir + "/" + *it;
+		if(UFile::length(path) != bytes)
+		{
+			continue;
+		}
+		FILE * f = std::fopen((path + ".json").c_str(), "rb");
+		if(!f)
+		{
+			return true;
+		}
+		char buf[2048];
+		const size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
+		std::fclose(f);
+		buf[n] = 0;
+		const std::string meta(buf);
+		const size_t p = meta.find("\"nodes\":");
+		const int got = (p == std::string::npos) ? 0 : std::atoi(meta.c_str() + p + 8);
+		if(nodes <= 0 || got <= 0 || got == nodes)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+std::string uniqueModelName(const std::string & dir)
+{
+	const std::time_t now = std::time(0);
+	std::tm local;
+	localtime_r(&now, &local);
+	char base[32];
+	std::strftime(base, sizeof(base), "%y%m%d-%H%M%S", &local);
+	std::string name = std::string(base) + ".ply";
+	int n = 2;
+	while(UFile::exists(dir + "/" + name) && n < 100)
+	{
+		name = std::string(base) + "-" + uNumber2Str(n++) + ".ply";
+	}
+	return name;
+}
+
+void pruneOldModels(const std::string & dir, int keep)
+{
+	if(!UDirectory::exists(dir) || keep < 1)
+	{
+		return;
+	}
+	std::vector<std::pair<long, std::string> > files;
+	UDirectory d(dir, "ply");
+	const std::list<std::string> & names = d.getFileNames();
+	for(std::list<std::string>::const_iterator it = names.begin(); it != names.end(); ++it)
+	{
+		const std::string path = dir + "/" + *it;
+		struct stat st;
+		if(::stat(path.c_str(), &st) == 0)
+		{
+			files.push_back(std::make_pair((long)st.st_mtime, *it));
+		}
+	}
+	if((int)files.size() <= keep)
+	{
+		return;
+	}
+	std::sort(files.begin(), files.end());
+	const int drop = (int)files.size() - keep;
+	for(int i = 0; i < drop; ++i)
+	{
+		std::string stem = files[i].second;
+		if(stem.size() > 4 && stem.compare(stem.size() - 4, 4, ".ply") == 0)
+		{
+			stem.erase(stem.size() - 4);
+		}
+		UFile::erase(dir + "/" + files[i].second);
+		UFile::erase(dir + "/" + files[i].second + ".json");
+		UFile::erase(dir + "/" + stem + ".jpg");
+	}
+}
 
 void extractRgbMesh(
 	const pcl::PolygonMesh::Ptr & mesh,
@@ -2137,6 +2333,10 @@ CollabMap::CollabMap(const std::string & dataDir) :
 	lastBakeAt_(0),
 	bakeTextured_(false),
 	roomEpoch_(0),
+	runId_(1),
+	runLat_(0),
+	runLng_(0),
+	runStarted_(static_cast<long>(std::time(0))),
 	roomLocked_(false),
 	lockedTagId_(kDemoTagId),
 	tagSizeM_(kDemoTagSizeM),
@@ -2148,6 +2348,7 @@ CollabMap::CollabMap(const std::string & dataDir) :
 {
 	globalDbPath_ = dataDir_ + "/global.db";
 	statePath_ = dataDir_ + "/clients.json";
+	runsPath_ = dataDir_ + "/runs.json";
 	plyPath_ = dataDir_ + "/map.ply";
 	cloudPath_ = dataDir_ + "/map.cloud";
 	meshPath_ = dataDir_ + "/map.mesh.ply";
@@ -2207,6 +2408,7 @@ bool CollabMap::init(std::string & error)
 		return false;
 	}
 	loadState();
+	loadRuns();
 	// The alignment is a function of the raw tag pose; recompute it from the
 	// persisted pose so a rule change (e.g. leveling) applies to a room that
 	// was calibrated by an older binary.
@@ -2269,6 +2471,12 @@ bool CollabMap::init(std::string & error)
 		}
 	}
 	saveState();
+	{
+		// Snapshot the room already on disk so History is not empty after a
+		// restart of a mapped room.
+		std::lock_guard<std::mutex> lock(mutex_);
+		archiveCurrentModelLocked();
+	}
 	if(!bakeThread_.joinable())
 	{
 		bakeStop_.store(false);
@@ -2388,8 +2596,217 @@ int CollabMap::countActiveLocked(long now, long timeoutSec) const
 	return n;
 }
 
+std::string CollabMap::archiveCurrentModelLocked()
+{
+	const bool baked = plyFileHasFaces(bakedMeshPath_);
+	const bool live = plyFileHasFaces(meshPath_);
+	if(!baked && !live)
+	{
+		return "";
+	}
+	const std::string src = baked ? bakedMeshPath_ : meshPath_;
+	const long bytes = UFile::length(src);
+	const int nodes = baked ? bakeMaxNodeId_ : globalNodes_;
+	const std::string dir = dataDir_ + "/models";
+	if(modelAlreadyArchived(dir, bytes, nodes))
+	{
+		return "";
+	}
+	if(makeDirRecursive(dir).empty())
+	{
+		UWARN("Cannot create models directory %s", dir.c_str());
+		return "";
+	}
+	const std::string name = uniqueModelName(dir);
+	const std::string dest = dir + "/" + name;
+	if(!copyFileBinary(src, dest))
+	{
+		UWARN("Archive model copy failed %s -> %s", src.c_str(), dest.c_str());
+		return "";
+	}
+	std::string stem = name;
+	if(stem.size() > 4 && stem.compare(stem.size() - 4, 4, ".ply") == 0)
+	{
+		stem.erase(stem.size() - 4);
+	}
+	bool textured = false;
+	if(baked && bakeTextured_ && UFile::exists(bakedAtlasPath_) && UFile::length(bakedAtlasPath_) > 0)
+	{
+		textured = copyFileBinary(bakedAtlasPath_, dir + "/" + stem + ".jpg");
+	}
+	const PlyCounts counts = readPlyCounts(dest);
+	if(counts.textured)
+	{
+		textured = textured || UFile::exists(dir + "/" + stem + ".jpg");
+	}
+	{
+		const long created = runStarted_ > 0 ? runStarted_ : (long)std::time(0);
+		std::ofstream meta((dest + ".json").c_str(), std::ios::trunc);
+		meta << "{\"name\":\"" << jsonEscape(name) << "\""
+			<< ",\"kind\":\"" << (baked ? "baked" : "live") << "\""
+			<< ",\"nodes\":" << nodes
+			<< ",\"verts\":" << counts.verts
+			<< ",\"faces\":" << counts.faces
+			<< ",\"textured\":" << (textured ? "true" : "false")
+			<< ",\"bytes\":" << bytes
+			<< ",\"created\":" << created
+			<< ",\"run\":" << runId_
+			<< ",\"address\":\"" << jsonEscape(runAddress_) << "\""
+			<< ",\"lat\":" << runLat_
+			<< ",\"lng\":" << runLng_
+			<< ",\"users\":" << jsonStringArray(currentRunUsersLocked())
+			<< ",\"title\":\"" << jsonEscape(formatRunName(runAddress_, created)) << "\""
+			<< ",\"index_status\":\"pending\"}\n";
+	}
+	pruneOldModels(dir, 40);
+	UINFO("Archived %s model %s nodes=%d faces=%d%s",
+		baked ? "baked" : "live", name.c_str(), nodes, counts.faces,
+		textured ? " textured" : "");
+	return name;
+}
+
+void CollabMap::stampCurrentRunVideosLocked()
+{
+	const std::string dir = dataDir_ + "/videos";
+	if(!UDirectory::exists(dir))
+	{
+		return;
+	}
+	UDirectory d(dir, "mp4");
+	const std::list<std::string> & names = d.getFileNames();
+	int stamped = 0;
+	for(std::list<std::string>::const_iterator it = names.begin(); it != names.end(); ++it)
+	{
+		stampVideoSidecarRun(dir + "/" + *it + ".json", runId_);
+		++stamped;
+	}
+	if(stamped > 0)
+	{
+		UINFO("Stamped %d recording(s) as run %d", stamped, runId_);
+	}
+}
+
+void CollabMap::stampCurrentRunVideoAddressesLocked()
+{
+	if(runAddress_.empty())
+	{
+		return;
+	}
+	const std::string dir = dataDir_ + "/videos";
+	if(!UDirectory::exists(dir))
+	{
+		return;
+	}
+	UDirectory d(dir, "mp4");
+	const std::list<std::string> & names = d.getFileNames();
+	for(std::list<std::string>::const_iterator it = names.begin(); it != names.end(); ++it)
+	{
+		stampVideoSidecarAddress(dir + "/" + *it + ".json", runAddress_);
+	}
+}
+
+bool CollabMap::applyRunAddressLocked(const std::string & raw)
+{
+	const std::string address = sanitizeAddress(raw);
+	if(address.empty() || address == runAddress_)
+	{
+		return false;
+	}
+	if(!runAddress_.empty())
+	{
+		return false;
+	}
+	runAddress_ = address;
+	if(runStarted_ <= 0)
+	{
+		runStarted_ = static_cast<long>(std::time(0));
+	}
+	stampCurrentRunVideoAddressesLocked();
+	saveRunsLocked();
+	return true;
+}
+
+void CollabMap::noteRunAddressFromJsonLocked(const std::string & jsonBody)
+{
+	if(jsonBody.empty())
+	{
+		return;
+	}
+	JsonParser parser(jsonBody);
+	JsonValue root;
+	if(!parser.parse(root) || root.type != JsonValue::kObject)
+	{
+		return;
+	}
+	if(const JsonValue * v = root.get("address"))
+	{
+		applyRunAddressLocked(v->asString());
+	}
+}
+
+void CollabMap::noteRunAddress(const std::string & address)
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	if(applyRunAddressLocked(address))
+	{
+		saveState();
+	}
+}
+
+bool CollabMap::applyRunGeoLocked(double lat, double lng)
+{
+	if(!(lat >= -90.0 && lat <= 90.0 && lng >= -180.0 && lng <= 180.0))
+	{
+		return false;
+	}
+	if(lat == 0.0 && lng == 0.0)
+	{
+		return false;
+	}
+	if(runLat_ != 0.0 || runLng_ != 0.0)
+	{
+		return false;
+	}
+	runLat_ = lat;
+	runLng_ = lng;
+	saveRunsLocked();
+	return true;
+}
+
+void CollabMap::noteRunGeo(double lat, double lng)
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	if(applyRunGeoLocked(lat, lng))
+	{
+		saveState();
+	}
+}
+
+void CollabMap::closeCurrentRunLocked(const std::string & modelName)
+{
+	RunRecord rec;
+	rec.id = runId_;
+	rec.address = runAddress_;
+	rec.lat = runLat_;
+	rec.lng = runLng_;
+	rec.started = runStarted_ > 0 ? runStarted_ : static_cast<long>(std::time(0));
+	rec.ended = static_cast<long>(std::time(0));
+	rec.model = modelName;
+	rec.users = currentRunUsersLocked();
+	pastRuns_.push_back(rec);
+}
+
 void CollabMap::resetRoomLocked()
 {
+	const std::string archived = archiveCurrentModelLocked();
+	stampCurrentRunVideosLocked();
+	closeCurrentRunLocked(archived);
+	++runId_;
+	runAddress_.clear();
+	runLat_ = 0;
+	runLng_ = 0;
+	runStarted_ = static_cast<long>(std::time(0));
+	saveRunsLocked();
 	clients_.clear();
 	nextGlobalId_ = 1;
 	nextMapIdBase_ = 0;
@@ -2500,12 +2917,17 @@ void CollabMap::expireStaleLockLocked()
 
 void CollabMap::touchClientLocked(const std::string & clientId, long now)
 {
+	const bool created = clients_.find(clientId) == clients_.end();
 	ClientState & client = clients_[clientId];
 	if(client.mapIdBase < 0)
 	{
 		client.mapIdBase = nextMapIdBase_++;
 	}
 	client.lastSeen = now;
+	if(created)
+	{
+		saveRunsLocked();
+	}
 }
 
 JoinResult CollabMap::join(const std::string & clientId)
@@ -2582,6 +3004,7 @@ JoinResult CollabMap::heartbeat(const std::string & clientId, const std::string 
 	{
 		applyTagPoseLocked(clients_[clientId], x, y, z, qx, qy, qz, qw, true);
 	}
+	noteRunAddressFromJsonLocked(jsonBody);
 	saveState();
 	result.activeClients = countActiveLocked(now, kActiveTimeoutSec);
 	result.mustDownload = false;
@@ -3109,6 +3532,11 @@ std::string CollabMap::demoJson(const std::string & clientId)
 		<< ",\"bake_interval_sec\":" << kBakeMinIntervalSec
 		<< ",\"pose_interval_ms\":300"
 		<< ",\"server_now\":" << static_cast<long>(std::time(0))
+		<< ",\"run_id\":" << runId_
+		<< ",\"run_address\":\"" << jsonEscape(runAddress_) << "\""
+		<< ",\"run_started\":" << runStarted_
+		<< ",\"run_name\":\"" << jsonEscape(formatRunName(runAddress_, runStarted_)) << "\""
+		<< ",\"run_users\":" << jsonStringArray(currentRunUsersLocked())
 		<< ",\"calibrated\":[";
 	bool firstCal = true;
 	for(std::map<std::string, ClientState>::const_iterator it = clients_.begin(); it != clients_.end(); ++it)
@@ -3275,6 +3703,42 @@ int CollabMap::meshGeneration() const
 {
 	std::lock_guard<std::mutex> lock(mutex_);
 	return meshGen_;
+}
+
+int CollabMap::currentRunId() const
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	return runId_;
+}
+
+std::string CollabMap::currentRunAddress() const
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	return runAddress_;
+}
+
+double CollabMap::currentRunLat() const
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	return runLat_;
+}
+
+double CollabMap::currentRunLng() const
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	return runLng_;
+}
+
+long CollabMap::currentRunStarted() const
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	return runStarted_;
+}
+
+std::string CollabMap::currentRunName() const
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	return formatRunName(runAddress_, runStarted_);
 }
 
 bool CollabMap::ensureViewerCloud(std::string & error)
@@ -3573,11 +4037,19 @@ std::string CollabMap::statusJson() const
 	bool locked = false;
 	bool aligned = false;
 	int calibratedCount = 0;
+	int runId = 1;
+	long runStarted = 0;
+	std::string runAddress;
+	std::string runName;
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
 		locked = roomLocked_;
 		aligned = lastIngestAligned_;
 		calibratedCount = countCalibratedLocked();
+		runId = runId_;
+		runStarted = runStarted_;
+		runAddress = runAddress_;
+		runName = formatRunName(runAddress_, runStarted_);
 	}
 	oss << "],\"poses\":" << s.poses
 		<< ",\"loop_closures\":" << s.loopClosures
@@ -3585,6 +4057,10 @@ std::string CollabMap::statusJson() const
 		<< ",\"locked\":" << (locked ? "true" : "false")
 		<< ",\"aligned\":" << (aligned ? "true" : "false")
 		<< ",\"calibrated_count\":" << calibratedCount
+		<< ",\"run_id\":" << runId
+		<< ",\"run_address\":\"" << jsonEscape(runAddress) << "\""
+		<< ",\"run_started\":" << runStarted
+		<< ",\"run_name\":\"" << jsonEscape(runName) << "\""
 		<< "}";
 	return oss.str();
 }
@@ -3661,6 +4137,22 @@ bool CollabMap::loadState()
 		{
 			tagSizeM_ = m;
 		}
+	}
+	if(const JsonValue * v = root.get("run_id"))
+	{
+		runId_ = std::max(1, v->asInt(1));
+	}
+	if(const JsonValue * v = root.get("run_address"))
+	{
+		runAddress_ = sanitizeAddress(v->asString());
+	}
+	if(const JsonValue * v = root.get("run_started"))
+	{
+		runStarted_ = std::max(0L, v->asLong(0));
+	}
+	if(runStarted_ <= 0)
+	{
+		runStarted_ = static_cast<long>(std::time(0));
 	}
 	const JsonValue * clients = root.get("clients");
 	if(clients && clients->type == JsonValue::kObject)
@@ -3768,6 +4260,9 @@ bool CollabMap::saveState() const
 	oss << "  \"room_locked\": " << (roomLocked_ ? "true" : "false") << ",\n";
 	oss << "  \"locked_tag_id\": " << lockedTagId_ << ",\n";
 	oss << "  \"tag_size_m\": " << tagSizeM_ << ",\n";
+	oss << "  \"run_id\": " << runId_ << ",\n";
+	oss << "  \"run_address\": \"" << jsonEscape(runAddress_) << "\",\n";
+	oss << "  \"run_started\": " << runStarted_ << ",\n";
 	oss << "  \"clients\": {\n";
 	size_t ci = 0;
 	for(std::map<std::string, ClientState>::const_iterator it = clients_.begin(); it != clients_.end(); ++it, ++ci)
@@ -3829,6 +4324,211 @@ bool CollabMap::saveState() const
 		return false;
 	}
 	return true;
+}
+
+std::vector<std::string> CollabMap::currentRunUsersLocked() const
+{
+	std::vector<std::string> users;
+	users.reserve(clients_.size());
+	for(std::map<std::string, ClientState>::const_iterator it = clients_.begin(); it != clients_.end(); ++it)
+	{
+		if(!it->first.empty())
+		{
+			users.push_back(it->first);
+		}
+	}
+	return users;
+}
+
+static std::vector<std::string> usersFromRunJson(const JsonValue & obj)
+{
+	std::vector<std::string> users;
+	if(const JsonValue * v = obj.get("users"))
+	{
+		if(v->type == JsonValue::kArray)
+		{
+			for(size_t i = 0; i < v->a.size(); ++i)
+			{
+				const std::string id = v->a[i].asString();
+				if(!id.empty())
+				{
+					users.push_back(id);
+				}
+			}
+		}
+		else if(v->type == JsonValue::kString && !v->s.empty())
+		{
+			users.push_back(v->s);
+		}
+	}
+	if(users.empty())
+	{
+		if(const JsonValue * v = obj.get("user"))
+		{
+			const std::string id = v->asString();
+			if(!id.empty())
+			{
+				users.push_back(id);
+			}
+		}
+	}
+	return users;
+}
+
+std::string CollabMap::runRecordJson(
+	int id,
+	const std::string & address,
+	double lat,
+	double lng,
+	long started,
+	long ended,
+	const std::string & model,
+	const std::vector<std::string> & users) const
+{
+	std::ostringstream oss;
+	oss << "{\"id\":" << id
+		<< ",\"address\":\"" << jsonEscape(address) << "\""
+		<< ",\"lat\":" << lat
+		<< ",\"lng\":" << lng
+		<< ",\"started\":" << started
+		<< ",\"ended\":" << ended
+		<< ",\"model\":\"" << jsonEscape(model) << "\""
+		<< ",\"users\":" << jsonStringArray(users)
+		<< ",\"name\":\"" << jsonEscape(formatRunName(address, started)) << "\"}";
+	return oss.str();
+}
+
+void CollabMap::saveRunsLocked() const
+{
+	std::ostringstream oss;
+	oss << "{\n  \"current\": "
+		<< runRecordJson(runId_, runAddress_, runLat_, runLng_, runStarted_, 0, "", currentRunUsersLocked())
+		<< ",\n  \"runs\": [\n";
+	for(size_t i = 0; i < pastRuns_.size(); ++i)
+	{
+		if(i)
+		{
+			oss << ",\n";
+		}
+		oss << "    " << runRecordJson(
+			pastRuns_[i].id,
+			pastRuns_[i].address,
+			pastRuns_[i].lat,
+			pastRuns_[i].lng,
+			pastRuns_[i].started,
+			pastRuns_[i].ended,
+			pastRuns_[i].model,
+			pastRuns_[i].users);
+	}
+	oss << "\n  ]\n}\n";
+	if(!writeFileAtomic(runsPath_, oss.str()))
+	{
+		UWARN("Failed to write %s", runsPath_.c_str());
+	}
+}
+
+void CollabMap::loadRuns()
+{
+	const std::string text = readFile(runsPath_);
+	if(text.empty())
+	{
+		saveRunsLocked();
+		return;
+	}
+	JsonParser parser(text);
+	JsonValue root;
+	if(!parser.parse(root) || root.type != JsonValue::kObject)
+	{
+		UWARN("Could not parse %s", runsPath_.c_str());
+		return;
+	}
+	pastRuns_.clear();
+	const JsonValue * runs = root.get("runs");
+	if(runs && runs->type == JsonValue::kArray)
+	{
+		for(size_t i = 0; i < runs->a.size(); ++i)
+		{
+			const JsonValue & obj = runs->a[i];
+			if(obj.type != JsonValue::kObject)
+			{
+				continue;
+			}
+			RunRecord rec;
+			rec.id = 0;
+			rec.lat = 0;
+			rec.lng = 0;
+			rec.started = 0;
+			rec.ended = 0;
+			if(const JsonValue * v = obj.get("id")) rec.id = v->asInt(0);
+			if(const JsonValue * v = obj.get("address")) rec.address = sanitizeAddress(v->asString());
+			if(const JsonValue * v = obj.get("lat")) rec.lat = v->asDouble(0);
+			if(const JsonValue * v = obj.get("lng")) rec.lng = v->asDouble(0);
+			if(const JsonValue * v = obj.get("started")) rec.started = v->asLong(0);
+			if(const JsonValue * v = obj.get("ended")) rec.ended = v->asLong(0);
+			if(const JsonValue * v = obj.get("model")) rec.model = v->asString();
+			rec.users = usersFromRunJson(obj);
+			if(rec.id > 0)
+			{
+				pastRuns_.push_back(rec);
+			}
+		}
+	}
+	if(const JsonValue * cur = root.get("current"))
+	{
+		if(cur->type == JsonValue::kObject)
+		{
+			const int id = cur->get("id") ? cur->get("id")->asInt(0) : 0;
+			if(id == runId_)
+			{
+				if(runAddress_.empty())
+				{
+					if(const JsonValue * v = cur->get("address"))
+					{
+						runAddress_ = sanitizeAddress(v->asString());
+					}
+				}
+				if(runStarted_ <= 0)
+				{
+					if(const JsonValue * v = cur->get("started"))
+					{
+						runStarted_ = v->asLong(0);
+					}
+				}
+				if(runLat_ == 0.0 && runLng_ == 0.0)
+				{
+					if(const JsonValue * v = cur->get("lat")) runLat_ = v->asDouble(0);
+					if(const JsonValue * v = cur->get("lng")) runLng_ = v->asDouble(0);
+				}
+			}
+		}
+	}
+}
+
+std::string CollabMap::runsJson() const
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	std::ostringstream oss;
+	oss << "{\"ok\":true,\"current\":"
+		<< runRecordJson(runId_, runAddress_, runLat_, runLng_, runStarted_, 0, "", currentRunUsersLocked())
+		<< ",\"runs\":[";
+	for(size_t i = 0; i < pastRuns_.size(); ++i)
+	{
+		if(i)
+		{
+			oss << ",";
+		}
+		oss << runRecordJson(
+			pastRuns_[i].id,
+			pastRuns_[i].address,
+			pastRuns_[i].lat,
+			pastRuns_[i].lng,
+			pastRuns_[i].started,
+			pastRuns_[i].ended,
+			pastRuns_[i].model,
+			pastRuns_[i].users);
+	}
+	oss << "]}";
+	return oss.str();
 }
 
 void CollabMap::syncIdsFromDatabase()

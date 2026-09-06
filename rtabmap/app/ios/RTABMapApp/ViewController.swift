@@ -7,6 +7,7 @@
 
 import GLKit
 import ARKit
+import CoreLocation
 import Zip
 import StoreKit
 
@@ -32,6 +33,10 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
     private let session = ARSession()
     private var locationManager: CLLocationManager?
     private var mLastKnownLocation: CLLocation?
+    private var scanAddress: String = ""
+    private let geocoder = CLGeocoder()
+    private var geocoding = false
+    private var lastGeocodeAt: Date?
     private var mLastLightEstimate: CGFloat?
     
     private var context: EAGLContext?
@@ -149,6 +154,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
     private var collabFinalMapApplied = false
     private var collabLastSync: Date?
     private let tagCalibrator = TagCalibrator()
+    private let scanVideo = ScanVideoRecorder()
     private var waitingForRoomLock = false
     private var thisPhoneCalibrated = false
     private var roomLocked = false
@@ -1260,6 +1266,9 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
         }
         handleTagCalibrationFrame(frame)
         maybePostLivePose(frame)
+        if mState == .STATE_MAPPING {
+            scanVideo.append(frame: frame)
+        }
         
         if !status.isEmpty {
             DispatchQueue.main.async {
@@ -1297,6 +1306,52 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
     {
         mLastKnownLocation = locations.last!
         rtabmap?.setGPS(location: locations.last!);
+        if let location = locations.last {
+            collabSync.setScanLocation(latitude: location.coordinate.latitude, longitude: location.coordinate.longitude)
+            reverseGeocodeIfNeeded(location)
+        }
+    }
+
+    private func reverseGeocodeIfNeeded(_ location: CLLocation) {
+        if geocoding { return }
+        if let last = lastGeocodeAt, Date().timeIntervalSince(last) < 30, !scanAddress.isEmpty {
+            return
+        }
+        geocoding = true
+        geocoder.reverseGeocodeLocation(location) { [weak self] marks, _ in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.geocoding = false
+                self.lastGeocodeAt = Date()
+                guard let mark = marks?.first else { return }
+                let address = Self.shortAddress(from: mark)
+                guard !address.isEmpty else { return }
+                self.scanAddress = address
+                self.collabSync.setScanAddress(address)
+            }
+        }
+    }
+
+    private static func shortAddress(from mark: CLPlacemark) -> String {
+        let line = [mark.subThoroughfare, mark.thoroughfare]
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        if !line.isEmpty { return line }
+        if let name = mark.name, !name.isEmpty { return name }
+        if let city = mark.locality, !city.isEmpty { return city }
+        return ""
+    }
+
+    private func sanitizedFileName(_ raw: String) -> String {
+        let bad = CharacterSet(charactersIn: "/\\:?%*|\"<>")
+        return raw.components(separatedBy: bad).joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func wantsLocation() -> Bool {
+        let defaults = UserDefaults.standard
+        return defaults.bool(forKey: "SaveGPS") || defaults.bool(forKey: "CollabEnabled")
     }
     
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error)
@@ -1313,6 +1368,9 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
         }
         if(status == .denied)
         {
+            if !UserDefaults.standard.bool(forKey: "SaveGPS") {
+                return
+            }
             let alertController = UIAlertController(title: "GPS Disabled", message: "GPS option is enabled (Settings->Mapping...) but localization is denied for this App. To enable location for this App, go in Settings->Privacy->Location.", preferredStyle: .alert)
 
             let settingsAction = UIAlertAction(title: "Settings", style: .default) { (action) in
@@ -1769,6 +1827,64 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
         lowMemoryWarningShown = false
         updateState(state: .STATE_MAPPING)
         startCollabSyncIfEnabled()
+        startScanVideoIfEnabled()
+    }
+
+    // Camera video of the scan (Settings > Record Scan Video). Written to a
+    // temp file while mapping, renamed next to the .db on save.
+    private func scanVideoTempURL() -> URL {
+        return getDocumentDirectory().appendingPathComponent(ScanVideoRecorder.tempFileName)
+    }
+
+    private func startScanVideoIfEnabled() {
+        guard UserDefaults.standard.bool(forKey: "RecordScanVideo") else { return }
+        let orientation = UIApplication.shared.windows.first?.windowScene?.interfaceOrientation ?? .portrait
+        scanVideo.start(url: scanVideoTempURL(), orientation: orientation)
+    }
+
+    private func stopScanVideo() {
+        guard scanVideo.isRecording else { return }
+        let startedAt = scanVideo.startedAt ?? Date()
+        scanVideo.stop { url, duration, bytes in
+            guard let url = url else { return }
+            let mb = Double(bytes) / (1024.0 * 1024.0)
+            NSLog("ScanVideo: finished %@ (%.0fs, %.1f MB)", url.lastPathComponent, duration, mb)
+            // Collab: ship it to the server (admin sidebar > Recordings) and
+            // drop the local copy. Otherwise it stays next to the .db on save.
+            guard UserDefaults.standard.bool(forKey: "CollabEnabled") else {
+                self.showToast(message: String(format: "Video: %.0fs, %.0f MB", duration, mb), seconds: 2)
+                return
+            }
+            let name = startedAt.getFormattedDate(format: "yyMMdd-HHmmss") + ".mp4"
+            self.showToast(message: String(format: "Uploading video (%.0f MB)", mb), seconds: 3)
+            self.collabSync.uploadScanVideo(fileURL: url, name: name, durationSec: duration) { ok, detail in
+                if ok {
+                    try? FileManager.default.removeItem(at: url)
+                    self.showToast(message: String(format: "Video uploaded: %@ (%.0f MB)", name, mb), seconds: 3)
+                } else {
+                    NSLog("ScanVideo: upload failed (%@), keeping local copy", detail)
+                    self.showToast(message: "Video upload failed, kept on phone", seconds: 3)
+                }
+            }
+        }
+    }
+
+    // Give the video the database's name so they sit together in Documents.
+    private func attachScanVideo(toDatabaseNamed fileName: String) {
+        let tmp = scanVideoTempURL()
+        guard FileManager.default.fileExists(atPath: tmp.path) else { return }
+        var base = fileName
+        if base.hasSuffix(".db") { base = String(base.dropLast(3)) }
+        let dest = getDocumentDirectory().appendingPathComponent(base + ".mp4")
+        do {
+            if FileManager.default.fileExists(atPath: dest.path) {
+                try FileManager.default.removeItem(at: dest)
+            }
+            try FileManager.default.moveItem(at: tmp, to: dest)
+            NSLog("ScanVideo: saved as %@", dest.lastPathComponent)
+        } catch {
+            NSLog("ScanVideo: rename failed: %@", error.localizedDescription)
+        }
     }
 
     private func collabLiveStatusLine() -> String {
@@ -1954,17 +2070,20 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
         rtabmap!.setMetricSystem(defaults.integer(forKey: "MeasuringUnits") == 0);
         rtabmap!.setMeasuringTextSize(defaults.float(forKey: "MeasuringTextSize"));
         
-        if(locationManager != nil && !defaults.bool(forKey: "SaveGPS"))
+        if(locationManager != nil && !wantsLocation())
         {
             locationManager?.stopUpdatingLocation()
             locationManager = nil
             mLastKnownLocation = nil
         }
-        else if(locationManager == nil && defaults.bool(forKey: "SaveGPS"))
+        else if(locationManager == nil && wantsLocation())
         {
             locationManager = CLLocationManager()
             locationManager?.desiredAccuracy = kCLLocationAccuracyBestForNavigation
             locationManager?.delegate = self
+            if mState == .STATE_CAMERA || mState == .STATE_MAPPING {
+                locationManager?.startUpdatingLocation()
+            }
         }
     }
     
@@ -2264,6 +2383,9 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
 
         //Step : 3
         var placeholder = Date().getFormattedDate(format: "yyMMdd-HHmmss")
+        if !scanAddress.isEmpty {
+            placeholder = sanitizedFileName(scanAddress) + " " + placeholder
+        }
         if(mDataRecording) {
             placeholder += "-recording"
         }
@@ -2315,7 +2437,13 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
             indicator.stopAnimating()
             indicator.removeFromSuperview()
             
+            // Only a scan recorded in this session owns the temp video; a
+            // re-save of a database opened from the library must not adopt it.
+            let freshScan = self.openedDatabasePath == nil
             self.openedDatabasePath = URL(fileURLWithPath: filePath)
+            if freshScan {
+                self.attachScanVideo(toDatabaseNamed: fileName)
+            }
             
             let alert = UIAlertController(title: "Database saved!", message: String(format: "Database \"%@\" successfully saved!", fileName), preferredStyle: .alert)
             let yes = UIAlertAction(title: "OK", style: .default) {
@@ -2549,6 +2677,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
         waitingForRoomLock = false
         updateCalibrationHUD()
         let wasMapping = mState == .STATE_MAPPING
+        stopScanVideo()
         session.pause()
         locationManager?.stopUpdatingLocation()
         rtabmap?.setPausedMapping(paused: true)

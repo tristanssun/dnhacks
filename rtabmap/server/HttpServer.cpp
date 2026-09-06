@@ -1,8 +1,10 @@
 #include "HttpServer.h"
 
 #include <rtabmap/utilite/UFile.h>
+#include <rtabmap/utilite/UDirectory.h>
 #include <rtabmap/utilite/ULogger.h>
 #include <rtabmap/utilite/UConversion.h>
+#include <sys/stat.h>
 
 #include <algorithm>
 #include <atomic>
@@ -11,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <sstream>
 #include <thread>
 #include <vector>
@@ -596,6 +599,515 @@ std::string jsonEscape(const std::string & in)
 		}
 	}
 	return out;
+}
+
+std::string jsonFieldString(const std::string & meta, const char * key)
+{
+	if(!key || !key[0])
+	{
+		return "";
+	}
+	const std::string needle = std::string("\"") + key + "\":";
+	size_t p = meta.find(needle);
+	if(p == std::string::npos)
+	{
+		return "";
+	}
+	p += needle.size();
+	while(p < meta.size() && (meta[p] == ' ' || meta[p] == '\t' || meta[p] == '\n' || meta[p] == '\r'))
+	{
+		++p;
+	}
+	if(p >= meta.size() || meta[p] != '"')
+	{
+		return "";
+	}
+	++p;
+	std::string out;
+	for(; p < meta.size(); ++p)
+	{
+		if(meta[p] == '\\' && p + 1 < meta.size())
+		{
+			out.push_back(meta[p + 1]);
+			++p;
+			continue;
+		}
+		if(meta[p] == '"')
+		{
+			break;
+		}
+		out.push_back(meta[p]);
+	}
+	return out;
+}
+
+std::string jsonStringArray(const std::vector<std::string> & values)
+{
+	std::ostringstream oss;
+	oss << "[";
+	for(size_t i = 0; i < values.size(); ++i)
+	{
+		if(i)
+		{
+			oss << ",";
+		}
+		oss << "\"" << jsonEscape(values[i]) << "\"";
+	}
+	oss << "]";
+	return oss.str();
+}
+
+std::vector<std::string> jsonFieldStringArray(const std::string & meta, const char * key)
+{
+	std::vector<std::string> out;
+	if(!key || !key[0])
+	{
+		return out;
+	}
+	const std::string needle = std::string("\"") + key + "\":";
+	size_t p = meta.find(needle);
+	if(p == std::string::npos)
+	{
+		return out;
+	}
+	p += needle.size();
+	while(p < meta.size() && (meta[p] == ' ' || meta[p] == '\t' || meta[p] == '\n' || meta[p] == '\r'))
+	{
+		++p;
+	}
+	if(p >= meta.size() || meta[p] != '[')
+	{
+		const std::string one = jsonFieldString(meta, key);
+		if(!one.empty())
+		{
+			out.push_back(one);
+		}
+		return out;
+	}
+	++p;
+	while(p < meta.size())
+	{
+		while(p < meta.size() && (meta[p] == ' ' || meta[p] == '\t' || meta[p] == '\n' || meta[p] == '\r' || meta[p] == ','))
+		{
+			++p;
+		}
+		if(p >= meta.size() || meta[p] == ']')
+		{
+			break;
+		}
+		if(meta[p] != '"')
+		{
+			break;
+		}
+		++p;
+		std::string item;
+		for(; p < meta.size(); ++p)
+		{
+			if(meta[p] == '\\' && p + 1 < meta.size())
+			{
+				item.push_back(meta[p + 1]);
+				++p;
+				continue;
+			}
+			if(meta[p] == '"')
+			{
+				++p;
+				break;
+			}
+			item.push_back(meta[p]);
+		}
+		if(!item.empty())
+		{
+			out.push_back(item);
+		}
+	}
+	return out;
+}
+
+std::string sanitizeAddress(const std::string & in)
+{
+	std::string out;
+	out.reserve(in.size());
+	for(size_t i = 0; i < in.size(); ++i)
+	{
+		const unsigned char c = static_cast<unsigned char>(in[i]);
+		if(c < 32 || c == 127)
+		{
+			continue;
+		}
+		out.push_back(static_cast<char>(c));
+		if(out.size() >= 200)
+		{
+			break;
+		}
+	}
+	while(!out.empty() && (out[0] == ' ' || out[0] == ','))
+	{
+		out.erase(0, 1);
+	}
+	while(!out.empty() && (out[out.size() - 1] == ' ' || out[out.size() - 1] == ','))
+	{
+		out.erase(out.size() - 1);
+	}
+	return out;
+}
+
+std::string formatRunName(const std::string & address, long unixTime)
+{
+	const std::time_t t = unixTime > 0 ? static_cast<std::time_t>(unixTime) : std::time(0);
+	std::tm local;
+	if(!localtime_r(&t, &local))
+	{
+		return address;
+	}
+	char buf[64];
+	std::strftime(buf, sizeof(buf), "%b %d, %I:%M %p", &local);
+	std::string stamp(buf);
+	// "Sep 06, 05:51 AM" -> "Sep 6, 5:51 AM"
+	size_t i = 0;
+	while(i + 1 < stamp.size())
+	{
+		if((i == 0 || stamp[i - 1] == ' ' || stamp[i - 1] == ',') && stamp[i] == '0' &&
+			stamp[i + 1] >= '1' && stamp[i + 1] <= '9')
+		{
+			stamp.erase(i, 1);
+			continue;
+		}
+		++i;
+	}
+	if(address.empty())
+	{
+		return stamp;
+	}
+	return address + " · " + stamp;
+}
+
+// Recording names come from the phone and from URLs: keep a plain file name
+// (letters, digits, dot, dash, underscore), no path parts, always ".mp4".
+std::string sanitizeVideoName(const std::string & in)
+{
+	std::string out;
+	for(size_t i = 0; i < in.size(); ++i)
+	{
+		const char c = in[i];
+		if(std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '-' || c == '_')
+		{
+			out.push_back(c);
+		}
+	}
+	while(!out.empty() && out[0] == '.')
+	{
+		out.erase(0, 1);
+	}
+	if(out.empty())
+	{
+		return out;
+	}
+	if(out.size() < 4 || out.compare(out.size() - 4, 4, ".mp4") != 0)
+	{
+		out += ".mp4";
+	}
+	return out;
+}
+
+// JSON array of the .mp4 files in dir, newest first, with their sidecar
+// metadata (client, duration) when the upload wrote one.
+std::string listVideosJson(
+	const std::string & dir,
+	int currentRun,
+	const std::string & currentAddress,
+	long currentStarted,
+	double currentLat,
+	double currentLng)
+{
+	if(currentRun < 1)
+	{
+		currentRun = 1;
+	}
+	std::vector<std::pair<long, std::string> > files; // (mtime, name)
+	if(UDirectory::exists(dir))
+	{
+		UDirectory d(dir, "mp4");
+		const std::list<std::string> & names = d.getFileNames();
+		for(std::list<std::string>::const_iterator it = names.begin(); it != names.end(); ++it)
+		{
+			const std::string path = dir + "/" + *it;
+			struct stat st;
+			if(::stat(path.c_str(), &st) == 0)
+			{
+				files.push_back(std::make_pair((long)st.st_mtime, *it));
+			}
+		}
+	}
+	std::sort(files.begin(), files.end());
+	std::ostringstream oss;
+	oss << "{\"ok\":true,\"videos\":[";
+	bool first = true;
+	for(std::vector<std::pair<long, std::string> >::reverse_iterator it = files.rbegin(); it != files.rend(); ++it)
+	{
+		const std::string path = dir + "/" + it->second;
+		std::string client;
+		std::string summaryStatus;
+		std::string address;
+		double duration = 0.0;
+		double lat = 0.0;
+		double lng = 0.0;
+		int run = currentRun;
+		int taskCount = 0;
+		long uploaded = 0;
+		{
+			// sidecar: {"name":..,"client":"..","bytes":..,"duration_s":..,"uploaded":..,"run":..,"address":..}
+			FILE * f = std::fopen((path + ".json").c_str(), "rb");
+			if(f)
+			{
+				char buf[8192];
+				const size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
+				std::fclose(f);
+				buf[n] = 0;
+				const std::string meta(buf);
+				client = jsonFieldString(meta, "client");
+				address = sanitizeAddress(jsonFieldString(meta, "address"));
+				size_t p = meta.find("\"duration_s\":");
+				if(p != std::string::npos)
+				{
+					duration = std::atof(meta.c_str() + p + 13);
+				}
+				p = meta.find("\"run\":");
+				if(p != std::string::npos)
+				{
+					run = std::atoi(meta.c_str() + p + 6);
+					if(run < 1) run = currentRun;
+				}
+				summaryStatus = jsonFieldString(meta, "summary_status");
+				p = meta.find("\"task_count\":");
+				if(p != std::string::npos)
+				{
+					taskCount = std::atoi(meta.c_str() + p + 13);
+				}
+				p = meta.find("\"uploaded\":");
+				if(p != std::string::npos)
+				{
+					uploaded = std::atol(meta.c_str() + p + 11);
+				}
+				p = meta.find("\"lat\":");
+				if(p != std::string::npos)
+				{
+					lat = std::atof(meta.c_str() + p + 6);
+				}
+				p = meta.find("\"lng\":");
+				if(p != std::string::npos)
+				{
+					lng = std::atof(meta.c_str() + p + 6);
+				}
+			}
+		}
+		if(address.empty() && run >= currentRun)
+		{
+			address = currentAddress;
+		}
+		if(lat == 0.0 && lng == 0.0 && run >= currentRun)
+		{
+			lat = currentLat;
+			lng = currentLng;
+		}
+		const long titleAt = uploaded > 0 ? uploaded : (run >= currentRun && currentStarted > 0 ? currentStarted : it->first);
+		const std::string title = formatRunName(address, titleAt);
+		const bool current = run >= currentRun;
+		if(!first) oss << ",";
+		first = false;
+		oss << "{\"name\":\"" << jsonEscape(it->second) << "\""
+			<< ",\"url\":\"/videos/" << jsonEscape(it->second) << "\""
+			<< ",\"client\":\"" << jsonEscape(client) << "\""
+			<< ",\"bytes\":" << UFile::length(path)
+			<< ",\"duration_s\":" << duration
+			<< ",\"run\":" << run
+			<< ",\"current\":" << (current ? "true" : "false")
+			<< ",\"summary_status\":\"" << jsonEscape(summaryStatus) << "\""
+			<< ",\"task_count\":" << taskCount
+			<< ",\"address\":\"" << jsonEscape(address) << "\""
+			<< ",\"lat\":" << lat
+			<< ",\"lng\":" << lng
+			<< ",\"title\":\"" << jsonEscape(title) << "\""
+			<< ",\"mtime\":" << it->first << "}";
+	}
+	oss << "],\"current_run\":" << currentRun
+		<< ",\"run_address\":\"" << jsonEscape(currentAddress) << "\""
+		<< ",\"run_lat\":" << currentLat
+		<< ",\"run_lng\":" << currentLng
+		<< ",\"run_started\":" << currentStarted
+		<< ",\"run_name\":\"" << jsonEscape(formatRunName(currentAddress, currentStarted)) << "\"}";
+	return oss.str();
+}
+
+// Mesh archive names from URLs: plain file name, .ply or .jpg only.
+std::string sanitizeModelName(const std::string & in)
+{
+	std::string out;
+	for(size_t i = 0; i < in.size(); ++i)
+	{
+		const char c = in[i];
+		if(std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '-' || c == '_')
+		{
+			out.push_back(c);
+		}
+	}
+	while(!out.empty() && out[0] == '.')
+	{
+		out.erase(0, 1);
+	}
+	if(out.empty())
+	{
+		return out;
+	}
+	const bool jpg = out.size() >= 4 && out.compare(out.size() - 4, 4, ".jpg") == 0;
+	const bool ply = out.size() >= 4 && out.compare(out.size() - 4, 4, ".ply") == 0;
+	if(!jpg && !ply)
+	{
+		out += ".ply";
+	}
+	return out;
+}
+
+static void readModelSidecar(
+	const std::string & path,
+	int & nodes,
+	int & verts,
+	int & faces,
+	bool & textured,
+	int & run,
+	long & created,
+	std::string & kind,
+	std::string & address,
+	std::vector<std::string> & users,
+	double & lat,
+	double & lng,
+	std::string & indexStatus,
+	int & placeCount)
+{
+	nodes = 0;
+	verts = 0;
+	faces = 0;
+	textured = false;
+	run = 0;
+	created = 0;
+	lat = 0;
+	lng = 0;
+	placeCount = 0;
+	kind.clear();
+	address.clear();
+	users.clear();
+	indexStatus.clear();
+	FILE * f = std::fopen((path + ".json").c_str(), "rb");
+	if(!f)
+	{
+		return;
+	}
+	char buf[4096];
+	const size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
+	std::fclose(f);
+	buf[n] = 0;
+	const std::string meta(buf);
+	size_t p = meta.find("\"nodes\":");
+	if(p != std::string::npos) nodes = std::atoi(meta.c_str() + p + 8);
+	p = meta.find("\"verts\":");
+	if(p != std::string::npos) verts = std::atoi(meta.c_str() + p + 8);
+	p = meta.find("\"faces\":");
+	if(p != std::string::npos) faces = std::atoi(meta.c_str() + p + 8);
+	p = meta.find("\"textured\":");
+	if(p != std::string::npos)
+	{
+		const char * s = meta.c_str() + p + 11;
+		while(*s == ' ') ++s;
+		textured = (*s == 't' || *s == '1');
+	}
+	p = meta.find("\"run\":");
+	if(p != std::string::npos) run = std::atoi(meta.c_str() + p + 6);
+	p = meta.find("\"created\":");
+	if(p != std::string::npos) created = std::atol(meta.c_str() + p + 10);
+	kind = jsonFieldString(meta, "kind");
+	address = sanitizeAddress(jsonFieldString(meta, "address"));
+	p = meta.find("\"lat\":");
+	if(p != std::string::npos) lat = std::atof(meta.c_str() + p + 6);
+	p = meta.find("\"lng\":");
+	if(p != std::string::npos) lng = std::atof(meta.c_str() + p + 6);
+	users = jsonFieldStringArray(meta, "users");
+	if(users.empty())
+	{
+		const std::string one = jsonFieldString(meta, "user");
+		if(!one.empty())
+		{
+			users.push_back(one);
+		}
+	}
+	indexStatus = jsonFieldString(meta, "index_status");
+	p = meta.find("\"place_count\":");
+	if(p != std::string::npos) placeCount = std::atoi(meta.c_str() + p + 14);
+}
+
+std::string listModelsJson(const std::string & dir)
+{
+	std::vector<std::pair<long, std::string> > files;
+	if(UDirectory::exists(dir))
+	{
+		UDirectory d(dir, "ply");
+		const std::list<std::string> & names = d.getFileNames();
+		for(std::list<std::string>::const_iterator it = names.begin(); it != names.end(); ++it)
+		{
+			const std::string path = dir + "/" + *it;
+			struct stat st;
+			if(::stat(path.c_str(), &st) == 0 && st.st_size > 0)
+			{
+				files.push_back(std::make_pair((long)st.st_mtime, *it));
+			}
+		}
+	}
+	std::sort(files.begin(), files.end());
+	std::ostringstream oss;
+	oss << "{\"ok\":true,\"models\":[";
+	bool first = true;
+	for(std::vector<std::pair<long, std::string> >::reverse_iterator it = files.rbegin(); it != files.rend(); ++it)
+	{
+		const std::string path = dir + "/" + it->second;
+		int nodes = 0, verts = 0, faces = 0, run = 0, placeCount = 0;
+		bool textured = false;
+		long created = 0;
+		std::string kind;
+		std::string address;
+		std::string indexStatus;
+		std::vector<std::string> users;
+		double lat = 0, lng = 0;
+		readModelSidecar(path, nodes, verts, faces, textured, run, created, kind, address, users, lat, lng, indexStatus, placeCount);
+		std::string stem = it->second;
+		if(stem.size() > 4 && stem.compare(stem.size() - 4, 4, ".ply") == 0)
+		{
+			stem.erase(stem.size() - 4);
+		}
+		const std::string atlas = dir + "/" + stem + ".jpg";
+		const bool haveAtlas = UFile::exists(atlas) && UFile::length(atlas) > 0;
+		const long titleAt = created > 0 ? created : it->first;
+		if(!first) oss << ",";
+		first = false;
+		oss << "{\"name\":\"" << jsonEscape(it->second) << "\""
+			<< ",\"url\":\"/models/" << jsonEscape(it->second) << "\""
+			<< ",\"atlas_url\":\"" << (haveAtlas ? ("/models/" + jsonEscape(stem) + ".jpg") : "") << "\""
+			<< ",\"kind\":\"" << jsonEscape(kind.empty() ? (haveAtlas ? "baked" : "live") : kind) << "\""
+			<< ",\"nodes\":" << nodes
+			<< ",\"verts\":" << verts
+			<< ",\"faces\":" << faces
+			<< ",\"textured\":" << (textured || haveAtlas ? "true" : "false")
+			<< ",\"bytes\":" << UFile::length(path)
+			<< ",\"run\":" << run
+			<< ",\"address\":\"" << jsonEscape(address) << "\""
+			<< ",\"lat\":" << lat
+			<< ",\"lng\":" << lng
+			<< ",\"users\":" << jsonStringArray(users)
+			<< ",\"title\":\"" << jsonEscape(formatRunName(address, titleAt)) << "\""
+			<< ",\"index_status\":\"" << jsonEscape(indexStatus) << "\""
+			<< ",\"place_count\":" << placeCount
+			<< ",\"mtime\":" << it->first << "}";
+	}
+	oss << "]}";
+	return oss.str();
 }
 
 }

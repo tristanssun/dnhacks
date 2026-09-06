@@ -117,6 +117,63 @@ function vertexMean(geom) {
   return sum.multiplyScalar(1 / Math.max(pos.count, 1));
 }
 
+function pickHighPoint(geom) {
+  const pos = geom.getAttribute("position");
+  const ys = [];
+  const step = Math.max(1, Math.floor(pos.count / 8000));
+  for (let i = 0; i < pos.count; i += step) {
+    ys.push(pos.getY(i));
+  }
+  ys.sort((a, b) => a - b);
+  const hi = ys[Math.min(ys.length - 1, Math.floor(ys.length * 0.9))];
+  const tmp = new THREE.Vector3();
+  const best = new THREE.Vector3();
+  let bestScore = Infinity;
+  for (let i = 0; i < pos.count; i += step) {
+    tmp.set(pos.getX(i), pos.getY(i), pos.getZ(i));
+    const score = Math.abs(tmp.y - hi) * 1.4 + Math.hypot(tmp.x, tmp.z) * 0.3;
+    if (score < bestScore) {
+      bestScore = score;
+      best.copy(tmp);
+    }
+  }
+  return best;
+}
+
+function pickSurfacePoint(geom) {
+  const pos = geom.getAttribute("position");
+  const tmp = new THREE.Vector3();
+  const best = new THREE.Vector3();
+  let bestScore = Infinity;
+  const step = Math.max(1, Math.floor(pos.count / 5000));
+  for (let i = 0; i < pos.count; i += step) {
+    tmp.set(pos.getX(i), pos.getY(i), pos.getZ(i));
+    const score = Math.abs(tmp.y - 0.4) * 1.8 + Math.hypot(tmp.x, tmp.z) * 0.32;
+    if (score < bestScore) {
+      bestScore = score;
+      best.copy(tmp);
+    }
+  }
+  return best;
+}
+
+function pickScanPoint(geom) {
+  const pos = geom.getAttribute("position");
+  const tmp = new THREE.Vector3();
+  const best = new THREE.Vector3();
+  let bestScore = Infinity;
+  const step = Math.max(1, Math.floor(pos.count / 5000));
+  for (let i = 0; i < pos.count; i += step) {
+    tmp.set(pos.getX(i), pos.getY(i), pos.getZ(i));
+    const score = Math.abs(tmp.y - 1.05) * 1.1 + Math.abs(Math.hypot(tmp.x, tmp.z) - 2.1) * 0.85;
+    if (score < bestScore) {
+      bestScore = score;
+      best.copy(tmp);
+    }
+  }
+  return best;
+}
+
 function percentileRadius(geom, center, pct) {
   const pos = geom.getAttribute("position");
   const dist = new Float64Array(pos.count);
@@ -153,16 +210,14 @@ export function initMap() {
   controls.autoRotateSpeed = 0.35;
   controls.minDistance = 0.12;
   controls.maxDistance = 80;
-  controls.target.set(0.8, 0.8, 0.4);
+  controls.target.set(0, 0, 0);
 
-  const world = new THREE.Group();
-  world.matrixAutoUpdate = false;
-  world.matrix.makeBasis(
+  const gBasis = new THREE.Matrix4().makeBasis(
     new THREE.Vector3(0, 0, -1),
     new THREE.Vector3(-1, 0, 0),
     new THREE.Vector3(0, 1, 0),
   );
-  world.matrixWorldNeedsUpdate = true;
+  const world = new THREE.Group();
   scene.add(world);
 
   scene.add(new THREE.AmbientLight(0xdbdad9, 0.32));
@@ -187,62 +242,127 @@ export function initMap() {
   world.add(tagPlane);
 
   let scanRadius = 8;
+  let scanMesh = null;
+  const noteTargets = {
+    unit1: new THREE.Vector3(),
+    unit2: new THREE.Vector3(),
+    mesh: new THREE.Vector3(),
+    floors: new THREE.Vector3(),
+    scan: new THREE.Vector3(),
+  };
+  const noteEls = {
+    unit1: document.querySelector('[data-note="unit1"]'),
+    unit2: document.querySelector('[data-note="unit2"]'),
+    mesh: document.querySelector('[data-note="mesh"]'),
+    floors: document.querySelector('[data-note="floors"]'),
+    scan: document.querySelector('[data-note="scan"]'),
+  };
+  const pinEls = {
+    unit1: document.querySelector('[data-pin="unit1"]'),
+    unit2: document.querySelector('[data-pin="unit2"]'),
+    mesh: document.querySelector('[data-pin="mesh"]'),
+    floors: document.querySelector('[data-pin="floors"]'),
+    scan: document.querySelector('[data-pin="scan"]'),
+  };
+  const lineEls = {
+    unit1: document.querySelector('[data-line="unit1"]'),
+    unit2: document.querySelector('[data-line="unit2"]'),
+    mesh: document.querySelector('[data-line="mesh"]'),
+    floors: document.querySelector('[data-line="floors"]'),
+    scan: document.querySelector('[data-line="scan"]'),
+  };
+  const projectTmp = new THREE.Vector3();
+  const camPos = new THREE.Vector3();
+  const camDir = new THREE.Vector3();
+  const lookTmp = new THREE.Vector3();
 
   const unit1 = makeUserGroup(
     COLORS[0],
     "UNIT-01 / A31C",
-    2.41,
-    -1.082,
-    0.214,
-    -0.4,
+    0.63,
+    -1.526,
+    0.32,
+    -1.044,
     [
-      [0.2, -0.1],
-      [0.8, -0.35],
-      [1.4, -0.7],
-      [1.95, -0.95],
-      [2.41, -1.082],
+      [-0.375, 0.034],
+      [0.376, 0.129],
+      [-0.041, 0.344],
+      [0.063, -0.552],
+      [0.63, -1.526],
     ],
   );
   const unit2 = makeUserGroup(
     COLORS[1],
     "UNIT-02 / 9F04",
-    6.2,
-    3.4,
-    0.22,
-    1.1,
+    2.727,
+    2.043,
+    1.204,
+    0.448,
     [
-      [1.1, 0.4],
-      [2.8, 1.5],
-      [4.6, 2.6],
-      [6.2, 3.4],
+      [0.863, -1.8],
+      [0.925, -1.024],
+      [-1.172, -0.166],
+      [-1.55, 1.779],
+      [2.727, 2.043],
     ],
   );
   world.add(unit1.marker, unit1.trail, unit2.marker, unit2.trail);
 
-  new PLYLoader().load("assets/map.ply", (geom) => {
+  function attachScan(geom, tex) {
+    geom.applyMatrix4(gBasis);
     const mean = vertexMean(geom);
     geom.translate(-mean.x, -mean.y, -mean.z);
     geom.computeVertexNormals();
-    scanRadius = percentileRadius(geom, new THREE.Vector3(), 0.86);
+    scanRadius = percentileRadius(geom, new THREE.Vector3(), 0.84);
+    const hasUv = !!geom.getAttribute("uv");
     const hasColor = !!geom.getAttribute("color");
-    world.add(new THREE.Mesh(
-      geom,
-      new THREE.MeshStandardMaterial({
-        vertexColors: hasColor,
-        color: hasColor ? 0xffffff : 0xa19f9b,
-        roughness: 0.88,
-        metalness: 0.02,
-        side: THREE.DoubleSide,
-      }),
-    ));
-    unit1.marker.position.sub(mean);
-    unit2.marker.position.sub(mean);
-    unit1.trail.position.sub(mean);
-    unit2.trail.position.sub(mean);
-    origin.position.sub(mean);
-    tagPlane.position.sub(mean);
+    geom.computeBoundingBox();
+    const mat = tex && hasUv
+      ? new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide })
+      : new THREE.MeshStandardMaterial({
+          vertexColors: hasColor,
+          color: hasColor ? 0xffffff : 0xa19f9b,
+          roughness: 0.88,
+          metalness: 0.02,
+          side: THREE.DoubleSide,
+        });
+    if (scanMesh) {
+      world.remove(scanMesh);
+      scanMesh.geometry.dispose();
+      scanMesh.material.dispose();
+    }
+    scanMesh = new THREE.Mesh(geom, mat);
+    world.add(scanMesh);
+    [unit1.marker, unit2.marker, unit1.trail, unit2.trail, origin, tagPlane].forEach((obj) => {
+      obj.position.applyMatrix4(gBasis).sub(mean);
+    });
+    noteTargets.unit1.copy(unit1.marker.position);
+    noteTargets.unit2.copy(unit2.marker.position);
+    noteTargets.mesh.copy(pickSurfacePoint(geom));
+    noteTargets.floors.copy(pickHighPoint(geom));
+    noteTargets.scan.copy(pickScanPoint(geom));
     resize();
     requestAnimationFrame(fit);
+  }
+
+  new PLYLoader().load("assets/map.ply?v=15", (geom) => {
+    const hasUv = !!geom.getAttribute("uv");
+    if (!hasUv) {
+      attachScan(geom, null);
+      return;
+    }
+    new THREE.TextureLoader().load(
+      "assets/map.bake.jpg?v=15",
+      (tex) => {
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+        tex.generateMipmaps = true;
+        tex.minFilter = THREE.LinearMipmapLinearFilter;
+        attachScan(geom, tex);
+      },
+      undefined,
+      () => attachScan(geom, null),
+    );
   });
 
   function resize() {
@@ -255,15 +375,192 @@ export function initMap() {
     canvas.style.height = "100%";
   }
 
+  function projectedBounds() {
+    const box = scanMesh?.geometry.boundingBox;
+    if (!box) {
+      return null;
+    }
+    const corners = [
+      new THREE.Vector3(box.min.x, box.min.y, box.min.z),
+      new THREE.Vector3(box.min.x, box.min.y, box.max.z),
+      new THREE.Vector3(box.min.x, box.max.y, box.min.z),
+      new THREE.Vector3(box.min.x, box.max.y, box.max.z),
+      new THREE.Vector3(box.max.x, box.min.y, box.min.z),
+      new THREE.Vector3(box.max.x, box.min.y, box.max.z),
+      new THREE.Vector3(box.max.x, box.max.y, box.min.z),
+      new THREE.Vector3(box.max.x, box.max.y, box.max.z),
+    ];
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    corners.forEach((corner) => {
+      corner.project(camera);
+      minX = Math.min(minX, corner.x);
+      maxX = Math.max(maxX, corner.x);
+      minY = Math.min(minY, corner.y);
+      maxY = Math.max(maxY, corner.y);
+    });
+    return { minX, maxX, minY, maxY };
+  }
+
+  function panToNdc(ndcX, ndcY) {
+    const focus = new THREE.Vector3(0, 0, 0.5).unproject(camera);
+    const shifted = new THREE.Vector3(ndcX, ndcY, 0.5).unproject(camera);
+    const pan = shifted.sub(focus);
+    camera.position.add(pan);
+    controls.target.add(pan);
+  }
+
+  const homePos = new THREE.Vector3();
+  const homeTarget = new THREE.Vector3();
+  let homeReady = false;
+
+  function rememberHome() {
+    homePos.copy(camera.position);
+    homeTarget.copy(controls.target);
+    homeReady = true;
+  }
+
   function fit() {
-    world.updateMatrixWorld(true);
-    const center = new THREE.Vector3();
     const vfov = (camera.fov * Math.PI) / 180;
     const hfov = 2 * Math.atan(Math.tan(vfov / 2) * Math.max(camera.aspect, 0.2));
-    const dist = (scanRadius / Math.sin(Math.min(vfov, hfov) / 2)) * 1.12;
-    const dir = new THREE.Vector3(0.55, 0.38, 0.74).normalize();
-    camera.position.copy(center).addScaledVector(dir, Math.min(dist, 36));
-    controls.target.copy(center);
+    const dist = (scanRadius / Math.sin(Math.min(vfov, hfov) / 2)) * 0.94;
+    camera.position.set(dist * 0.3, dist * 0.72, dist * 0.52);
+    controls.target.set(0, 0, 0);
+    camera.updateMatrixWorld(true);
+    const bounds = projectedBounds();
+    if (bounds) {
+      const midX = (bounds.minX + bounds.maxX) / 2;
+      const midY = (bounds.minY + bounds.maxY) / 2;
+      panToNdc(midX * 0.55, midY * 0.55);
+      camera.updateMatrixWorld(true);
+    }
+    controls.update();
+    rememberHome();
+  }
+
+  function projectToView(worldPos) {
+    projectTmp.copy(worldPos).project(camera);
+    const rect = wrap.getBoundingClientRect();
+    camera.getWorldPosition(camPos);
+    camera.getWorldDirection(camDir);
+    const inFront = lookTmp.copy(worldPos).sub(camPos).dot(camDir) > 0.08;
+    return {
+      x: rect.left + (projectTmp.x * 0.5 + 0.5) * rect.width,
+      y: rect.top + (-projectTmp.y * 0.5 + 0.5) * rect.height,
+      inFront,
+    };
+  }
+
+  function boxAnchor(el, toX, toY) {
+    const rect = el.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const dx = (toX - cx) / Math.max(rect.width, 1);
+    const dy = (toY - cy) / Math.max(rect.height, 1);
+    if (Math.abs(dx) > Math.abs(dy)) {
+      return { x: dx > 0 ? rect.right : rect.left, y: cy };
+    }
+    return { x: cx, y: dy > 0 ? rect.bottom : rect.top };
+  }
+
+  const NOTE_IDS = ["unit1", "unit2", "mesh", "floors", "scan"];
+
+  function slotsFor(count, side) {
+    if (side === "l") {
+      if (count <= 1) {
+        return ["tl"];
+      }
+      if (count === 2) {
+        return ["tl", "bl"];
+      }
+      return ["tl", "ml", "bl"];
+    }
+    if (count <= 1) {
+      return ["tr"];
+    }
+    if (count === 2) {
+      return ["tr", "br"];
+    }
+    return ["tr", "mr", "br"];
+  }
+
+  function placeNotes(items) {
+    const vis = items.filter((it) => it.on);
+    vis.sort((a, b) => a.pt.x - b.pt.x || a.pt.y - b.pt.y);
+    const mid = Math.ceil(vis.length / 2);
+    const left = vis.slice(0, mid).sort((a, b) => a.pt.y - b.pt.y);
+    const right = vis.slice(mid).sort((a, b) => a.pt.y - b.pt.y);
+    const leftSlots = slotsFor(left.length, "l");
+    const rightSlots = slotsFor(right.length, "r");
+    left.forEach((it, i) => {
+      it.slot = leftSlots[i];
+    });
+    right.forEach((it, i) => {
+      it.slot = rightSlots[i];
+    });
+  }
+
+  function syncNotes() {
+    const active = document.body.classList.contains("is-map-full");
+    if (!active) {
+      return;
+    }
+    const items = NOTE_IDS.map((id) => {
+      const pt = projectToView(noteTargets[id]);
+      const on = pt.inFront && pt.x > -80 && pt.x < window.innerWidth + 80 && pt.y > -80 && pt.y < window.innerHeight + 80;
+      return { id, pt, on };
+    });
+    placeNotes(items);
+    items.forEach((it) => {
+      const note = noteEls[it.id];
+      const pin = pinEls[it.id];
+      const line = lineEls[it.id];
+      if (!note || !pin || !line) {
+        return;
+      }
+      note.classList.toggle("is-off", !it.on);
+      if (it.slot) {
+        note.dataset.slot = it.slot;
+      }
+      pin.style.display = it.on ? "block" : "none";
+      line.style.display = it.on ? "block" : "none";
+      if (!it.on) {
+        return;
+      }
+      pin.style.transform = `translate3d(${it.pt.x}px, ${it.pt.y}px, 0)`;
+    });
+    items.forEach((it) => {
+      if (!it.on) {
+        return;
+      }
+      const note = noteEls[it.id];
+      const line = lineEls[it.id];
+      if (!note || !line) {
+        return;
+      }
+      const from = boxAnchor(note, it.pt.x, it.pt.y);
+      line.setAttribute("x1", String(from.x));
+      line.setAttribute("y1", String(from.y));
+      line.setAttribute("x2", String(it.pt.x));
+      line.setAttribute("y2", String(it.pt.y));
+    });
+  }
+
+  function setEnter(t) {
+    if (!homeReady) {
+      return;
+    }
+    const amount = Math.min(1, Math.max(0, t));
+    const dir = homePos.clone().sub(homeTarget);
+    const dist = dir.length() * (1 - amount * 0.42);
+    if (dist < 0.05) {
+      return;
+    }
+    camera.position.copy(homeTarget).addScaledVector(dir.normalize(), dist);
+    controls.target.copy(homeTarget);
+    camera.updateMatrixWorld(true);
     controls.update();
   }
 
@@ -271,15 +568,15 @@ export function initMap() {
     requestAnimationFrame(tick);
     controls.update();
     renderer.render(scene, camera);
+    syncNotes();
   }
 
   resize();
   tick();
   window.addEventListener("resize", resize);
-  document.getElementById("fit-btn")?.addEventListener("click", fit);
   canvas.addEventListener("pointerdown", () => {
     controls.autoRotate = false;
   });
 
-  return { resize, fit };
+  return { resize, fit, setEnter };
 }

@@ -74,6 +74,7 @@ inline std::string adminPageHtml()
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <style>
 :root{
   --page:#161514;
@@ -113,8 +114,29 @@ body{display:flex;flex-direction:column;min-height:100%;background:var(--page);}
 .link.ok .pulse{background:var(--text-1);}
 #clock{font-family:var(--mono);font-size:13px;font-weight:400;color:var(--text-1);}
 #shell{flex:1 1 auto;min-height:0;display:grid;grid-template-columns:300px minmax(0,1fr);gap:0;}
-#side{min-height:0;display:flex;flex-direction:column;background:var(--panel);border-right:1px solid var(--border);overflow:auto;}
-.tree{margin:0;padding:8px 0;flex:1 1 auto;}
+#side{grid-column:1;grid-row:1;min-height:0;display:flex;flex-direction:column;background:var(--panel);border-right:1px solid var(--border);overflow:hidden;}
+#side-map{flex:0 0 auto;padding:10px 10px 0;position:relative;}
+.tree-search{position:relative;margin:4px 10px 8px calc(8px + var(--d,1)*14px);}
+#scan-search{width:100%;height:28px;border:1px solid var(--border);background:var(--card);
+  color:var(--text-1);font-family:var(--sans);font-size:12px;padding:0 8px;}
+#scan-search:focus{outline:none;border-color:var(--text-1);}
+.scan-map-wrap{position:relative;}
+#scan-map{height:168px;border:1px solid var(--border);background:var(--card);position:relative;z-index:0;isolation:isolate;}
+#scan-map .leaflet-container{background:var(--card);font-family:var(--sans);}
+#scan-map .leaflet-control-zoom{border:1px solid var(--border);border-radius:0;margin:6px;box-shadow:none;}
+#scan-map .leaflet-control-zoom a{background:var(--card);color:var(--text-1);width:22px;height:22px;
+  line-height:22px;font-size:14px;border-bottom:1px solid var(--border);}
+#scan-map .leaflet-control-zoom a:hover{background:var(--panel);color:var(--text-1);}
+#scan-map .leaflet-control-zoom a.leaflet-disabled{opacity:.35;color:var(--text-2);}
+#scan-map .leaflet-control-attribution{font-size:9px;background:rgba(31,30,29,.72);color:var(--text-2);}
+#scan-map .leaflet-control-attribution a{color:var(--text-2);}
+.scan-map-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  pointer-events:none;font-size:12px;font-weight:500;color:var(--text-2);}
+.scan-map-empty.hide{display:none;}
+.scan-pin{width:14px;height:14px;margin-left:-7px;margin-top:-7px;border-radius:50%;
+  background:var(--text-1);border:2px solid var(--page);box-shadow:0 0 0 1px var(--border);}
+.side-rule{flex:0 0 auto;height:1px;margin:10px 10px 0;border:0;background:#5C5A56;}
+.tree{margin:0;padding:8px 0;flex:1 1 auto;min-height:0;overflow:auto;}
 .tree-kids{display:none;}
 .tree-node.open>.tree-kids{display:block;}
 .tree-row{display:flex;align-items:center;gap:6px;height:26px;padding:0 10px 0 calc(8px + var(--d,0)*14px);
@@ -123,7 +145,7 @@ body{display:flex;flex-direction:column;min-height:100%;background:var(--page);}
 .tree-row:hover{background:var(--card);}
 .tree-chev,.tree-ico{flex:0 0 12px;width:12px;height:12px;color:var(--text-2);display:block;}
 .tree-ico{width:14px;height:14px;flex:0 0 14px;}
-.tree-chev{transform:rotate(0deg);transform-origin:50% 50%;}
+.tree-chev{transform:rotate(0deg);transform-origin:50% 50%;transition:transform .12s ease;}
 .tree-row.open .tree-chev{transform:rotate(90deg);}
 .tree-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   font-size:13px;font-weight:400;color:var(--text-1);}
@@ -142,8 +164,8 @@ body{display:flex;flex-direction:column;min-height:100%;background:var(--page);}
 .btn.solid{background:var(--text-1);color:var(--page);border-color:var(--text-1);}
 .btn.solid:hover{background:var(--text-1);border-color:var(--text-1);}
 .btn.ghost-bad:hover{border-color:var(--text-2);color:var(--text-2);}
-.viewport{min-height:0;display:flex;flex-direction:column;background:var(--page);position:relative;}
-.view-stage{flex:1;min-height:0;position:relative;display:flex;}
+.viewport{grid-column:2;grid-row:1;min-height:0;min-width:0;display:flex;flex-direction:row;background:var(--page);position:relative;}
+.view-stage{flex:1 1 auto;min-height:0;min-width:0;position:relative;display:flex;z-index:0;}
 #calib-tag{flex:1;min-height:0;overflow:hidden;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;}
 .reticle{position:relative;padding:8px;background:#fff;flex:0 0 auto;
   display:flex;align-items:center;justify-content:center;
@@ -176,15 +198,70 @@ body{display:flex;flex-direction:column;min-height:100%;background:var(--page);}
 .sheet p{margin:0 0 22px;color:var(--text-2);font-size:14px;font-weight:400;line-height:1.45;}
 .sheet-row{display:flex;gap:8px;}
 .sheet-row .btn{flex:1;}
+/* scan recording player (sidebar > History) */
+#player{display:none;position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:21;
+  align-items:center;justify-content:center;padding:24px;}
+#player.open{display:flex;}
+#player.open.docked{position:relative;inset:auto;width:380px;flex:0 0 380px;height:auto;
+  align-self:stretch;padding:12px 12px 12px 0;background:transparent;
+  align-items:stretch;justify-content:stretch;pointer-events:none;z-index:2;}
+#player.open.docked .player-box{pointer-events:auto;width:100%;height:100%;max-height:none;
+  transform:translateZ(0);}
+#player.open.docked .player-body{grid-template-columns:1fr;grid-template-rows:minmax(0,1fr) minmax(140px,38%);}
+#player.open.docked #player-video{max-height:none;height:100%;}
+#player.open.docked .player-summary{max-height:none;}
+@media (max-width:900px){
+  .viewport{flex-direction:column;}
+  #player.open.docked{width:auto;flex:0 0 auto;max-height:42vh;padding:0 12px 12px;}
+  #player.open.docked .player-box{max-height:42vh;}
+}
+.player-box{width:min(1180px,100%);max-height:calc(100vh - 48px);display:flex;flex-direction:column;
+  background:var(--panel);border:1px solid var(--border);padding:12px;min-height:0;}
+.player-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px;flex:0 0 auto;}
+.player-head span{font-family:var(--mono);font-size:13px;color:var(--text-1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.player-head .btn{height:30px;padding:0 12px;}
+.player-body{display:grid;grid-template-columns:minmax(0,1fr) 320px;grid-template-rows:minmax(0,72vh);
+  gap:12px;align-items:stretch;min-height:0;flex:1 1 auto;overflow:hidden;}
+#player-video{display:block;width:100%;height:100%;max-height:72vh;background:#000;object-fit:contain;}
+.player-summary{min-height:0;max-height:100%;overflow:hidden;display:flex;flex-direction:column;
+  border:1px solid var(--border);background:var(--card);padding:10px 12px;}
+.player-sum-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;flex:0 0 auto;}
+.player-sum-head b{font-size:12px;font-weight:500;letter-spacing:.03em;text-transform:uppercase;color:var(--text-2);}
+.player-sum-head .btn{height:28px;padding:0 10px;}
+#player-sum-text{margin:0 0 10px;font-size:13px;line-height:1.45;color:var(--text-1);flex:0 0 auto;}
+#player-sum-text.muted{color:var(--text-2);}
+#player-tasks{flex:1 1 auto;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:4px;}
+.player-task{appearance:none;width:100%;text-align:left;border:1px solid transparent;background:transparent;
+  color:var(--text-1);padding:8px 8px;cursor:pointer;font:inherit;}
+.player-task:hover,.player-task.on{border-color:var(--border);background:var(--panel);}
+.player-task .t{display:flex;align-items:baseline;justify-content:space-between;gap:8px;}
+.player-task .t em{font-family:var(--mono);font-size:12px;font-style:normal;color:var(--text-2);}
+.player-task .t span{font-size:13px;font-weight:500;}
+.player-task p{margin:4px 0 0;font-size:12px;line-height:1.4;color:var(--text-2);}
+@media (max-width:900px){
+  .player-body{grid-template-columns:1fr;}
+  #player-video{max-height:42vh;}
+  .player-summary{max-height:32vh;}
+}
+.tree-row.rec,.tree-row.model{cursor:pointer;}
+.tree-row.rec .tree-name,.tree-row.model .tree-name{color:var(--text-1);}
+.tree-row.model.on,.tree-row.rec.on,.tree-row.on{background:var(--card);}
+.tree-row.model .tree-val,.tree-row.rec .tree-val{flex:0 0 auto;}
+#view-banner{display:none;position:absolute;top:14px;left:16px;z-index:2;
+  padding:8px 10px;border:1px solid var(--border);background:var(--card);
+  font-size:12px;font-weight:500;color:var(--text-1);pointer-events:none;}
+#view-banner.show{display:block;}
 @media (max-width:900px){
   .phases{display:none;}
   #shell{grid-template-columns:1fr;}
-  #side{max-height:48vh;border-right:0;border-bottom:1px solid var(--border);}
+  #side{grid-column:1;grid-row:1;max-height:48vh;border-right:0;border-bottom:1px solid var(--border);}
+  .viewport{grid-column:1;grid-row:2;}
 }
 </style>
 <script type="importmap">
 {"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.1/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.1/examples/jsm/"}}
 </script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 </head>
 <body>
 <div id="banner"></div>
@@ -213,6 +290,13 @@ body{display:flex;flex-direction:column;min-height:100%;background:var(--page);}
 </header>
 <div id="shell">
   <aside id="side">
+    <div id="side-map">
+      <div class="scan-map-wrap">
+        <div id="scan-map" aria-label="Scanned sites"></div>
+        <div id="scan-map-empty" class="scan-map-empty">Locating sites</div>
+      </div>
+    </div>
+    <hr class="side-rule">
     <div id="dots" class="tree"></div>
     <div class="side-actions">
       <button type="button" class="btn" id="opt-btn">Optimize</button>
@@ -235,9 +319,27 @@ body{display:flex;flex-direction:column;min-height:100%;background:var(--page);}
             <div class="stat"><b>Mesh</b><em id="stat-mesh">0</em></div>
             <div class="stat"><b>Align</b><em id="stat-align">No</em></div>
           </div>
+          <div id="view-banner"></div>
           <div class="view-tools">
+            <button type="button" class="chip on" id="live-btn">Live</button>
             <button type="button" class="chip" id="fit-btn">Fit</button>
           </div>
+        </div>
+      </div>
+    </div>
+    <div id="player" class="player">
+      <div class="player-box">
+        <div class="player-head"><span id="player-title"></span><button type="button" class="btn" id="player-close">Close</button></div>
+        <div class="player-body">
+          <video id="player-video" controls playsinline preload="metadata"></video>
+          <aside class="player-summary" id="player-summary">
+            <div class="player-sum-head">
+              <b>Summary</b>
+              <button type="button" class="btn" id="player-summarize">Summarize</button>
+            </div>
+            <p id="player-sum-text" class="muted">Open a recording to summarize completed tasks.</p>
+            <div id="player-tasks"></div>
+          </aside>
         </div>
       </div>
     </div>
@@ -383,18 +485,25 @@ function ico(kind) {
   if (kind === 'folder') {
     return '<svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.6h4.1l1.2 1.5H14V13H2z" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>';
   }
+  if (kind === 'video') {
+    return '<svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="2.2" y="3.6" width="11.6" height="8.8" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M6.6 6.1 L10.4 8 L6.6 9.9 Z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>';
+  }
+  if (kind === 'mesh') {
+    return '<svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.2 L13.4 5.2 V11 L8 14 L2.6 11 V5.2 Z" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M8 2.2 V8.2 L13.4 11 M8 8.2 L2.6 11" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>';
+  }
   return '<svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>';
 }
-function treeFolder(path, depth, name, extra, kids, openDefault) {
+function treeFolder(path, depth, name, extra, kids, openDefault, icon, selected) {
   const open = folderOpen(path, openDefault);
   let html = '<div class="tree-node' + (open ? ' open' : '') + '">';
-  html += '<div class="tree-row' + (open ? ' open' : '') + '" style="--d:' + depth + '" data-toggle="' + esc(path) + '">';
-  html += ico('chev') + ico('folder') + '<span class="tree-name' + (depth === 1 ? ' tree-id' : '') + '">' + esc(name) + '</span>' + (extra || '') + '</div>';
+  html += '<div class="tree-row' + (open ? ' open' : '') + (selected ? ' on' : '') + '" style="--d:' + depth + '" data-toggle="' + esc(path) + '">';
+  html += ico('chev') + ico(icon || 'folder') + '<span class="tree-name' + (depth === 1 ? ' tree-id' : '') + '">' + esc(name) + '</span>' + (extra || '') + '</div>';
   html += '<div class="tree-kids">' + kids + '</div></div>';
   return html;
 }
-function treeLeaf(depth, name, value) {
-  return '<div class="tree-row leaf" style="--d:' + depth + '">' + ico('file') +
+function treeLeaf(depth, name, value, key) {
+  return '<div class="tree-row leaf" style="--d:' + depth + '"' +
+    (key ? ' data-leaf="' + esc(key) + '"' : '') + '>' + ico('file') +
     '<span class="tree-name">' + esc(name) + '</span>' +
     (value != null ? '<span class="tree-val">' + esc(value) + '</span>' : '') + '</div>';
 }
@@ -433,69 +542,957 @@ function tickClock() {
   const s = Math.max(0, Math.floor((Date.now() - sessionStart) / 1000));
   el.textContent = pad2(Math.floor(s / 3600)) + ':' + pad2(Math.floor((s % 3600) / 60)) + ':' + pad2(s % 60);
 }
-function renderDots(demo) {
+function cssEsc(s) {
+  return (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+}
+function unitFields(demo, c) {
+  const cl = findClient(demo, c.id) || {};
+  const st = clientStatus(c.id) || {};
+  const rpy = rpyOf(cl);
+  const now = numOr(demo.server_now, Date.now() / 1000);
+  const seen = numOr(cl.last_seen, st.last_seen);
+  const poseAt = numOr(cl.last_pose_at, 0);
+  const seenAge = (seen > 0) ? (now - seen) : 1e9;
+  const live = seenAge < 5;
+  const stale = seen > 0 && seenAge >= 45;
+  const locked = !!(c.locked || cl.locked);
+  let state = 'Standby';
+  if (stale) state = 'Stale';
+  else if (locked) state = 'Locked';
+  else if (seen <= 0) state = 'Offline';
+  const x = cl.x, y = cl.y, z = cl.z;
+  const hasPos = typeof x === 'number' && typeof y === 'number' && typeof z === 'number';
+  const range = hasPos ? Math.hypot(x, y, z) : NaN;
+  const ground = hasPos ? Math.hypot(x, y) : NaN;
+  const nodes = numOr(cl.nodes, st.nodes);
+  const localId = numOr(cl.last_local_id, st.last_local_id);
+  const session = numOr(cl.session_map_id, -1);
+  const mapBase = numOr(cl.map_id_base, -1);
+  const pathM = numOr(cl.path_m, NaN);
+  const trailN = numOr(cl.trail_n, (cl.trail || []).length);
+  const tagId = numOr(cl.tag_id, -1);
+  const hasQuat = [cl.qx, cl.qy, cl.qz, cl.qw].every(function(v) {
+    return typeof v === 'number' && isFinite(v);
+  });
+  return {
+    path: c.id, state: state, live: live,
+    e: hasPos ? fmtSigned(x, 3) + ' m' : 'n/a',
+    n: hasPos ? fmtSigned(y, 3) + ' m' : 'n/a',
+    u: hasPos ? fmtSigned(z, 3) + ' m' : 'n/a',
+    range: isFinite(range) ? fmtMeters(range) : 'n/a',
+    ground: isFinite(ground) ? fmtMeters(ground) : 'n/a',
+    heading: headingDeg(rpy.yaw),
+    yaw: fmtDeg(rpy.yaw), pitch: fmtDeg(rpy.pitch), roll: fmtDeg(rpy.roll),
+    quat: hasQuat ? fmtSigned(cl.qx, 2) + ' ' + fmtSigned(cl.qy, 2) + ' ' + fmtSigned(cl.qz, 2) + ' ' + fmtSigned(cl.qw, 2) : 'n/a',
+    nodes: nodes != null ? String(nodes) : 'n/a',
+    localId: localId != null ? String(localId) : 'n/a',
+    session: session >= 0 ? String(session) : 'n/a',
+    mapBase: mapBase >= 0 ? String(mapBase) : 'n/a',
+    pathM: isFinite(pathM) ? fmtMeters(pathM) : 'n/a',
+    samples: String(trailN || 0),
+    fix: cl.has_fix === true ? 'Yes' : (cl.has_fix === false ? 'No' : 'n/a'),
+    tag: tagId >= 0 ? String(tagId) : 'n/a',
+    seen: ageLabel(seen, now),
+    pose: ageLabel(poseAt, now)
+  };
+}
+function sidebarStructureKey(demo) {
+  return JSON.stringify({
+    u: unitItems(demo).map(function(c) { return c.id; }),
+    v: currentVideoList.map(function(v) { return v.name; }),
+    p: videoList.map(function(v) { return v.name; }),
+    m: modelList.map(function(v) { return v.name; }),
+    h: historyView && historyView.name,
+    q: historyFilterKey()
+  });
+}
+let lastSidebarKey = '';
+function setLeafVal(root, key, value) {
+  const row = root.querySelector('[data-leaf="' + cssEsc(key) + '"]');
+  if (!row) return;
+  const val = row.querySelector('.tree-val');
+  if (val && val.textContent !== value) val.textContent = value;
+}
+function updateDotsValues(demo) {
   const dots = document.getElementById('dots');
   if (!dots) return;
   const items = unitItems(demo);
-  const now = numOr(demo.server_now, Date.now() / 1000);
+  const count = document.getElementById('dot-count');
+  if (count) count.textContent = String(items.length);
+  items.slice(0, 4).forEach(function(c) {
+    const f = unitFields(demo, c);
+    const p = f.path;
+    const state = dots.querySelector('[data-unit-state="' + cssEsc(p) + '"]');
+    if (state && state.textContent !== f.state) state.textContent = f.state;
+    const lamp = dots.querySelector('[data-unit-lamp="' + cssEsc(p) + '"]');
+    if (lamp) lamp.classList.toggle('on', f.live);
+    setLeafVal(dots, p + '/e', f.e);
+    setLeafVal(dots, p + '/n', f.n);
+    setLeafVal(dots, p + '/u', f.u);
+    setLeafVal(dots, p + '/range', f.range);
+    setLeafVal(dots, p + '/ground', f.ground);
+    setLeafVal(dots, p + '/heading', f.heading);
+    setLeafVal(dots, p + '/yaw', f.yaw);
+    setLeafVal(dots, p + '/pitch', f.pitch);
+    setLeafVal(dots, p + '/roll', f.roll);
+    setLeafVal(dots, p + '/quat', f.quat);
+    setLeafVal(dots, p + '/nodes', f.nodes);
+    setLeafVal(dots, p + '/local', f.localId);
+    setLeafVal(dots, p + '/session', f.session);
+    setLeafVal(dots, p + '/mapbase', f.mapBase);
+    setLeafVal(dots, p + '/path', f.pathM);
+    setLeafVal(dots, p + '/samples', f.samples);
+    setLeafVal(dots, p + '/fix', f.fix);
+    setLeafVal(dots, p + '/tag', f.tag);
+    setLeafVal(dots, p + '/seen', f.seen);
+    setLeafVal(dots, p + '/pose', f.pose);
+  });
+}
+function renderDots(demo) {
+  const dots = document.getElementById('dots');
+  if (!dots) return;
+  const key = sidebarStructureKey(demo);
+  if (key === lastSidebarKey && dots.firstChild) {
+    updateDotsValues(demo);
+    return;
+  }
+  lastSidebarKey = key;
+  const items = unitItems(demo);
   const kids = items.slice(0, 4).map(function(c, i) {
-    const cl = findClient(demo, c.id) || {};
-    const st = clientStatus(c.id) || {};
-    const rpy = rpyOf(cl);
-    const seen = numOr(cl.last_seen, st.last_seen);
-    const poseAt = numOr(cl.last_pose_at, 0);
-    const seenAge = (seen > 0) ? (now - seen) : 1e9;
-    const live = seenAge < 5;
-    const stale = seen > 0 && seenAge >= 45;
-    const locked = !!(c.locked || cl.locked);
-    let state = 'Standby';
-    if (stale) state = 'Stale';
-    else if (locked) state = 'Locked';
-    else if (seen <= 0) state = 'Offline';
-    const x = cl.x, y = cl.y, z = cl.z;
-    const hasPos = typeof x === 'number' && typeof y === 'number' && typeof z === 'number';
-    const range = hasPos ? Math.hypot(x, y, z) : NaN;
-    const ground = hasPos ? Math.hypot(x, y) : NaN;
-    const nodes = numOr(cl.nodes, st.nodes);
-    const localId = numOr(cl.last_local_id, st.last_local_id);
-    const session = numOr(cl.session_map_id, -1);
-    const mapBase = numOr(cl.map_id_base, -1);
-    const pathM = numOr(cl.path_m, NaN);
-    const trailN = numOr(cl.trail_n, (cl.trail || []).length);
-    const tagId = numOr(cl.tag_id, -1);
-    const path = c.id;
-    const extra = '<span class="tree-state">' + esc(state) + '</span><span class="lamp' + (live ? ' on' : '') + '"></span>';
+    const f = unitFields(demo, c);
+    const path = f.path;
+    const extra = '<span class="tree-state" data-unit-state="' + esc(path) + '">' + esc(f.state) + '</span>' +
+      '<span class="lamp' + (f.live ? ' on' : '') + '" data-unit-lamp="' + esc(path) + '"></span>';
     let body = treeLeaf(2, shortClientId(c.id));
     body += treeFolder(path + '/position', 2, 'Position', '',
-      treeLeaf(3, 'E', hasPos ? fmtSigned(x, 3) + ' m' : 'n/a') +
-      treeLeaf(3, 'N', hasPos ? fmtSigned(y, 3) + ' m' : 'n/a') +
-      treeLeaf(3, 'U', hasPos ? fmtSigned(z, 3) + ' m' : 'n/a') +
-      treeLeaf(3, 'Range', isFinite(range) ? fmtMeters(range) : 'n/a') +
-      treeLeaf(3, 'Ground', isFinite(ground) ? fmtMeters(ground) : 'n/a') +
-      treeLeaf(3, 'Heading', headingDeg(rpy.yaw)), true);
+      treeLeaf(3, 'E', f.e, path + '/e') +
+      treeLeaf(3, 'N', f.n, path + '/n') +
+      treeLeaf(3, 'U', f.u, path + '/u') +
+      treeLeaf(3, 'Range', f.range, path + '/range') +
+      treeLeaf(3, 'Ground', f.ground, path + '/ground') +
+      treeLeaf(3, 'Heading', f.heading, path + '/heading'), true);
     body += treeFolder(path + '/attitude', 2, 'Attitude', '',
-      treeLeaf(3, 'Yaw', fmtDeg(rpy.yaw)) +
-      treeLeaf(3, 'Pitch', fmtDeg(rpy.pitch)) +
-      treeLeaf(3, 'Roll', fmtDeg(rpy.roll)) +
-      treeLeaf(3, 'Quat', [cl.qx, cl.qy, cl.qz, cl.qw].every(function(v) {
-        return typeof v === 'number' && isFinite(v);
-      }) ? fmtSigned(cl.qx, 2) + ' ' + fmtSigned(cl.qy, 2) + ' ' + fmtSigned(cl.qz, 2) + ' ' + fmtSigned(cl.qw, 2) : 'n/a'), true);
+      treeLeaf(3, 'Yaw', f.yaw, path + '/yaw') +
+      treeLeaf(3, 'Pitch', f.pitch, path + '/pitch') +
+      treeLeaf(3, 'Roll', f.roll, path + '/roll') +
+      treeLeaf(3, 'Quat', f.quat, path + '/quat'), true);
     body += treeFolder(path + '/mapping', 2, 'Mapping', '',
-      treeLeaf(3, 'Keyframes', nodes != null ? String(nodes) : 'n/a') +
-      treeLeaf(3, 'Local id', localId != null ? String(localId) : 'n/a') +
-      treeLeaf(3, 'Session', session >= 0 ? String(session) : 'n/a') +
-      treeLeaf(3, 'Map base', mapBase >= 0 ? String(mapBase) : 'n/a') +
-      treeLeaf(3, 'Path', isFinite(pathM) ? fmtMeters(pathM) : 'n/a') +
-      treeLeaf(3, 'Samples', String(trailN || 0)) +
-      treeLeaf(3, 'Fix', cl.has_fix === true ? 'Yes' : (cl.has_fix === false ? 'No' : 'n/a')) +
-      treeLeaf(3, 'Tag', tagId >= 0 ? String(tagId) : 'n/a'), true);
+      treeLeaf(3, 'Keyframes', f.nodes, path + '/nodes') +
+      treeLeaf(3, 'Local id', f.localId, path + '/local') +
+      treeLeaf(3, 'Session', f.session, path + '/session') +
+      treeLeaf(3, 'Map base', f.mapBase, path + '/mapbase') +
+      treeLeaf(3, 'Path', f.pathM, path + '/path') +
+      treeLeaf(3, 'Samples', f.samples, path + '/samples') +
+      treeLeaf(3, 'Fix', f.fix, path + '/fix') +
+      treeLeaf(3, 'Tag', f.tag, path + '/tag'), true);
     body += treeFolder(path + '/link', 2, 'Link', '',
-      treeLeaf(3, 'Seen', ageLabel(seen, now)) +
-      treeLeaf(3, 'Pose', ageLabel(poseAt, now)), true);
+      treeLeaf(3, 'Seen', f.seen, path + '/seen') +
+      treeLeaf(3, 'Pose', f.pose, path + '/pose'), true);
     return treeFolder(path, 1, 'UNIT-' + pad2(i + 1), extra, body, true);
   }).join('');
+  const searchEl = document.getElementById('scan-search');
+  const keepFocus = !!(searchEl && document.activeElement === searchEl);
+  if (searchEl) lastSearchQuery = searchEl.value;
   dots.innerHTML = treeFolder('units', 0, 'Units',
-    '<span class="tree-val" id="dot-count">' + items.length + '</span>', kids, true);
+    '<span class="tree-val" id="dot-count">' + items.length + '</span>', kids, true) +
+    renderRecordings() +
+    renderHistory();
+  restoreHistorySearch(keepFocus);
+}
+// Current-run recordings live in the sidebar Recordings folder. After reset
+// they move into History > Recordings. Models are archived room meshes.
+let currentVideoList = [];
+let videoList = [];
+let modelList = [];
+let historyView = null;
+let currentRunName = '';
+let lastSearchQuery = '';
+let historyFilterHits = {models: {}, videos: {}};
+function historyFilterKey() {
+  const q = String(lastSearchQuery || '').trim().toLowerCase();
+  if (!q) return '';
+  return q + '|' + Object.keys(historyFilterHits.models).sort().join(',') +
+    '|' + Object.keys(historyFilterHits.videos).sort().join(',');
+}
+function historyItemText(it) {
+  return [
+    it && it.name, it && it.title, it && it.address, recName(it || {}),
+    recTimeLabel(it || {}), userLabels(it && it.users), it && it.kind, it && it.client
+  ].join(' ').toLowerCase();
+}
+function historyItemMatches(it, q) {
+  if (!q) return true;
+  if (!it) return false;
+  if (historyItemText(it).indexOf(q) >= 0) return true;
+  if (it.name && (historyFilterHits.models[it.name] || historyFilterHits.videos[it.name])) return true;
+  return false;
+}
+function filteredHistoryModels() {
+  const q = String(lastSearchQuery || '').trim().toLowerCase();
+  if (!q) return modelList;
+  return modelList.filter(function(m) { return historyItemMatches(m, q); });
+}
+function filteredHistoryVideos() {
+  const q = String(lastSearchQuery || '').trim().toLowerCase();
+  if (!q) return videoList;
+  return videoList.filter(function(v) { return historyItemMatches(v, q); });
+}
+function fmtBytes(b) {
+  if (!(b > 0)) return '0 MB';
+  return b >= 1024 * 1024 * 1024 ? (b / (1024 * 1024 * 1024)).toFixed(2) + ' GB' : (b / (1024 * 1024)).toFixed(0) + ' MB';
+}
+function fmtDuration(s) {
+  if (!(s > 0)) return '';
+  const m = Math.floor(s / 60), r = Math.round(s - m * 60);
+  return m + ':' + (r < 10 ? '0' : '') + r;
+}
+function unitLabelForClient(clientId) {
+  if (!clientId || !lastDemo || !Array.isArray(lastDemo.clients)) return '';
+  const idx = lastDemo.clients.findIndex(function(c) { return c.id === clientId; });
+  return idx >= 0 ? 'UNIT-' + pad2(idx + 1) : '';
+}
+function userLabels(users) {
+  if (!Array.isArray(users) || users.length === 0) return '';
+  return users.map(function(id) {
+    const unit = unitLabelForClient(id);
+    if (unit) return unit;
+    const s = String(id || '');
+    return s.length > 4 ? s.slice(-4) : s;
+  }).filter(Boolean).join(' · ');
+}
+function dayKeyFromStamp(v) {
+  const m = String(v.name || '').match(/^(\d{2})(\d{2})(\d{2})-/);
+  if (m) return (2000 + Number(m[1])) + '-' + m[2] + '-' + m[3];
+  const unix = numOr(v.mtime, 0);
+  if (unix > 0) {
+    const d = new Date(unix * 1000);
+    return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+  }
+  return 'unknown';
+}
+function dayLabel(key) {
+  if (key === 'unknown') return 'Unknown';
+  const parts = key.split('-');
+  const d = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
+  const today = new Date();
+  const todayKey = today.getFullYear() + '-' + pad2(today.getMonth() + 1) + '-' + pad2(today.getDate());
+  const yest = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
+  const yestKey = yest.getFullYear() + '-' + pad2(yest.getMonth() + 1) + '-' + pad2(yest.getDate());
+  if (key === todayKey) return 'Today';
+  if (key === yestKey) return 'Yesterday';
+  return d.toLocaleDateString(undefined, {weekday: 'short', month: 'short', day: 'numeric'});
+}
+function recTimeLabel(v) {
+  const m = String(v.name || '').match(/^\d{6}-(\d{2})(\d{2})(\d{2})/);
+  if (m) return m[1] + ':' + m[2] + ':' + m[3];
+  const unix = numOr(v.mtime, 0);
+  if (unix > 0) {
+    const d = new Date(unix * 1000);
+    return pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+  }
+  return String(v.name || '').replace(/\.(mp4|ply)$/, '');
+}
+function recName(v) {
+  if (v && v.title) return v.title;
+  const time = recTimeLabel(v || {});
+  if (v && v.address) return v.address + ' · ' + time;
+  return time;
+}
+function currentRunLabel() {
+  if (lastDemo && lastDemo.run_name) return lastDemo.run_name;
+  if (currentRunName) return currentRunName;
+  return 'Recordings';
+}
+function groupByDay(list) {
+  const groups = [];
+  const byDay = {};
+  list.forEach(function(v) {
+    const key = dayKeyFromStamp(v);
+    if (!byDay[key]) {
+      byDay[key] = [];
+      groups.push(key);
+    }
+    byDay[key].push(v);
+  });
+  return {groups: groups, byDay: byDay};
+}
+function renderDayGroups(pathPrefix, list, emptyText, rowFn, depth) {
+  const g = groupByDay(list);
+  if (g.groups.length === 0) {
+    return '<div class="tree-row leaf" style="--d:' + depth + '"><span class="tree-name">' + esc(emptyText) + '</span></div>';
+  }
+  return g.groups.map(function(key, i) {
+    const rows = g.byDay[key].map(rowFn).join('');
+    return treeFolder(pathPrefix + '/' + key, depth, dayLabel(key),
+      '<span class="tree-val">' + g.byDay[key].length + '</span>', rows, i === 0);
+  }).join('');
+}
+function recRow(v, depth) {
+  const meta = [unitLabelForClient(v.client), fmtDuration(v.duration_s), fmtBytes(v.bytes)].filter(Boolean).join(' · ');
+  return '<div class="tree-row leaf rec" style="--d:' + depth + '" data-video="' + esc(v.name) + '" title="' + esc(recName(v)) + '">' + ico('video') +
+    '<span class="tree-name">' + esc(recTimeLabel(v)) + '</span>' +
+    '<span class="tree-val">' + esc(meta) + '</span></div>';
+}
+function recordingKey(item) {
+  if (item && item.run > 0) return 'run-' + item.run;
+  return item ? dayKeyFromStamp(item) : '';
+}
+function videosForHistoryModel(model) {
+  if (!model) return [];
+  const past = videoList.slice();
+  if (model.run > 0) {
+    const hits = past.filter(function(v) { return Number(v.run) === Number(model.run); });
+    if (hits.length) return hits;
+  }
+  if (model.title) {
+    const hits = past.filter(function(v) { return v.title && v.title === model.title; });
+    if (hits.length) return hits;
+  }
+  const t = itemWhen(model);
+  if (!t) return [];
+  let best = null, bestDt = 15 * 60;
+  past.forEach(function(v) {
+    const vt = itemWhen(v);
+    if (!vt) return;
+    const dt = Math.abs(vt - t);
+    if (dt < bestDt) {
+      bestDt = dt;
+      best = v;
+    }
+  });
+  if (!best) return [];
+  const key = recordingKey(best);
+  return past.filter(function(v) { return recordingKey(v) === key; });
+}
+function activeRecordingKey() {
+  if (!historyView) return '';
+  const vids = videosForHistoryModel(historyView);
+  return vids.length ? recordingKey(vids[0]) : '';
+}
+function focusHistoryRecordings(model) {
+  treeOpen['recordings'] = true;
+  const videos = videosForHistoryModel(model);
+  if (!videos.length) return;
+  const key = recordingKey(videos[0]);
+  treeOpen['history'] = true;
+  treeOpen['history/recordings'] = true;
+  groupByRun(videoList).groups.forEach(function(k) {
+    treeOpen['history/recordings/' + k] = (k === key);
+  });
+}
+function groupByRun(list) {
+  const groups = [];
+  const byRun = {};
+  list.forEach(function(v) {
+    const key = recordingKey(v);
+    if (!byRun[key]) {
+      byRun[key] = [];
+      groups.push(key);
+    }
+    byRun[key].push(v);
+  });
+  return {groups: groups, byRun: byRun};
+}
+function renderRunGroups(pathPrefix, list, emptyText, rowFn, depth) {
+  const g = groupByRun(list);
+  if (g.groups.length === 0) {
+    return '<div class="tree-row leaf" style="--d:' + depth + '"><span class="tree-name">' + esc(emptyText) + '</span></div>';
+  }
+  const selected = activeRecordingKey();
+  return g.groups.map(function(key, i) {
+    const rows = g.byRun[key];
+    const openDefault = selected ? key === selected : i === 0;
+    return treeFolder(pathPrefix + '/' + key, depth, recName(rows[0]),
+      '<span class="tree-val">' + rows.length + '</span>', rows.map(rowFn).join(''), openDefault, 'video', key === selected);
+  }).join('');
+}
+function renderRecordings() {
+  const hist = historyView ? videosForHistoryModel(historyView) : null;
+  const videos = hist || currentVideoList;
+  const label = hist
+    ? (hist.length ? recName(hist[0]) : recName(historyView))
+    : currentRunLabel();
+  const empty = '<div class="tree-row leaf" style="--d:1"><span class="tree-name">No recordings yet</span></div>';
+  const kids = videos.length === 0 ? empty : videos.map(function(v) {
+    return recRow(v, 1);
+  }).join('');
+  return treeFolder('recordings', 0, label,
+    '<span class="tree-val">' + videos.length + '</span>', kids, true, 'video', !!hist);
+}
+function historySearchHtml() {
+  return '<div class="tree-search scan-search" style="--d:1">' +
+    '<input id="scan-search" type="search" placeholder="Search history" autocomplete="off" spellcheck="false" value="' + esc(lastSearchQuery) + '">' +
+    '</div>';
+}
+function restoreHistorySearch(keepFocus) {
+  const input = document.getElementById('scan-search');
+  if (input && lastSearchQuery && input.value !== lastSearchQuery) input.value = lastSearchQuery;
+  bindScanSearch();
+  if (input && keepFocus) {
+    input.focus();
+    const n = input.value.length;
+    try { input.setSelectionRange(n, n); } catch (e) {}
+  }
+}
+function renderHistory() {
+  const q = String(lastSearchQuery || '').trim();
+  const models = filteredHistoryModels();
+  const videos = filteredHistoryVideos();
+  const emptyModels = q ? 'No matches' : 'No models yet';
+  const emptyVideos = q ? 'No matches' : 'No recordings yet';
+  if (q) {
+    treeOpen['history'] = true;
+    treeOpen['history/models'] = true;
+    treeOpen['history/recordings'] = true;
+  }
+  const modelRows = models.length === 0
+    ? '<div class="tree-row leaf" style="--d:2"><span class="tree-name">' + esc(emptyModels) + '</span></div>'
+    : models.map(function(v) {
+        const meta = [
+          userLabels(v.users),
+          (v.nodes > 0 ? String(v.nodes) : ''),
+          fmtBytes(v.bytes)
+        ].filter(Boolean).join(' · ');
+        const on = historyView && historyView.name === v.name;
+        return '<div class="tree-row leaf model' + (on ? ' on' : '') + '" style="--d:2" data-model="' + esc(v.name) + '" title="' + esc(recName(v)) + '">' + ico('mesh') +
+          '<span class="tree-name">' + esc(recName(v)) + '</span>' +
+          '<span class="tree-val">' + esc(meta) + '</span></div>';
+      }).join('');
+  const recRows = renderRunGroups('history/recordings', videos, emptyVideos, function(v) {
+    return recRow(v, 3);
+  }, 2);
+  const kids =
+    historySearchHtml() +
+    treeFolder('history/models', 1, 'Models',
+      '<span class="tree-val">' + models.length + '</span>', modelRows, true) +
+    treeFolder('history/recordings', 1, 'Recordings',
+      '<span class="tree-val">' + videos.length + '</span>', recRows, !!activeRecordingKey() || (videos.length > 0 && models.length === 0), 'video', !!activeRecordingKey());
+  return treeFolder('history', 0, 'History',
+    '<span class="tree-val">' + (models.length + videos.length) + '</span>', kids, true);
+}
+function historyChanged(a, b, keys) {
+  return JSON.stringify(a.map(function(v) { return keys.map(function(k) { return v[k]; }); })) !==
+    JSON.stringify(b.map(function(v) { return keys.map(function(k) { return v[k]; }); }));
+}
+function pollVideos() {
+  fetch('/videos', {cache: 'no-store'}).then(function(r) { return r.json(); }).then(function(res) {
+    const all = (res && Array.isArray(res.videos)) ? res.videos : [];
+    const current = all.filter(function(v) { return v.current === true; });
+    const past = all.filter(function(v) { return v.current !== true; });
+    if (res && res.run_name) currentRunName = res.run_name;
+    const changed = historyChanged(current, currentVideoList, ['name', 'bytes', 'run', 'summary_status', 'task_count', 'address', 'title', 'lat', 'lng']) ||
+      historyChanged(past, videoList, ['name', 'bytes', 'run', 'summary_status', 'task_count', 'address', 'title', 'lat', 'lng']);
+    currentVideoList = current;
+    videoList = past;
+    if (changed && lastDemo) renderDots(lastDemo);
+    refreshScanMap();
+  }).catch(function() {});
+}
+function pollModels() {
+  fetch('/models', {cache: 'no-store'}).then(function(r) { return r.json(); }).then(function(res) {
+    const list = (res && Array.isArray(res.models)) ? res.models : [];
+    const changed = historyChanged(list, modelList, ['name', 'bytes', 'address', 'title', 'users', 'lat', 'lng', 'run', 'index_status', 'place_count']);
+    modelList = list;
+    if (changed && lastDemo) renderDots(lastDemo);
+    refreshScanMap();
+  }).catch(function() {});
+}
+let runList = [];
+let currentRunRec = null;
+function pollRuns() {
+  fetch('/runs', {cache: 'no-store'}).then(function(r) { return r.json(); }).then(function(res) {
+    currentRunRec = (res && res.current) ? res.current : null;
+    runList = (res && Array.isArray(res.runs)) ? res.runs : [];
+    refreshScanMap();
+  }).catch(function() {});
+}
+let scanMap = null;
+let scanLayer = null;
+let scanFittedKey = '';
+let operatorGeo = null;
+let geoCache = {};
+try { geoCache = JSON.parse(localStorage.getItem('cmcs-geo-v1') || '{}') || {}; } catch (e) { geoCache = {}; }
+let geocodeBusy = false;
+const geocodeQueue = [];
+function hasGeo(lat, lng) {
+  const a = Number(lat), b = Number(lng);
+  return Number.isFinite(a) && Number.isFinite(b) && !(a === 0 && b === 0) && a >= -90 && a <= 90 && b >= -180 && b <= 180;
+}
+function saveGeoCache() {
+  try { localStorage.setItem('cmcs-geo-v1', JSON.stringify(geoCache)); } catch (e) {}
+}
+function geocodeAddress(address) {
+  return new Promise(function(resolve) {
+    const key = String(address || '').trim().toLowerCase();
+    if (!key) { resolve(null); return; }
+    if (geoCache[key] && hasGeo(geoCache[key].lat, geoCache[key].lng)) {
+      resolve(geoCache[key]);
+      return;
+    }
+    geocodeQueue.push({key: key, address: address, resolve: resolve});
+    drainGeocode();
+  });
+}
+function drainGeocode() {
+  if (geocodeBusy || geocodeQueue.length === 0) return;
+  geocodeBusy = true;
+  const job = geocodeQueue.shift();
+  const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(job.address);
+  fetch(url, {headers: {'Accept': 'application/json'}}).then(function(r) { return r.json(); }).then(function(rows) {
+    const hit = rows && rows[0];
+    const pos = hit ? {lat: Number(hit.lat), lng: Number(hit.lon)} : null;
+    if (pos && hasGeo(pos.lat, pos.lng)) {
+      geoCache[job.key] = pos;
+      saveGeoCache();
+    }
+    job.resolve(pos && hasGeo(pos.lat, pos.lng) ? pos : null);
+  }).catch(function() { job.resolve(null); }).then(function() {
+    geocodeBusy = false;
+    setTimeout(drainGeocode, 1100);
+  });
+}
+function setOperatorGeo(lat, lng) {
+  if (operatorGeo || !hasGeo(lat, lng)) return;
+  operatorGeo = {lat: Number(lat), lng: Number(lng)};
+  refreshScanMap();
+}
+function ensureOperatorGeo() {
+  if (operatorGeo || !navigator.geolocation) return;
+  navigator.geolocation.getCurrentPosition(function(p) {
+    setOperatorGeo(p.coords.latitude, p.coords.longitude);
+  }, function() {}, {maximumAge: 600000, timeout: 8000, enableHighAccuracy: false});
+}
+function findRunRec(id) {
+  if (currentRunRec && Number(currentRunRec.id) === Number(id)) return currentRunRec;
+  for (let i = 0; i < runList.length; i++) {
+    if (Number(runList[i].id) === Number(id)) return runList[i];
+  }
+  return null;
+}
+function itemWhen(it) {
+  const m = String((it && it.name) || '').match(/^(\d{2})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})/);
+  if (m) {
+    return Date.UTC(2000 + Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6])) / 1000;
+  }
+  return Number((it && (it.mtime || it.uploaded || it.ended || it.started)) || 0);
+}
+function siteKey(it) {
+  const addr = String(it.address || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  if (addr) return 'a:' + addr;
+  if (hasGeo(it.lat, it.lng)) return 'g:' + Number(it.lat).toFixed(4) + ',' + Number(it.lng).toFixed(4);
+  return 'interior';
+}
+function siteLabel(it) {
+  const addr = String((it && it.address) || '').trim();
+  return addr || 'Interior';
+}
+function enrichPlace(it) {
+  const out = Object.assign({}, it);
+  const rec = findRunRec(out.run || out.id);
+  if (rec) {
+    if (!out.address && rec.address) out.address = rec.address;
+    if (!hasGeo(out.lat, out.lng) && hasGeo(rec.lat, rec.lng)) {
+      out.lat = rec.lat;
+      out.lng = rec.lng;
+    }
+  }
+  return out;
+}
+function collectSites() {
+  const items = [];
+  currentVideoList.concat(videoList).forEach(function(v) {
+    items.push(enrichPlace(Object.assign({}, v, {kind: 'video'})));
+  });
+  modelList.forEach(function(m) {
+    items.push(enrichPlace(Object.assign({}, m, {kind: 'model'})));
+  });
+  const runs = (currentRunRec ? [currentRunRec] : []).concat(runList);
+  runs.forEach(function(r) {
+    if (!r || !(r.address || hasGeo(r.lat, r.lng) || r.model)) return;
+    items.push(enrichPlace(Object.assign({}, r, {kind: 'run', mtime: r.ended || r.started || 0})));
+  });
+  const byKey = {};
+  const order = [];
+  items.forEach(function(it) {
+    const key = siteKey(it);
+    if (!byKey[key]) {
+      byKey[key] = {key: key, label: siteLabel(it), items: [], lat: 0, lng: 0};
+      order.push(key);
+    }
+    const site = byKey[key];
+    site.items.push(it);
+    if (!site.label || site.label === 'Interior') site.label = siteLabel(it);
+    if (!hasGeo(site.lat, site.lng) && hasGeo(it.lat, it.lng)) {
+      site.lat = Number(it.lat);
+      site.lng = Number(it.lng);
+    }
+  });
+  return order.map(function(k) { return byKey[k]; });
+}
+function latestSiteItems(site, kind) {
+  return (site && site.items ? site.items : []).filter(function(it) {
+    if (kind === 'model') return (it.kind === 'model' && it.name) || (it.kind === 'run' && it.model);
+    if (kind === 'video') return it.kind === 'video' && it.name;
+    return false;
+  }).sort(function(a, b) { return itemWhen(b) - itemWhen(a); });
+}
+function openLatestSite(site) {
+  if (!site) return;
+  const fresh = collectSites().filter(function(s) { return s.key === site.key; })[0] || site;
+  const model = latestSiteItems(fresh, 'model')[0];
+  const video = latestSiteItems(fresh, 'video')[0];
+  const modelName = model ? (model.kind === 'run' ? model.model : model.name) : '';
+  if (modelName) openHistoryModel(modelName);
+  if (video && video.name) openPlayer(video.name, {dock: true});
+}
+function initScanMap() {
+  const el = document.getElementById('scan-map');
+  const Lmap = window.L;
+  if (!el || !Lmap || scanMap) return;
+  scanMap = Lmap.map(el, {attributionControl: false, scrollWheelZoom: true});
+  Lmap.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+    subdomains: 'abc',
+    maxZoom: 19
+  }).addTo(scanMap);
+  Lmap.control.attribution({prefix: false, position: 'bottomright'}).addTo(scanMap);
+  scanLayer = Lmap.layerGroup().addTo(scanMap);
+  scanMap.setView([20, 0], 1);
+  setTimeout(function() { if (scanMap) scanMap.invalidateSize(); }, 80);
+  ensureOperatorGeo();
+  refreshScanMap();
+  bindScanSearch();
+}
+function refreshScanMap() {
+  if (!scanMap || !scanLayer) return;
+  const sites = collectSites();
+  const empty = document.getElementById('scan-map-empty');
+  const pending = [];
+  sites.forEach(function(site) {
+    if (hasGeo(site.lat, site.lng)) return;
+    const withAddr = site.items.find(function(it) { return String(it.address || '').trim(); });
+    if (withAddr) pending.push(geocodeAddress(withAddr.address).then(function(pos) {
+      if (pos) { site.lat = pos.lat; site.lng = pos.lng; }
+    }));
+  });
+  Promise.all(pending).then(function() {
+    scanLayer.clearLayers();
+    const placed = [];
+    sites.forEach(function(site) {
+      if (!hasGeo(site.lat, site.lng) && site.key === 'interior' && operatorGeo) {
+        site.lat = operatorGeo.lat;
+        site.lng = operatorGeo.lng;
+      }
+      if (!hasGeo(site.lat, site.lng)) return;
+      placed.push(site);
+      const Lmap = window.L;
+      if (!Lmap) return;
+      const icon = Lmap.divIcon({className: '', html: '<div class="scan-pin"></div>', iconSize: [14, 14], iconAnchor: [7, 7]});
+      const marker = Lmap.marker([site.lat, site.lng], {icon: icon, title: site.label + ' (latest)'});
+      marker.on('click', function() { openLatestSite(site); });
+      marker.bindTooltip(site.label, {direction: 'top', offset: [0, -8], opacity: 0.95});
+      marker.addTo(scanLayer);
+    });
+    if (empty) empty.classList.toggle('hide', placed.length > 0);
+    const key = placed.map(function(s) { return s.key + ':' + s.lat.toFixed(4) + ',' + s.lng.toFixed(4); }).join('|');
+    if (placed.length === 0) {
+      scanFittedKey = '';
+      return;
+    }
+    if (key === scanFittedKey) return;
+    scanFittedKey = key;
+    if (placed.length === 1) {
+      scanMap.setView([placed[0].lat, placed[0].lng], 16);
+    } else {
+      scanMap.fitBounds(placed.map(function(s) { return [s.lat, s.lng]; }), {padding: [18, 18], maxZoom: 16});
+    }
+    scanMap.invalidateSize();
+  });
+  if (sites.some(function(s) { return !hasGeo(s.lat, s.lng); })) ensureOperatorGeo();
+}
+let searchTimer = 0;
+function historySearch(q) {
+  return fetch('/search?q=' + encodeURIComponent(q), {cache: 'no-store'}).then(function(r) {
+    return r.json();
+  }).then(function(res) {
+    return (res && Array.isArray(res.hits)) ? res.hits : [];
+  }).catch(function() { return []; });
+}
+function refreshHistoryFilter(keepFocus) {
+  lastSidebarKey = '';
+  if (lastDemo) renderDots(lastDemo);
+  else restoreHistorySearch(keepFocus);
+}
+function fetchHistoryMatches(q) {
+  historySearch(q).then(function(hits) {
+    if (String(lastSearchQuery || '').trim() !== q) return;
+    const next = {models: {}, videos: {}};
+    (hits || []).forEach(function(h) {
+      if (h && h.model) next.models[h.model] = true;
+      if (h && h.video) next.videos[h.video] = true;
+    });
+    historyFilterHits = next;
+    refreshHistoryFilter(true);
+  });
+}
+function bindScanSearch() {
+  const input = document.getElementById('scan-search');
+  if (!input || input.getAttribute('data-bound')) return;
+  input.setAttribute('data-bound', '1');
+  input.addEventListener('input', function() {
+    lastSearchQuery = input.value;
+    historyFilterHits = {models: {}, videos: {}};
+    refreshHistoryFilter(true);
+    clearTimeout(searchTimer);
+    const q = input.value.trim();
+    if (!q) return;
+    searchTimer = setTimeout(function() { fetchHistoryMatches(q); }, 280);
+  });
+  input.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+      lastSearchQuery = '';
+      historyFilterHits = {models: {}, videos: {}};
+      input.value = '';
+      refreshHistoryFilter(false);
+      input.blur();
+    }
+  });
+}
+let playerName = '';
+let playerTasks = [];
+let playerPoll = 0;
+function fmtClock(s) {
+  const n = Math.max(0, Math.round(Number(s) || 0));
+  const m = Math.floor(n / 60);
+  const r = n - m * 60;
+  return m + ':' + (r < 10 ? '0' : '') + r;
+}
+function findListedVideo(name) {
+  const all = currentVideoList.concat(videoList);
+  for (let i = 0; i < all.length; i++) {
+    if (all[i].name === name) return all[i];
+  }
+  return null;
+}
+function setSummarizeBtn(status) {
+  const btn = document.getElementById('player-summarize');
+  if (!btn) return;
+  const busy = status === 'pending' || status === 'processing';
+  btn.disabled = busy;
+  if (busy) btn.textContent = 'Summarizing';
+  else if (status === 'ready') btn.textContent = 'Refresh';
+  else btn.textContent = 'Summarize';
+}
+function highlightPlayerTask(t) {
+  const box = document.getElementById('player-tasks');
+  if (!box) return;
+  const rows = box.querySelectorAll('[data-task]');
+  for (let i = 0; i < rows.length; i++) {
+    const task = playerTasks[i];
+    if (!task) continue;
+    const start = Number(task.start_s) || 0;
+    const end = Number(task.end_s) || start;
+    const on = t >= start && (i === playerTasks.length - 1 ? t <= end + 0.4 : t < end);
+    rows[i].classList.toggle('on', on);
+  }
+}
+function renderPlayerTasks(tasks, t) {
+  const box = document.getElementById('player-tasks');
+  if (!box) return;
+  playerTasks = Array.isArray(tasks) ? tasks : [];
+  if (!playerTasks.length) {
+    box.innerHTML = '';
+    return;
+  }
+  box.innerHTML = playerTasks.map(function(task, i) {
+    const start = Number(task.start_s) || 0;
+    return '<button type="button" class="player-task" data-task="' + i + '">' +
+      '<div class="t"><em>' + esc(fmtClock(start)) + '</em><span>' + esc(task.title || ('Task ' + (i + 1))) + '</span></div>' +
+      (task.description ? '<p>' + esc(task.description) + '</p>' : '') +
+      '</button>';
+  }).join('');
+  highlightPlayerTask(t);
+}
+function applyAnalysis(data) {
+  const text = document.getElementById('player-sum-text');
+  const status = (data && data.status) || '';
+  const summary = (data && data.summary) || '';
+  setSummarizeBtn(status);
+  if (status === 'ready' && summary) {
+    text.classList.remove('muted');
+    text.textContent = summary;
+    renderPlayerTasks(data.tasks || [], document.getElementById('player-video').currentTime || 0);
+    return;
+  }
+  text.classList.add('muted');
+  renderPlayerTasks([], 0);
+  if (status === 'pending' || status === 'processing') {
+    text.textContent = 'Summarizing...';
+  } else if (status === 'unavailable') {
+    text.textContent = 'Summary is unavailable.';
+  } else if (status === 'error') {
+    text.textContent = 'Could not summarize. Try again.';
+  } else {
+    text.textContent = 'Summarize this walk to list completed tasks.';
+  }
+}
+function stopPlayerPoll() {
+  if (playerPoll) {
+    clearInterval(playerPoll);
+    playerPoll = 0;
+  }
+}
+function loadAnalysis(name, kick) {
+  if (!name) return;
+  const req = kick
+    ? fetch('/videos/' + encodeURIComponent(name) + '/summarize', {method: 'POST', cache: 'no-store'})
+    : fetch('/videos/' + encodeURIComponent(name) + '/analysis', {cache: 'no-store'});
+  req.then(function(r) { return r.json(); }).then(function(data) {
+    if (playerName !== name) return;
+    applyAnalysis(data);
+    const status = (data && data.status) || '';
+    if (status === 'pending' || status === 'processing') {
+      if (!playerPoll) playerPoll = setInterval(function() { loadAnalysis(name, false); }, 2500);
+    } else {
+      stopPlayerPoll();
+    }
+  }).catch(function() {});
+}
+function openPlayer(name, opts) {
+  const wrap = document.getElementById('player');
+  const video = document.getElementById('player-video');
+  const title = document.getElementById('player-title');
+  if (!wrap || !video) return;
+  playerName = name;
+  const meta = (currentVideoList.concat(videoList)).find(function(v) { return v.name === name; });
+  title.textContent = recName(meta || {name: name});
+  video.src = '/videos/' + encodeURIComponent(name);
+  wrap.classList.toggle('docked', !!(opts && opts.dock));
+  wrap.classList.add('open');
+  requestAnimationFrame(function() { resizeViewer(); });
+  applyAnalysis({status: 'idle'});
+  const rec = findListedVideo(name);
+  const status = rec && rec.summary_status;
+  loadAnalysis(name, !status || status === 'idle' || status === 'unavailable' || status === 'error');
+  if (opts && opts.seek != null) {
+    const seek = Number(opts.seek) || 0;
+    const onMeta = function() {
+      video.removeEventListener('loadedmetadata', onMeta);
+      video.currentTime = seek;
+    };
+    video.addEventListener('loadedmetadata', onMeta);
+  }
+  video.play().catch(function() {});
+}
+function closePlayer() {
+  const wrap = document.getElementById('player');
+  const video = document.getElementById('player-video');
+  if (!wrap || !video) return;
+  stopPlayerPoll();
+  playerName = '';
+  playerTasks = [];
+  video.pause();
+  video.removeAttribute('src');
+  video.load();
+  wrap.classList.remove('open', 'docked');
+  requestAnimationFrame(function() { resizeViewer(); });
+}
+function modelByName(name) {
+  for (let i = 0; i < modelList.length; i++) {
+    if (modelList[i].name === name) return modelList[i];
+  }
+  return null;
+}
+function setHistoryBanner(text) {
+  const el = document.getElementById('view-banner');
+  const liveBtn = document.getElementById('live-btn');
+  if (el) {
+    el.textContent = text || '';
+    el.classList.toggle('show', !!text);
+  }
+  if (liveBtn) liveBtn.classList.toggle('on', !historyView);
+}
+function setLiveLayersVisible(on) {
+  if (liveMesh) liveMesh.visible = on;
+  if (bakedMesh) bakedMesh.visible = on;
+  Object.keys(userGroups).forEach(function(id) {
+    const g = userGroups[id];
+    if (!g) return;
+    g.visible = on;
+    if (g.userData.trail) g.userData.trail.visible = on;
+  });
+}
+function disposeHistoryMesh() {
+  if (!historyMesh) return;
+  if (historyMesh.material && historyMesh.material.map) historyMesh.material.map.dispose();
+  disposeObj(historyMesh);
+  historyMesh = null;
+}
+function closeHistoryModel() {
+  if (!historyView && !historyMesh) return;
+  historyView = null;
+  treeOpen['recordings'] = true;
+  disposeHistoryMesh();
+  setLiveLayersVisible(true);
+  setHistoryBanner('');
+  lastMeshGen = -1;
+  lastBakeGen = -1;
+  if (lastDemo) applyDemo(lastDemo);
+}
+function openHistoryModel(name) {
+  const meta = modelByName(name) || {name: name};
+  historyView = meta;
+  focusHistoryRecordings(meta);
+  hideTag();
+  const live = document.getElementById('live');
+  if (live) {
+    live.style.display = 'flex';
+    live.classList.add('show');
+  }
+  if (!initViewer()) return;
+  resizeViewer();
+  setLiveLayersVisible(false);
+  setHistoryBanner('Archive  ' + recName(meta));
+  if (lastDemo) renderDots(lastDemo);
+  setMapMsg('Loading model');
+  const atlas = meta.atlas_url || '';
+  const textured = meta.textured === true && !!atlas;
+  fetchMeshBuffer('/models/' + encodeURIComponent(name)).then(function(buf) {
+    if (!historyView || historyView.name !== name) return false;
+    const geom = parsePly(buf);
+    if (!geom) return false;
+    const hasUv = !!geom.getAttribute('uv');
+    if (!(textured && hasUv)) {
+      return Promise.resolve(meshFromGeometry(geom, vertexColorMaterial(geom, true)));
+    }
+    return new Promise(function(resolve) {
+      new THREE.TextureLoader().load(atlas, function(tex) {
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.anisotropy = renderer ? renderer.capabilities.getMaxAnisotropy() : 1;
+        tex.generateMipmaps = true;
+        tex.minFilter = THREE.LinearMipmapLinearFilter;
+        resolve(meshFromGeometry(geom, new THREE.MeshBasicMaterial({map: tex, side: THREE.DoubleSide})));
+      }, undefined, function() {
+        resolve(meshFromGeometry(geom, vertexColorMaterial(geom, true)));
+      });
+    });
+  }).then(function(obj) {
+    if (!historyView || historyView.name !== name) return;
+    if (!obj) {
+      setMapMsg('Model unavailable');
+      return;
+    }
+    disposeHistoryMesh();
+    historyMesh = obj;
+    world.add(historyMesh);
+    setLiveLayersVisible(false);
+    setMapMsg('');
+    meshFramed = false;
+    fitCameraToMesh(obj.geometry);
+  }).catch(function(err) {
+    console.warn('archive load failed', err);
+    if (historyView && historyView.name === name) setMapMsg('Model unavailable');
+  });
 }
 function setBanner(demo, live) {
   renderDots(demo);
@@ -598,7 +1595,7 @@ let world = null;
 // cleaned) the server rebuilds when the phones pause. liveMesh: per-keyframe
 // organizedFastMesh for everything newer than the bake, so new scans show up
 // within a couple of seconds and get absorbed into the smooth surface later.
-let liveMesh = null, bakedMesh = null, meshReady = false, meshFramed = false;
+let liveMesh = null, bakedMesh = null, historyMesh = null, meshReady = false, meshFramed = false;
 let lastMeshNodes = -1, lastMeshGen = -1, meshLoading = false, lastMeshAt = 0;
 let lastBakeGen = -1, bakeMaxNode = 0, bakeLoading = false;
 let lastStatus = null, lastDemo = null;
@@ -642,7 +1639,7 @@ function fitCameraToMesh(geom) {
   meshFramed = true;
 }
 function refit() {
-  const target = bakedMesh || liveMesh;
+  const target = historyMesh || bakedMesh || liveMesh;
   if (target && target.geometry) {
     meshFramed = false;
     fitCameraToMesh(target.geometry);
@@ -993,10 +1990,23 @@ function updateUsers(demo) {
 }
 const held = Object.create(null);
 const flyClock = new THREE.Clock();
+function typingInField() {
+  const el = document.activeElement;
+  if (!el) return false;
+  const tag = (el.tagName || '').toLowerCase();
+  if (tag === 'textarea' || tag === 'select') return true;
+  if (tag === 'input') {
+    const type = String(el.type || 'text').toLowerCase();
+    return type !== 'button' && type !== 'submit' && type !== 'checkbox' && type !== 'radio' &&
+      type !== 'range' && type !== 'file' && type !== 'color';
+  }
+  return !!el.isContentEditable;
+}
 function mapKeysActive() {
   const live = document.getElementById('live');
   const confirm = document.getElementById('confirm');
-  return !!(live && live.classList.contains('show') && confirm && !confirm.classList.contains('open'));
+  return !!(live && live.classList.contains('show') && confirm && !confirm.classList.contains('open') &&
+    !typingInField());
 }
 function flyCamera(dt) {
   if (!camera || !controls || !mapKeysActive()) return;
@@ -1086,6 +2096,9 @@ function initViewer() {
   tagPlane.rotation.y = Math.PI / 2;
   world.add(tagPlane);
   window.addEventListener('resize', resizeViewer);
+  if (window.ResizeObserver) {
+    new ResizeObserver(resizeViewer).observe(document.getElementById('map-wrap'));
+  }
   resizeViewer();
   tick();
   return true;
@@ -1098,6 +2111,12 @@ function showLive(demo) {
   setBanner(demo, true);
   if (!initViewer()) return;
   resizeViewer();
+  if (historyView) {
+    setLiveLayersVisible(false);
+    setHistoryBanner('Archive  ' + recName(historyView));
+    return;
+  }
+  setHistoryBanner('');
   updateUsers(demo);
   const nodes = demo.global_nodes || 0;
   const meshGen = demo.mesh_gen || 0;
@@ -1110,10 +2129,15 @@ function showLive(demo) {
 function applyDemo(demo) {
   if (!demo || demo.ok === false) return;
   lastDemo = demo;
+  if (historyView) {
+    showLive(demo);
+    return;
+  }
   if (shouldShowMap(demo)) showLive(demo);
   else showCalib(demo);
 }
 function resetRoom() {
+  lastSidebarKey = '';
   lastMeshNodes = -1;
   lastMeshGen = -1;
   lastMeshAt = 0;
@@ -1155,6 +2179,16 @@ function pollStatus() {
   }).catch(function() {});
 }
 document.getElementById('dots').addEventListener('click', function(e) {
+  const rec = e.target.closest('[data-video]');
+  if (rec && this.contains(rec)) {
+    openPlayer(rec.getAttribute('data-video'));
+    return;
+  }
+  const model = e.target.closest('[data-model]');
+  if (model && this.contains(model)) {
+    openHistoryModel(model.getAttribute('data-model'));
+    return;
+  }
   const row = e.target.closest('[data-toggle]');
   if (!row || !this.contains(row)) return;
   const path = row.getAttribute('data-toggle');
@@ -1171,8 +2205,20 @@ document.getElementById('confirm').addEventListener('click', function(e) {
 });
 document.getElementById('opt-btn').addEventListener('click', optimizeNow);
 document.getElementById('fit-btn').addEventListener('click', refit);
+document.getElementById('live-btn').addEventListener('click', closeHistoryModel);
 window.addEventListener('keydown', function(e) {
-  if (e.key === 'Escape') setConfirm(false);
+  if (e.key === 'Escape') {
+    if (document.getElementById('player') && document.getElementById('player').classList.contains('open')) {
+      closePlayer();
+      return;
+    }
+    if (historyView) {
+      closeHistoryModel();
+      return;
+    }
+    setConfirm(false);
+  }
+  if (typingInField()) return;
   if (e.key === 'f' || e.key === 'F') refit();
   held[e.code] = true;
   if (mapKeysActive() && (e.code === 'KeyW' || e.code === 'KeyA' || e.code === 'KeyS' ||
@@ -1187,6 +2233,33 @@ window.addEventListener('blur', function() {
 });
 tickClock();
 setInterval(tickClock, 1000);
+pollVideos();
+pollModels();
+pollRuns();
+setInterval(pollVideos, 5000);
+setInterval(pollModels, 5000);
+setInterval(pollRuns, 5000);
+initScanMap();
+document.getElementById('player-close').addEventListener('click', closePlayer);
+document.getElementById('player').addEventListener('click', function(e) {
+  if (e.target === this && !this.classList.contains('docked')) closePlayer();
+});
+document.getElementById('player-summarize').addEventListener('click', function() {
+  if (playerName) loadAnalysis(playerName, true);
+});
+document.getElementById('player-tasks').addEventListener('click', function(e) {
+  const row = e.target.closest('[data-task]');
+  const video = document.getElementById('player-video');
+  if (!row || !video) return;
+  const task = playerTasks[Number(row.getAttribute('data-task'))];
+  if (!task) return;
+  video.currentTime = Number(task.start_s) || 0;
+  video.play().catch(function() {});
+  highlightPlayerTask(video.currentTime);
+});
+document.getElementById('player-video').addEventListener('timeupdate', function() {
+  if (playerTasks.length) highlightPlayerTask(this.currentTime || 0);
+});
 poll();
 pollStatus();
 setInterval(poll, 250);
