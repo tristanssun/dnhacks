@@ -95,20 +95,30 @@ function zoomProgress(scroll) {
   return clamp01((scroll - start) / Math.max(end - start, 1));
 }
 
-let mapGateOpen = false;
+let mapArriveAt = 0;
 let mapHoldY = null;
 
-function holdMapScroll(scroll) {
+function holdMapBriefly(scroll) {
+  if (!intoMap || !zoomStartEl) {
+    return scroll;
+  }
   const raw = zoomProgress(scroll);
-  if (raw < 0.92) {
-    mapGateOpen = false;
+  const start = pageTop(zoomStartEl, scroll);
+  const fullY = start + intoMap.offsetHeight * 0.88 * 0.995;
+  if (raw < 0.85) {
+    mapArriveAt = 0;
     mapHoldY = null;
     return scroll;
   }
-  if (raw >= 0.99 && mapHoldY == null) {
-    mapHoldY = scroll;
+  if (mapHoldY == null && (raw >= 0.995 || scroll >= fullY)) {
+    mapHoldY = Math.min(scroll, fullY);
+    mapArriveAt = performance.now();
+    if (scroll > fullY) {
+      lenis.scrollTo(mapHoldY, { immediate: true });
+      return mapHoldY;
+    }
   }
-  if (!mapGateOpen && mapHoldY != null && scroll > mapHoldY + 1) {
+  if (mapHoldY != null && performance.now() - mapArriveAt < 500 && scroll > mapHoldY + 1) {
     lenis.scrollTo(mapHoldY, { immediate: true });
     return mapHoldY;
   }
@@ -278,7 +288,8 @@ function syncZoom(scroll) {
   const raw = zoomProgress(scroll);
   const t = raw * raw * (3 - 2 * raw);
   document.documentElement.style.setProperty("--zoom", String(t));
-  const mapFull = raw >= 0.99 && !mapGateOpen;
+  const leftMap = !!zoomStartEl && !!intoMap && scroll >= pageTop(zoomStartEl, scroll) + intoMap.offsetHeight - 8;
+  const mapFull = raw >= 0.995 && !leftMap;
   document.body.classList.toggle("is-zooming", raw > 0.001);
   document.body.classList.toggle("is-map-full", mapFull);
   document.getElementById("map-notes")?.setAttribute("aria-hidden", mapFull ? "false" : "true");
@@ -308,7 +319,7 @@ function syncZoom(scroll) {
 lenis.scrollTo(0, { immediate: true });
 
 function applyScroll(scroll) {
-  scroll = holdMapScroll(scroll);
+  scroll = holdMapBriefly(scroll);
   scrollHint?.classList.toggle("is-hidden", scroll > 8);
   syncPhone(scroll);
   syncFeature(scroll);
@@ -339,24 +350,10 @@ scrollHint?.addEventListener("click", (event) => {
 
 document.querySelector(".map-next")?.addEventListener("click", (event) => {
   event.preventDefault();
-  mapGateOpen = true;
+  mapArriveAt = 0;
+  mapHoldY = null;
   lenis.scrollTo("#footer");
 });
-
-window.addEventListener(
-  "wheel",
-  (event) => {
-    if (mapGateOpen || event.deltaY <= 0 || mapHoldY == null) {
-      return;
-    }
-    if (zoomProgress(lenis.scroll) < 0.99) {
-      return;
-    }
-    event.preventDefault();
-    lenis.scrollTo(mapHoldY, { immediate: true });
-  },
-  { passive: false },
-);
 
 initParticleText(document.getElementById("name-particles"), {
   text: "MiniMap",
