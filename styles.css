@@ -85,7 +85,7 @@ h1 {
   z-index: 5;
   width: var(--phone-w);
   height: var(--phone-h);
-  overflow: hidden;
+  border-radius: 2.55rem;
   pointer-events: none;
   will-change: transform;
   opacity: calc(1 - var(--zoom, 0));
