@@ -97,6 +97,7 @@ function zoomProgress(scroll) {
 
 let mapArriveAt = 0;
 let mapHoldY = null;
+let mapLeaving = false;
 
 function holdMapBriefly(scroll) {
   if (!intoMap || !zoomStartEl) {
@@ -108,6 +109,10 @@ function holdMapBriefly(scroll) {
   if (raw < 0.85) {
     mapArriveAt = 0;
     mapHoldY = null;
+    mapLeaving = false;
+    return scroll;
+  }
+  if (mapLeaving) {
     return scroll;
   }
   if (mapHoldY == null && (raw >= 0.995 || scroll >= fullY)) {
@@ -350,9 +355,13 @@ scrollHint?.addEventListener("click", (event) => {
 
 document.querySelector(".map-next")?.addEventListener("click", (event) => {
   event.preventDefault();
+  mapLeaving = true;
   mapArriveAt = 0;
   mapHoldY = null;
-  lenis.scrollTo("#footer");
+  const footer = document.getElementById("footer");
+  if (footer) {
+    lenis.scrollTo(footer);
+  }
 });
 
 initParticleText(document.getElementById("name-particles"), {
