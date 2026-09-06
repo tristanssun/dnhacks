@@ -76,14 +76,16 @@ h1 {
 }
 
 .phone {
+  --phone-h: min(88svh, calc(92vw * 19.5 / 9));
+  --phone-w: calc(var(--phone-h) * 9 / 19.5);
   position: absolute;
   top: 50vh;
   top: 50svh;
   right: 4vw;
   z-index: 5;
-  width: max-content;
-  height: min(88vh, calc(92vw * 19.5 / 9));
-  height: min(88svh, calc(92vw * 19.5 / 9));
+  width: var(--phone-w);
+  height: var(--phone-h);
+  overflow: hidden;
   pointer-events: none;
   will-change: transform;
   opacity: calc(1 - var(--zoom, 0));
@@ -132,9 +134,9 @@ h1 {
 }
 
 .phone-bezel {
+  width: 100%;
   height: 100%;
-  aspect-ratio: 9 / 19.5;
-  padding: 0.22rem;
+  padding: 0.2rem;
   overflow: hidden;
   border: 1px solid #1a1a1a;
   border-radius: 2.55rem;
@@ -149,7 +151,7 @@ h1 {
   width: 100%;
   height: 100%;
   object-fit: cover;
-  object-position: center;
+  object-position: center top;
   border-radius: 2.32rem;
 }
 
