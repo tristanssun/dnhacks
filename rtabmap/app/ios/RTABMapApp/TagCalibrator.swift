@@ -14,8 +14,29 @@ import UIKit
 
 enum DemoTag {
     static let id = 0
-    static let sizeMeters: Float = 0.20
     static let family = "4x4_50"
+    // Physical width of the black marker square. The admin page reports the
+    // size it is actually displaying at (a laptop screen shows far less than
+    // 0.20 m) and the server hands it to phones in /join, /demo and /calibrate.
+    // Using the wrong size scales the tag distance and misaligns the phones.
+    private static let lock = NSLock()
+    private static var sizeMetersValue: Float = 0.20
+    static var sizeMeters: Float {
+        lock.lock(); defer { lock.unlock() }
+        return sizeMetersValue
+    }
+    static func updateSize(fromServer value: Any?) {
+        var meters: Float? = nil
+        if let d = value as? Double { meters = Float(d) }
+        else if let n = value as? NSNumber { meters = n.floatValue }
+        else if let s = value as? String, let d = Double(s) { meters = Float(d) }
+        guard let m = meters, m.isFinite, m > 0.02, m < 2.0 else { return }
+        lock.lock(); defer { lock.unlock() }
+        if abs(sizeMetersValue - m) > 0.0005 {
+            NSLog("TagCalibrator: tag size from server %.3f m (was %.3f m)", m, sizeMetersValue)
+            sizeMetersValue = m
+        }
+    }
 }
 
 struct TagPose {

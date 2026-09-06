@@ -206,6 +206,50 @@ int main(int, char **)
 		}
 	}
 
+	// A laptop lid leans back: the same tag, pitched 18 deg about its own
+	// horizontal (x) axis. G must still be z-up with the tag center as origin
+	// and the same heading, i.e. equal to G from the vertical screen.
+	{
+		const float lean = 18.0f * float(M_PI) / 180.0f;
+		// Pitch about the tag's x axis (screen's horizontal edge), in the tag frame.
+		const rtabmap::Transform tagTilt(
+			1, 0, 0, 0,
+			0, std::cos(lean), -std::sin(lean), 0,
+			0, std::sin(lean), std::cos(lean), 0);
+		const rtabmap::Transform T_P_from_tagTilted = T_P_from_tag * tagTilt;
+		{
+			// sanity: the tilted tag's up edge is no longer vertical
+			const rtabmap::Transform e = T_P_from_tagTilted * rtabmap::Transform(0, 1.0f, 0, 0, 0, 0);
+			const float dz = e.z() - T_P_from_tagTilted.z();
+			check(dz < 0.99f && dz > 0.9f, "tilted tag's up edge is off vertical", "dz=" + std::to_string(dz));
+		}
+		for(int k = 0; k < 2; ++k)
+		{
+			const rtabmap::Transform C_P = calibCam[k];
+			const rtabmap::Transform baseFromTag = C_P.inverse() * T_P_from_tagTilted;
+			const rtabmap::Transform arkitCam = phones[k].arkitCameraFor(C_P);
+			const rtabmap::Transform arkitWorldFromTag = phoneComposeArkitWorldFromTag(arkitCam, baseFromTag);
+			const rtabmap::Transform G_tilt = collab::CollabMap::globalFromClientWorld(arkitWorldFromTag);
+			check(!G_tilt.isNull(), std::string("phone ") + char('A' + k) + " alignment valid with a leaning screen");
+			// Leveling must reproduce the vertical-screen alignment exactly:
+			// same origin (tag center), same heading, z up from gravity.
+			check(close(G_tilt, G_from_Wr[k], 1e-3f), std::string("phone ") + char('A' + k) + " leaning screen gives the same level G as a vertical one",
+				"tilted " + G_tilt.prettyPrint() + " vertical " + G_from_Wr[k].prettyPrint());
+			// Floor stays level: a floor point (P z=0) has G z = -tag height.
+			const rtabmap::Transform floorPt(4.0f, 2.0f, 0.0f, 0, 0, 0);
+			const rtabmap::Transform floorG = G_tilt * phones[k].storedNodePose(floorPt);
+			check(std::fabs(floorG.z() + 1.2f) < 1e-3f, std::string("phone ") + char('A' + k) + " floor is level in G with a leaning screen",
+				"G z=" + std::to_string(floorG.z()));
+		}
+		// The leveled frame keeps the tag center and the screen's heading.
+		const rtabmap::Transform leveledDirect = collab::CollabMap::levelArkitTagFrame(
+			phoneComposeArkitWorldFromTag(phones[0].arkitCameraFor(calibCam[0]), calibCam[0].inverse() * T_P_from_tagTilted));
+		const rtabmap::Transform leveledVertical = collab::CollabMap::levelArkitTagFrame(
+			phoneComposeArkitWorldFromTag(phones[0].arkitCameraFor(calibCam[0]), calibCam[0].inverse() * T_P_from_tag));
+		check(close(leveledDirect, leveledVertical, 1e-3f), "levelArkitTagFrame removes the lean and nothing else",
+			"tilted " + leveledDirect.prettyPrint() + " vertical " + leveledVertical.prettyPrint());
+	}
+
 	std::cout << "\nRESULT  pass=" << gPass << " fail=" << gFail << "\n";
 	return gFail == 0 ? 0 : 1;
 }

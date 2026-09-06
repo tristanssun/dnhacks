@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MiniMap</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="vendor/lenis.css" />
+    <link rel="stylesheet" href="styles.css?v=31" />
+    <link rel="stylesheet" href="cmcs.css?v=1" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.160.1/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div class="page">
+      <section class="hero">
+        <h1>MiniMap</h1>
+
+        <a class="scroll-hint" href="#next" aria-label="Scroll down">
+          <svg viewBox="0 0 24 24" width="36" height="36" fill="none" aria-hidden="true">
+            <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2.25" stroke-linecap="square" />
+          </svg>
+        </a>
+      </section>
+
+      <section id="next" class="next">
+        <div class="feature">
+          <h2>UWB Tracking</h2>
+          <p>
+            For emergency responders. Live teammate positions, so the crew stays
+            informed when they cannot see each other.
+          </p>
+        </div>
+      </section>
+
+      <section id="command" class="command">
+        <figure class="laptop">
+          <div class="laptop-lid">
+            <i class="laptop-camera"></i>
+            <div class="laptop-screen">
+              <div class="cmcs">
+                <header id="top">
+                  <div class="brand">
+                    <svg class="mark" viewBox="0 0 28 28" aria-hidden="true">
+                      <path d="M3 8 L14 3 L25 8 L25 20 L14 25 L3 20 Z" fill="none" stroke="#DBDAD9" stroke-width="1.4" />
+                      <path d="M8 14 L14 8 L20 14" fill="none" stroke="#A19F9B" stroke-width="1.4" />
+                      <path d="M8 18 L14 12 L20 18" fill="none" stroke="#DBDAD9" stroke-width="1.4" />
+                    </svg>
+                    <div class="brand-copy">
+                      <div class="brand-kicker">Collaborative mapping</div>
+                      <div class="brand-name">CMCS</div>
+                    </div>
+                  </div>
+                  <nav class="phases" id="phases" aria-label="Mission phases">
+                    <div class="phase" data-i="0"><span>Acquire</span></div>
+                    <div class="phase" data-i="1"><span>Lock</span></div>
+                    <div class="phase" data-i="2"><span>Map</span></div>
+                    <div class="phase on" data-i="3"><span>Operate</span></div>
+                  </nav>
+                  <div class="meta">
+                    <div class="link ok" id="link"><i class="pulse"></i><span id="link-txt">Live</span></div>
+                    <div id="clock">00:00:00</div>
+                  </div>
+                </header>
+                <div id="shell">
+                  <aside id="side">
+                    <div id="dots" class="tree">
+                      <div class="tree-node open">
+                        <div class="tree-row open" style="--d:0" data-toggle="units">
+                          <svg class="tree-chev" viewBox="0 0 12 12" aria-hidden="true"><path d="M4 2.5 L8.5 6 L4 9.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                          <svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.6h4.1l1.2 1.5H14V13H2z" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
+                          <span class="tree-name">Units</span>
+                          <span class="tree-val" id="dot-count">2</span>
+                        </div>
+                        <div class="tree-kids">
+                          <div class="tree-node open">
+                            <div class="tree-row open" style="--d:1" data-toggle="unit-01">
+                              <svg class="tree-chev" viewBox="0 0 12 12" aria-hidden="true"><path d="M4 2.5 L8.5 6 L4 9.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                              <svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.6h4.1l1.2 1.5H14V13H2z" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
+                              <span class="tree-name tree-id">UNIT-01</span>
+                              <span class="tree-state">Locked</span>
+                              <span class="lamp on"></span>
+                            </div>
+                            <div class="tree-kids">
+                              <div class="tree-row leaf" style="--d:2">
+                                <svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
+                                <span class="tree-name">a31c7b10</span>
+                              </div>
+                              <div class="tree-node open">
+                                <div class="tree-row open" style="--d:2" data-toggle="unit-01/position">
+                                  <svg class="tree-chev" viewBox="0 0 12 12" aria-hidden="true"><path d="M4 2.5 L8.5 6 L4 9.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                                  <svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.6h4.1l1.2 1.5H14V13H2z" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
+                                  <span class="tree-name">Position</span>
+                                </div>
+                                <div class="tree-kids">
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">E</span><span class="tree-val">+2.410 m</span></div>
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">N</span><span class="tree-val">-1.082 m</span></div>
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">U</span><span class="tree-val">+0.214 m</span></div>
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Range</span><span class="tree-val">2.649 m</span></div>
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Ground</span><span class="tree-val">2.641 m</span></div>
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Heading</span><span class="tree-val">337.1°</span></div>
+                                </div>
+                              </div>
+                              <div class="tree-node open">
+                                <div class="tree-row open" style="--d:2" data-toggle="unit-01/attitude">
+                                  <svg class="tree-chev" viewBox="0 0 12 12" aria-hidden="true"><path d="M4 2.5 L8.5 6 L4 9.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                                  <svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.6h4.1l1.2 1.5H14V13H2z" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
+                                  <span class="tree-name">Attitude</span>
+                                </div>
+                                <div class="tree-kids">
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Yaw</span><span class="tree-val">-22.9°</span></div>
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Pitch</span><span class="tree-val">2.4°</span></div>
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Roll</span><span class="tree-val">1.1°</span></div>
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Quat</span><span class="tree-val">+0.02 -0.01 +0.20 +0.98</span></div>
+                                </div>
+                              </div>
+                              <div class="tree-node open">
+                                <div class="tree-row open" style="--d:2" data-toggle="unit-01/mapping">
+                                  <svg class="tree-chev" viewBox="0 0 12 12" aria-hidden="true"><path d="M4 2.5 L8.5 6 L4 9.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                                  <svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.6h4.1l1.2 1.5H14V13H2z" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
+                                  <span class="tree-name">Mapping</span>
+                                </div>
+                                <div class="tree-kids">
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Keyframes</span><span class="tree-val">96</span></div>
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Local id</span><span class="tree-val">96</span></div>
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Session</span><span class="tree-val">1</span></div>
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Map base</span><span class="tree-val">0</span></div>
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Path</span><span class="tree-val">18.420 m</span></div>
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Samples</span><span class="tree-val">84</span></div>
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Fix</span><span class="tree-val">Yes</span></div>
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Tag</span><span class="tree-val">0</span></div>
+                                </div>
+                              </div>
+                              <div class="tree-node open">
+                                <div class="tree-row open" style="--d:2" data-toggle="unit-01/link">
+                                  <svg class="tree-chev" viewBox="0 0 12 12" aria-hidden="true"><path d="M4 2.5 L8.5 6 L4 9.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                                  <svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.6h4.1l1.2 1.5H14V13H2z" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
+                                  <span class="tree-name">Link</span>
+                                </div>
+                                <div class="tree-kids">
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Seen</span><span class="tree-val">&lt;1s</span></div>
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Pose</span><span class="tree-val">&lt;1s</span></div>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                          <div class="tree-node open">
+                            <div class="tree-row open" style="--d:1" data-toggle="unit-02">
+                              <svg class="tree-chev" viewBox="0 0 12 12" aria-hidden="true"><path d="M4 2.5 L8.5 6 L4 9.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                              <svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.6h4.1l1.2 1.5H14V13H2z" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
+                              <span class="tree-name tree-id">UNIT-02</span>
+                              <span class="tree-state">Locked</span>
+                              <span class="lamp on"></span>
+                            </div>
+                            <div class="tree-kids">
+                              <div class="tree-row leaf" style="--d:2">
+                                <svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
+                                <span class="tree-name">9f04e2aa</span>
+                              </div>
+                              <div class="tree-node open">
+                                <div class="tree-row open" style="--d:2" data-toggle="unit-02/position">
+                                  <svg class="tree-chev" viewBox="0 0 12 12" aria-hidden="true"><path d="M4 2.5 L8.5 6 L4 9.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                                  <svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.6h4.1l1.2 1.5H14V13H2z" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
+                                  <span class="tree-name">Position</span>
+                                </div>
+                                <div class="tree-kids">
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">E</span><span class="tree-val">+6.200 m</span></div>
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">N</span><span class="tree-val">+3.400 m</span></div>
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">U</span><span class="tree-val">+0.220 m</span></div>
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Range</span><span class="tree-val">7.075 m</span></div>
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Ground</span><span class="tree-val">7.072 m</span></div>
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Heading</span><span class="tree-val">63.0°</span></div>
+                                </div>
+                              </div>
+                              <div class="tree-node open">
+                                <div class="tree-row open" style="--d:2" data-toggle="unit-02/attitude">
+                                  <svg class="tree-chev" viewBox="0 0 12 12" aria-hidden="true"><path d="M4 2.5 L8.5 6 L4 9.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                                  <svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.6h4.1l1.2 1.5H14V13H2z" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
+                                  <span class="tree-name">Attitude</span>
+                                </div>
+                                <div class="tree-kids">
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Yaw</span><span class="tree-val">63.0°</span></div>
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Pitch</span><span class="tree-val">-1.6°</span></div>
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Roll</span><span class="tree-val">0.8°</span></div>
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Quat</span><span class="tree-val">+0.01 +0.00 +0.52 +0.85</span></div>
+                                </div>
+                              </div>
+                              <div class="tree-node open">
+                                <div class="tree-row open" style="--d:2" data-toggle="unit-02/mapping">
+                                  <svg class="tree-chev" viewBox="0 0 12 12" aria-hidden="true"><path d="M4 2.5 L8.5 6 L4 9.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                                  <svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.6h4.1l1.2 1.5H14V13H2z" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
+                                  <span class="tree-name">Mapping</span>
+                                </div>
+                                <div class="tree-kids">
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Keyframes</span><span class="tree-val">88</span></div>
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Local id</span><span class="tree-val">88</span></div>
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Session</span><span class="tree-val">1</span></div>
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Map base</span><span class="tree-val">0</span></div>
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Path</span><span class="tree-val">14.880 m</span></div>
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Samples</span><span class="tree-val">71</span></div>
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Fix</span><span class="tree-val">Yes</span></div>
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Tag</span><span class="tree-val">0</span></div>
+                                </div>
+                              </div>
+                              <div class="tree-node open">
+                                <div class="tree-row open" style="--d:2" data-toggle="unit-02/link">
+                                  <svg class="tree-chev" viewBox="0 0 12 12" aria-hidden="true"><path d="M4 2.5 L8.5 6 L4 9.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                                  <svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.6h4.1l1.2 1.5H14V13H2z" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
+                                  <span class="tree-name">Link</span>
+                                </div>
+                                <div class="tree-kids">
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Seen</span><span class="tree-val">&lt;1s</span></div>
+                                  <div class="tree-row leaf" style="--d:3"><svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg><span class="tree-name">Pose</span><span class="tree-val">&lt;1s</span></div>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="side-actions">
+                      <button type="button" class="btn" id="opt-btn">Optimize</button>
+                      <button type="button" class="btn ghost-bad" id="reset-btn">Reset</button>
+                    </div>
+                  </aside>
+                  <section class="viewport">
+                    <div class="view-stage">
+                      <div id="live" class="show">
+                        <div id="map-wrap">
+                          <canvas id="map"></canvas>
+                          <div id="map-msg" class="hidden"></div>
+                          <div class="live-stats">
+                            <div class="stat"><b>Nodes</b><em id="stat-nodes">211</em></div>
+                            <div class="stat"><b>Mesh</b><em id="stat-mesh">1</em></div>
+                            <div class="stat"><b>Align</b><em id="stat-align">Yes</em></div>
+                          </div>
+                          <div class="view-tools">
+                            <button type="button" class="chip" id="fit-btn">Fit</button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </section>
+                </div>
+                <div id="confirm">
+                  <div class="sheet" role="dialog" aria-labelledby="confirm-title">
+                    <h3 id="confirm-title">Reset the room?</h3>
+                    <p>Deletes the stored map and unlocks the session. Both phones must join and point at the tag again.</p>
+                    <div class="sheet-row">
+                      <button type="button" class="btn" id="confirm-no">Cancel</button>
+                      <button type="button" class="btn solid" id="confirm-go">Reset</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="laptop-hinge"></div>
+          <div class="laptop-deck" aria-hidden="true">
+            <div class="kb"></div>
+            <div class="laptop-pad"></div>
+          </div>
+        </figure>
+      </section>
+
+      <figure class="phone" aria-hidden="true">
+        <span class="phone-btn phone-btn-silent"></span>
+        <span class="phone-btn phone-btn-vol-up"></span>
+        <span class="phone-btn phone-btn-vol-down"></span>
+        <span class="phone-btn phone-btn-power"></span>
+        <div class="phone-bezel">
+          <video
+            src="assets/app.mp4"
+            poster="assets/app.png"
+            autoplay
+            muted
+            loop
+            playsinline
+            disablepictureinpicture
+          ></video>
+        </div>
+      </figure>
+    </div>
+
+    <script src="vendor/lenis.min.js"></script>
+    <script type="module" src="main.js?v=24"></script>
+  </body>
+</html>

@@ -15,6 +15,7 @@
 #include "CollabMap.h"
 
 #include <rtabmap/core/DBDriver.h>
+#include <rtabmap/core/Signature.h>
 #include <rtabmap/core/EnvSensor.h>
 #include <rtabmap/core/GPS.h>
 #include <rtabmap/core/Link.h>
@@ -29,6 +30,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <rtabmap/utilite/UTimer.h>
 #include <iostream>
 #include <map>
 #include <set>
@@ -1076,13 +1078,12 @@ int main(int argc, char * argv[])
 	collab::CalibrateResult fake = map.calibrate(clients[0].id, 0, false, 0.05f, 0.0f, 0.45f, 0.0f, 0.0f, 0.0f, 1.0f);
 	check(!fake.ok && !map.isRoomLocked(), "calibrate without detected flag rejected", fake.error);
 	check(!map.lastIngestAligned(), "still not aligned after rejected calibrate", "");
-	// Two real ArUco id-0 detections (one per phone) lock the room and define
-	// the shared tag frame, so pull becomes aligned with a transform.
+	// One real ArUco id-0 detection locks the room (kLockPhonesRequired=1).
 	collab::CalibrateResult calA = map.calibrate(clients[0].id, 0, true, 0.04f, 0.0f, 0.42f, 0.0f, 0.0f, 0.0f, 1.0f);
-	check(calA.ok && !calA.locked, "first real detect does not lock alone",
+	check(calA.ok && calA.locked && map.isRoomLocked(), "first real detect locks the room",
 		"ok=" + std::to_string(calA.ok ? 1 : 0) + " locked=" + std::to_string(calA.locked ? 1 : 0));
 	collab::CalibrateResult calB = map.calibrate(clients[1].id, 0, true, -0.03f, 0.0f, 0.40f, 0.0f, 0.0f, 0.0f, 1.0f);
-	check(calB.ok && calB.locked && map.isRoomLocked(), "second real detect locks the room",
+	check(calB.ok && calB.locked && map.isRoomLocked(), "second real detect stays locked",
 		"ok=" + std::to_string(calB.ok ? 1 : 0) + " locked=" + std::to_string(calB.locked ? 1 : 0));
 	check(map.lastIngestAligned(), "aligned=true after tag lock", "");
 	const std::string pullLockedPath = workDir + "/pull-a-locked.db";
@@ -1091,8 +1092,123 @@ int main(int argc, char * argv[])
 		"GET /pull aligned with X-Client-To-Global after tag lock",
 		"aligned=" + std::to_string(pullLocked.aligned ? 1 : 0) +
 		" transform=" + std::to_string(pullLocked.hasTransform ? 1 : 0));
-	map.resetDemoRoom();
-	check(!map.isRoomLocked() && !map.lastIngestAligned(), "reset unlocks and clears aligned", "");
+	std::cout << "\n--- phone-style bake (Poisson + texture atlas) ---\n";
+	{
+		std::string bakeErr;
+		UTimer bakeTimer;
+		const bool bakeOk = map.bakeNow(bakeErr);
+		const double bakeSec = bakeTimer.ticks();
+		check(bakeOk, "bakeNow on the merged room", bakeErr);
+		check(map.hasBakedMesh(), "baked mesh file has faces", map.mapBakedMeshPath());
+		const std::string demo = map.demoJson();
+		check(demo.find("\"mesh_baked\":true") != std::string::npos, "demo reports mesh_baked", demo.substr(0, 200));
+		const std::string maxKey = "\"bake_max_node\":";
+		size_t at = demo.find(maxKey);
+		int bakeMax = at == std::string::npos ? 0 : std::atoi(demo.c_str() + at + maxKey.size());
+		check(bakeMax == afterBoth.nodes, "bake covers the highest node",
+			"bake_max_node=" + std::to_string(bakeMax) + " nodes=" + std::to_string(afterBoth.nodes) +
+			" (" + std::to_string(bakeSec) + "s)");
+		int overlayNodes = -1;
+		const std::string none = map.liveMeshSince(bakeMax, overlayNodes);
+		check(none.empty() && overlayNodes == 0, "no live overlay newer than the bake",
+			"nodes=" + std::to_string(overlayNodes));
+		int allNodes = -1;
+		const std::string all = map.liveMeshSince(0, allNodes);
+		// A node without a depth image has no mesh (fixture node 2 is one).
+		int nodesWithDepth = 0;
+		{
+			rtabmap::DBDriver * dbd = rtabmap::DBDriver::create();
+			if(dbd->openConnection(map.mapDbPath(), false, true))
+			{
+				std::set<int> ids;
+				dbd->getAllNodeIds(ids, false, false, false);
+				std::list<int> idList(ids.begin(), ids.end());
+				std::list<rtabmap::Signature *> sigs;
+				dbd->loadSignatures(idList, sigs);
+				dbd->loadNodeData(sigs, true, false, false, false);
+				for(std::list<rtabmap::Signature *>::iterator it = sigs.begin(); it != sigs.end(); ++it)
+				{
+					if(*it)
+					{
+						(*it)->sensorData().uncompressData();
+						if(!(*it)->sensorData().depthRaw().empty()) ++nodesWithDepth;
+						delete *it;
+					}
+				}
+				dbd->closeConnection(false);
+			}
+			delete dbd;
+		}
+		// The per-node cleanup (confidence mask, cluster filter) may leave a few
+		// depth-bearing nodes with no trustworthy surface; the overlay must
+		// carry every node that still has a mesh, and the cleanup must not
+		// wipe more than 10% of the nodes that have depth.
+		const int meshedNodes = map.liveMeshNodeCount();
+		check(!all.empty() && allNodes == meshedNodes && meshedNodes > 0,
+			"overlay since 0 carries every node with a live mesh",
+			"nodes=" + std::to_string(allNodes) + " meshed=" + std::to_string(meshedNodes) +
+			" with_depth=" + std::to_string(nodesWithDepth) + " total=" + std::to_string(afterBoth.nodes) +
+			" bytes=" + std::to_string(all.size()));
+		check(nodesWithDepth > 0 && meshedNodes * 10 >= nodesWithDepth * 9,
+			"live-mesh cleanup keeps >= 90% of depth-bearing nodes",
+			"meshed=" + std::to_string(meshedNodes) + " with_depth=" + std::to_string(nodesWithDepth));
+		// A server restart in the middle of a walk keeps a lock made of real
+		// detections from phones active in the last 45 s (state file carries
+		// detected + tag transform + last_seen), so nobody is sent back to the tag.
+		{
+			collab::CalibrateResult reA = map.calibrate(clients[0].id, 0, true, 0.04f, 0.0f, 0.42f, 0.0f, 0.0f, 0.0f, 1.0f);
+			collab::CalibrateResult reB = map.calibrate(clients[1].id, 0, true, -0.03f, 0.0f, 0.40f, 0.0f, 0.0f, 0.0f, 1.0f);
+			check(reA.ok && reB.ok && map.isRoomLocked(), "re-lock with two real detects before restart", "");
+			collab::CollabMap warm(room);
+			std::string warmErr;
+			check(warm.init(warmErr), "restart CollabMap within 45 s of the walk", warmErr);
+			check(warm.isRoomLocked() && warm.lastIngestAligned(), "restart keeps the real two-phone lock", warm.demoJson().substr(0, 120));
+			const std::string pullWarmPath = workDir + "/pull-a-warm.db";
+			collab::PullResult pullWarm = warm.exportPull(clients[0].id, 0, pullWarmPath);
+			check(pullWarm.ok && pullWarm.aligned && pullWarm.hasTransform, "pull after restart still aligned with X-Client-To-Global",
+				"aligned=" + std::to_string(pullWarm.aligned ? 1 : 0) + " transform=" + std::to_string(pullWarm.hasTransform ? 1 : 0));
+			// The e2e-style leftover (calibrated, no detection, no transform) never locks.
+			collab::CalibrateResult noXf = warm.calibrate("leftover-phone", 0, false, 0.0f, 0.0f, 0.4f, 0.0f, 0.0f, 0.0f, 1.0f);
+			check(!noXf.ok, "fake calibrate still rejected after restart", noXf.error);
+		}
+
+		// Restart: the bake is restored from disk, then a join into a room
+		// whose clients are all stale starts a new room and drops it.
+		{
+			std::ifstream in((room + "/clients.json").c_str());
+			std::stringstream buf;
+			buf << in.rdbuf();
+			std::string state = buf.str();
+			const std::string key = "\"last_seen\":";
+			size_t pos = 0;
+			while((pos = state.find(key, pos)) != std::string::npos)
+			{
+				size_t end = pos + key.size();
+				while(end < state.size() && (std::isdigit(state[end]) || state[end] == '-')) ++end;
+				state.replace(pos + key.size(), end - (pos + key.size()), "1000");
+				pos += key.size();
+			}
+			std::ofstream out((room + "/clients.json").c_str(), std::ios::trunc);
+			out << state;
+		}
+		collab::CollabMap restarted(room);
+		std::string initErr;
+		check(restarted.init(initErr), "restart CollabMap on the same room", initErr);
+		check(!restarted.isRoomLocked(), "restart with stale phones (last_seen old) drops the lock", restarted.demoJson().substr(0, 120));
+		check(restarted.hasBakedMesh() && restarted.demoJson().find("\"mesh_baked\":true") != std::string::npos,
+			"bake restored after restart", "");
+		collab::JoinResult fresh = restarted.join("fresh-phone");
+		check(fresh.ok && fresh.mode == "new", "join with stale clients starts a new room", fresh.mode);
+		check(!restarted.hasBakedMesh() &&
+			restarted.demoJson().find("\"mesh_baked\":false") != std::string::npos,
+			"new room drops the previous bake", "");
+		map.resetDemoRoom();
+		const std::string wiped = map.demoJson();
+		check(!map.isRoomLocked() && !map.lastIngestAligned(), "POST /reset unlocks", "");
+		check(wiped.find("\"mesh_baked\":false") != std::string::npos &&
+			wiped.find("\"global_nodes\":0") != std::string::npos,
+			"POST /reset wipes the map and bake", wiped.substr(0, 180));
+	}
 
 	if(skipHttp)
 	{

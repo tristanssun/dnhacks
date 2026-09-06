@@ -1,0 +1,460 @@
+.cmcs {
+  --page: #161514;
+  --panel: #1f1e1d;
+  --card: #2b2a28;
+  --border: #454340;
+  --text-2: #a19f9b;
+  --text-1: #dbdad9;
+  --sans: Inter, "Segoe UI", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, monospace;
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  width: 1280px;
+  height: 800px;
+  overflow: hidden;
+  color: var(--text-1);
+  font-family: var(--sans);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.4;
+  background: var(--page);
+  transform-origin: top left;
+}
+
+.cmcs * {
+  box-sizing: border-box;
+}
+
+.cmcs #top {
+  display: flex;
+  z-index: 3;
+  flex: 0 0 56px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 22px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  backdrop-filter: blur(10px);
+}
+
+.cmcs .brand {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 12px;
+}
+
+.cmcs .mark {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+}
+
+.cmcs .brand-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.cmcs .brand-kicker {
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.2;
+}
+
+.cmcs .brand-name {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.cmcs .phases {
+  display: flex;
+  align-items: stretch;
+  height: 56px;
+}
+
+.cmcs .phase {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 16px;
+  border-left: 1px solid var(--border);
+  color: var(--text-2);
+}
+
+.cmcs .phase:first-child {
+  border-left: 0;
+}
+
+.cmcs .phase span {
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.cmcs .phase.on {
+  color: var(--text-1);
+}
+
+.cmcs .phase.on::after {
+  position: absolute;
+  right: 16px;
+  bottom: 0;
+  left: 16px;
+  height: 2px;
+  background: var(--text-1);
+  content: "";
+}
+
+.cmcs .meta {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  color: var(--text-2);
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.cmcs .link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cmcs .pulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-2);
+}
+
+.cmcs .link.ok .pulse {
+  background: var(--text-1);
+}
+
+.cmcs #clock {
+  color: var(--text-1);
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.cmcs #shell {
+  display: grid;
+  flex: 1 1 auto;
+  min-height: 0;
+  grid-template-columns: 300px minmax(0, 1fr);
+}
+
+.cmcs #side {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  overflow: auto;
+  border-right: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.cmcs .tree {
+  flex: 1 1 auto;
+  margin: 0;
+  padding: 8px 0;
+}
+
+.cmcs .tree-kids {
+  display: none;
+}
+
+.cmcs .tree-node.open > .tree-kids {
+  display: block;
+}
+
+.cmcs .tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px 0 calc(8px + var(--d, 0) * 14px);
+  user-select: none;
+}
+
+.cmcs .tree-row[data-toggle] {
+  cursor: pointer;
+}
+
+.cmcs .tree-row:hover {
+  background: var(--card);
+}
+
+.cmcs .tree-chev,
+.cmcs .tree-ico {
+  display: block;
+  width: 12px;
+  height: 12px;
+  flex: 0 0 12px;
+  color: var(--text-2);
+}
+
+.cmcs .tree-ico {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+}
+
+.cmcs .tree-chev {
+  transform-origin: 50% 50%;
+}
+
+.cmcs .tree-row.open .tree-chev {
+  transform: rotate(90deg);
+}
+
+.cmcs .tree-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-1);
+  font-size: 13px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cmcs .tree-row.leaf .tree-name {
+  color: var(--text-2);
+}
+
+.cmcs .tree-id {
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.cmcs .tree-val {
+  flex: 0 1 auto;
+  color: var(--text-1);
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.cmcs .tree-state {
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.cmcs .lamp {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 50%;
+  background: var(--border);
+}
+
+.cmcs .lamp.on {
+  background: var(--text-1);
+}
+
+.cmcs .side-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  margin-top: auto;
+  border-top: 1px solid var(--border);
+}
+
+.cmcs .btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 36px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-1);
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.cmcs .btn:hover {
+  border-color: var(--text-1);
+}
+
+.cmcs .btn.solid {
+  border-color: var(--text-1);
+  background: var(--text-1);
+  color: var(--page);
+}
+
+.cmcs .btn.ghost-bad:hover {
+  border-color: var(--text-2);
+  color: var(--text-2);
+}
+
+.cmcs .viewport {
+  position: relative;
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  background: var(--page);
+}
+
+.cmcs .view-stage {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.cmcs #calib-tag {
+  display: none;
+}
+
+.cmcs #live {
+  display: flex;
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.cmcs #map-wrap {
+  position: relative;
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  background: var(--page);
+}
+
+.cmcs #map {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.cmcs #map-msg {
+  display: none;
+}
+
+.cmcs .view-tools {
+  position: absolute;
+  bottom: 16px;
+  left: 16px;
+  z-index: 2;
+}
+
+.cmcs .chip {
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text-1);
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.cmcs .chip:hover,
+.cmcs .chip.on {
+  border-color: var(--text-1);
+}
+
+.cmcs .live-stats {
+  position: absolute;
+  top: 14px;
+  right: 16px;
+  z-index: 2;
+  display: flex;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.cmcs .stat {
+  min-width: 72px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  background: var(--card);
+}
+
+.cmcs .stat b {
+  display: block;
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.cmcs .stat em {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-1);
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 500;
+  font-style: normal;
+}
+
+.cmcs #confirm {
+  display: none;
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--page);
+}
+
+.cmcs #confirm.open {
+  display: flex;
+}
+
+.cmcs .sheet {
+  width: min(420px, 100%);
+  padding: 24px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.cmcs .sheet::before {
+  display: block;
+  height: 2px;
+  margin: -24px -24px 20px;
+  background: var(--text-1);
+  content: "";
+}
+
+.cmcs .sheet h3 {
+  margin: 0 0 8px;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.cmcs .sheet p {
+  margin: 0 0 22px;
+  color: var(--text-2);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.45;
+}
+
+.cmcs .sheet-row {
+  display: flex;
+  gap: 8px;
+}
+
+.cmcs .sheet-row .btn {
+  flex: 1;
+}

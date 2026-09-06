@@ -5,6 +5,7 @@
 #include <rtabmap/utilite/UConversion.h>
 #include <rtabmap/utilite/UFile.h>
 #include <rtabmap/utilite/ULogger.h>
+#include <rtabmap/utilite/UTimer.h>
 
 #include <atomic>
 #include <csignal>
@@ -17,11 +18,71 @@
 #include <string>
 #include <unistd.h>
 #include <execinfo.h>
+#ifdef __APPLE__
+#include <arpa/inet.h>
+#include <dns_sd.h>
+#include <dispatch/dispatch.h>
+#include <net/if.h>
+#endif
 
 namespace {
 
 collab::HttpServer * gServer = 0;
 volatile sig_atomic_t gStopSignal = 0;
+
+#ifdef __APPLE__
+DNSServiceRef gBonjour = 0;
+
+void stopBonjour()
+{
+	if(gBonjour)
+	{
+		DNSServiceRefDeallocate(gBonjour);
+		gBonjour = 0;
+	}
+}
+
+void advertiseBonjour(int port)
+{
+	// Wi-Fi only. Advertising on USB/AWDL (169.254.*) made one phone resolve
+	// a link-local address the other phone cannot reach.
+	uint32_t iface = if_nametoindex("en0");
+	if(iface == 0)
+	{
+		iface = kDNSServiceInterfaceIndexAny;
+	}
+	DNSServiceErrorType err = DNSServiceRegister(
+		&gBonjour,
+		0,
+		iface,
+		"rtabmap-collab",
+		"_rtabmap-collab._tcp",
+		"local.",
+		0,
+		htons(static_cast<uint16_t>(port)),
+		0,
+		0,
+		0,
+		0);
+	if(err != kDNSServiceErr_NoError)
+	{
+		std::printf("[collab] Bonjour advertise failed err=%d\n", static_cast<int>(err));
+		gBonjour = 0;
+		return;
+	}
+	err = DNSServiceSetDispatchQueue(gBonjour, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0));
+	if(err != kDNSServiceErr_NoError)
+	{
+		std::printf("[collab] Bonjour dispatch failed err=%d\n", static_cast<int>(err));
+		DNSServiceRefDeallocate(gBonjour);
+		gBonjour = 0;
+		return;
+	}
+	std::printf("[collab] Bonjour advertised _rtabmap-collab._tcp port=%d iface=%u\n",
+		port, iface);
+	std::fflush(stdout);
+}
+#endif
 
 // Graceful stop. The signal number is recorded and logged from main so an
 // externally triggered exit is visible in server.log (the LaunchAgent
@@ -278,6 +339,46 @@ int main(int argc, char * argv[])
 			std::fflush(stdout);
 			return collab::HttpResponse::json(status, map.calibrateJson(result));
 		}
+		if(req.method == "POST" && req.path == "/bake")
+		{
+			std::string bakeErr;
+			UTimer bakeTimer;
+			const bool ok = map.bakeNow(bakeErr);
+			std::printf("[collab] POST /bake ok=%d %.1fs error=%s\n", ok ? 1 : 0, bakeTimer.ticks(), bakeErr.c_str());
+			std::fflush(stdout);
+			if(!ok)
+			{
+				return collab::HttpResponse::error(500, bakeErr.empty() ? "bake failed" : bakeErr);
+			}
+			return collab::HttpResponse::json(200, map.demoJson());
+		}
+		if(req.method == "POST" && req.path == "/tag_size")
+		{
+			// The admin page reports the physical width of the black marker
+			// square it is displaying; phones read it back from /join and /demo.
+			const std::string body = readWholeFile(req.bodyPath);
+			if(!req.bodyPath.empty())
+			{
+				UFile::erase(req.bodyPath);
+			}
+			double meters = 0.0;
+			const size_t k = body.find("tag_size_m");
+			if(k != std::string::npos)
+			{
+				const size_t colon = body.find(':', k);
+				if(colon != std::string::npos)
+				{
+					meters = std::atof(body.c_str() + colon + 1);
+				}
+			}
+			if(!map.setTagSizeM(static_cast<float>(meters)))
+			{
+				return collab::HttpResponse::error(400, "tag_size_m must be between 0.02 and 2.0 meters");
+			}
+			std::ostringstream oss;
+			oss << "{\"ok\":true,\"tag_size_m\":" << map.tagSizeM() << "}";
+			return collab::HttpResponse::json(200, oss.str());
+		}
 		if(req.method == "POST" && req.path == "/reset")
 		{
 			map.resetDemoRoom();
@@ -351,6 +452,17 @@ int main(int argc, char * argv[])
 			res.extraHeaders["Cache-Control"] = "no-store";
 			return res;
 		}
+		if(req.method == "GET" && req.path == "/map.bake.jpg")
+		{
+			const std::string atlas = map.bakedAtlasPath();
+			if(atlas.empty() || !UFile::exists(atlas) || UFile::length(atlas) <= 0)
+			{
+				return collab::HttpResponse::error(404, "no textured bake");
+			}
+			collab::HttpResponse res = collab::HttpResponse::file(200, atlas, "image/jpeg", "");
+			res.extraHeaders["Cache-Control"] = "no-store";
+			return res;
+		}
 		if((req.method == "GET" || req.method == "HEAD") && req.path == "/map.mesh")
 		{
 			const std::string emptyMesh =
@@ -377,11 +489,41 @@ int main(int argc, char * argv[])
 				res.extraHeaders["X-Mesh-Kind"] = baked ? "baked" : "live";
 				res.extraHeaders["X-Mesh-Refresh-Sec"] = "0";
 			};
+			// Overlay: live node meshes newer than the bake, built from the cache.
+			const std::string sinceStr = collab::queryValue(req, "since_node");
+			if(!sinceStr.empty())
+			{
+				int nodes = 0;
+				const std::string body = map.liveMeshSince(uStr2Int(sinceStr), nodes);
+				if(body.empty())
+				{
+					collab::HttpResponse res = collab::HttpResponse::text(200, "model/ply", emptyMesh);
+					meshHeaders(res, 0, 0, false);
+					res.extraHeaders["X-Node-Count"] = "0";
+					return res;
+				}
+				collab::HttpResponse res = collab::HttpResponse::text(200, "model/ply", body);
+				int verts = 0;
+				int faces = 0;
+				std::istringstream hin(body.substr(0, 400));
+				std::string line;
+				while(std::getline(hin, line))
+				{
+					if(line.compare(0, 15, "element vertex ") == 0) verts = uStr2Int(line.substr(15));
+					else if(line.compare(0, 13, "element face ") == 0) faces = uStr2Int(line.substr(13));
+					else if(line.compare(0, 10, "end_header") == 0) break;
+				}
+				meshHeaders(res, verts, faces, false);
+				res.extraHeaders["X-Node-Count"] = uNumber2Str(nodes);
+				return res;
+			}
 			// The live mesh file is maintained by the ingest worker; never trigger
 			// the (slow, on-demand) cloud export from the admin page's 2 s poll.
 			const bool useBaked = wantBake && map.hasBakedMesh();
 			const std::string meshPath = useBaked ? map.mapBakedMeshPath() : map.mapLiveMeshPath();
-			if(!UFile::exists(meshPath) || UFile::length(meshPath) <= 0)
+			// A bake request never falls back to the live file: the viewer would
+			// take the per-node mesh for the assembled surface.
+			if((wantBake && !useBaked) || !UFile::exists(meshPath) || UFile::length(meshPath) <= 0)
 			{
 				collab::HttpResponse res = collab::HttpResponse::text(200, "model/ply", emptyMesh);
 				meshHeaders(res, 0, 0, false);
@@ -413,6 +555,10 @@ int main(int argc, char * argv[])
 			collab::HttpResponse res = collab::HttpResponse::file(
 				200, meshPath, "model/ply", "");
 			meshHeaders(res, verts, faces, useBaked);
+			if(useBaked)
+			{
+				res.extraHeaders["X-Mesh-Textured"] = map.bakedAtlasPath().empty() ? "0" : "1";
+			}
 			return res;
 		}
 		if(req.method == "GET" && req.path == "/pull")
@@ -589,7 +735,13 @@ int main(int argc, char * argv[])
 
 	UINFO("rtabmap-collab-server port=%d data=%s pid=%d", port, dataDir.c_str(), static_cast<int>(::getpid()));
 	std::fflush(stdout);
+#ifdef __APPLE__
+	advertiseBonjour(port);
+#endif
 	int rc = server.run();
+#ifdef __APPLE__
+	stopBonjour();
+#endif
 	gServer = 0;
 	UWARN("rtabmap-collab-server stopping: signal=%d rc=%d", static_cast<int>(gStopSignal), rc);
 	std::fflush(stdout);

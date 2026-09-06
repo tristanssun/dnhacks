@@ -221,7 +221,7 @@ def main() -> int:
         check("shouldShowTag" in page, "admin JS hide helper present")
         check("reset-btn" in page and "/reset" in page, "admin Reset button present")
         check("hideTagFromDom" not in page, "admin keeps tag in DOM")
-        check(f"{TAG_SIZE_M:.2f}" in page or "0.20" in page, "admin documents tag size")
+        check("tag-size-input" in page and "/tag_size" in page, "admin reports displayed tag size")
         check("Mesh refreshes every" not in page, "admin does not advertise 10s bake")
         check("organizedFastMesh" in page, "admin documents live organizedFastMesh")
         check("map.mesh?live=1" not in page, "admin does not fall back to bake then live")
@@ -240,6 +240,19 @@ def main() -> int:
         check(should_show_tag(demo), "shouldShowTag(demo) true at start")
         check(len(demo.get("calibrated") or []) == 0, "leftover lock clients not shown")
 
+        # The admin page reports the physical size of the marker it displays;
+        # phones pick it up from /join and /demo.
+        ts = http_json("POST", base + "/tag_size", {"tag_size_m": 0.085})
+        check(ts.get("ok") is True and abs(float(ts.get("tag_size_m", 0)) - 0.085) < 1e-6, "POST /tag_size accepted", json.dumps(ts))
+        demo_ts = http_json("GET", base + "/demo")
+        check(abs(float(demo_ts.get("tag_size_m", 0)) - 0.085) < 1e-6, "demo reports the displayed tag size")
+        join_ts = http_json("POST", base + "/join", {}, "sim-size")
+        check(abs(float(join_ts.get("tag_size_m", 0)) - 0.085) < 1e-6, "join reports the displayed tag size")
+        bad_ts = http_json("POST", base + "/tag_size", {"tag_size_m": 5.0})
+        check(bad_ts.get("ok") is False and bad_ts.get("_http") == 400, "reject absurd tag size")
+        http_json("POST", base + "/tag_size", {"tag_size_m": TAG_SIZE_M})
+        http_json("POST", base + "/reset", {})
+
         bad = http_json("POST", base + "/calibrate", {"tag_id": 99, "detected": True, "tx": 0, "ty": 0, "tz": 0.4, "qx": 0, "qy": 0, "qz": 0, "qw": 1}, "sim-a")
         check(bad.get("ok") is False and bad.get("_http") == 400, "reject bad tag_id")
         missing = http_json("POST", base + "/calibrate", {"tag_id": 0, "tx": 0, "ty": 0, "tz": 0.4, "qx": 0, "qy": 0, "qz": 0, "qw": 1}, "sim-a")
@@ -254,15 +267,16 @@ def main() -> int:
 
         cal_a = http_json("POST", base + "/calibrate", pose(tx=0.04, tz=0.42), "sim-a")
         check(cal_a.get("ok") is True, "calibrate A")
+        check(cal_a.get("locked") is True, "one phone locks the room")
         demo = http_json("GET", base + "/demo")
-        check(demo.get("locked") is False, "still unlocked after A")
-        check(demo.get("show_tag") is True, "tag still shown after A")
+        check(demo.get("locked") is True, "GET /demo locked after A")
+        check(demo.get("show_tag") is False, "tag hidden after A")
         check(int(demo.get("calibrated_count") or 0) == 1, f"calibrated_count={demo.get('calibrated_count')}")
-        check(should_show_tag(demo), "shouldShowTag true with one phone")
+        check(should_show_tag(demo) is False, "shouldShowTag false after one-phone lock")
 
         cal_b = http_json("POST", base + "/calibrate", pose(tx=-0.03, tz=0.40), "sim-b")
         check(cal_b.get("ok") is True, "calibrate B")
-        check(cal_b.get("locked") is True, "calibrate B locks room")
+        check(cal_b.get("locked") is True, "second phone stays locked")
         check(cal_b.get("show_tag") is False, "show_tag false after lock")
         demo = http_json("GET", base + "/demo")
         check(demo.get("locked") is True, "GET /demo locked")
@@ -381,6 +395,60 @@ def main() -> int:
         check(p95 < 5000.0, "lag p95 under 5s", f"p95={p95:.1f}ms")
         check(p50 < 3000.0, "lag p50 under 3s", f"p50={p50:.1f}ms")
 
+        # Phone-style assembled surface (Poisson bake) and the live overlay of
+        # nodes newer than it. Synthetic frames are 128x96 tilted walls, so
+        # both the live mesh and the bake must have real faces.
+        live_status, live_hdrs, _ = http("GET", base + "/map.mesh")
+        live_faces = int(live_hdrs.get("x-face-count") or 0)
+        check(live_status == 200 and live_faces > 0, "live mesh has faces", f"faces={live_faces}")
+        status_before = http_json("GET", base + "/status")
+        max_node = int(status_before.get("global_nodes") or 0)
+        t_bake = time.perf_counter()
+        bake = http_json("POST", base + "/bake", {})
+        bake_s = time.perf_counter() - t_bake
+        check(bake.get("ok") is True and bake.get("mesh_baked") is True, "POST /bake", json.dumps({k: bake.get(k) for k in ("ok", "mesh_baked", "bake_gen", "bake_max_node", "error")}))
+        check(int(bake.get("bake_max_node") or 0) >= max_node and max_node > 0, "bake covers every node", f"bake_max_node={bake.get('bake_max_node')} nodes={max_node}")
+        check(bake_s < 30.0, "bake under 30s on the sim room", f"{bake_s:.1f}s")
+        bk_status, bk_hdrs, bk_body = http("GET", base + "/map.mesh?bake=1")
+        bk_faces = int(bk_hdrs.get("x-face-count") or 0)
+        check(bk_status == 200 and (bk_hdrs.get("x-mesh-kind") or "") == "baked" and bk_faces > 0, "GET /map.mesh?bake=1 is the baked surface", f"kind={bk_hdrs.get('x-mesh-kind')} faces={bk_faces} bytes={len(bk_body)}")
+        check(bk_body.startswith(b"ply\n"), "baked mesh is PLY")
+        bake_max = int(bake.get("bake_max_node") or 0)
+        ov_status, ov_hdrs, _ = http("GET", base + f"/map.mesh?since_node={bake_max}")
+        check(ov_status == 200 and int(ov_hdrs.get("x-node-count") or -1) == 0 and int(ov_hdrs.get("x-face-count") or -1) == 0, "overlay empty right after the bake", f"nodes={ov_hdrs.get('x-node-count')}")
+        ov0_status, ov0_hdrs, _ = http("GET", base + "/map.mesh?since_node=0")
+        check(ov0_status == 200 and int(ov0_hdrs.get("x-node-count") or 0) == max_node, "overlay since 0 carries every node", f"nodes={ov0_hdrs.get('x-node-count')} expected={max_node}")
+        # A new upload shows up in the overlay before the next bake.
+        extra_bake = os.path.join(work, "delta-after-bake.db")
+        if write_delta(extra_bake, 20, 0.9, 0.0, 0.2):
+            sync_delta(base, "sim-b", extra_bake, 0)
+            deadline = time.time() + 10.0
+            ov_nodes = 0
+            while time.time() < deadline:
+                _s, ov_hdrs2, _b = http("GET", base + f"/map.mesh?since_node={bake_max}")
+                ov_nodes = int(ov_hdrs2.get("x-node-count") or 0)
+                if ov_nodes > 0:
+                    break
+                time.sleep(0.3)
+            check(ov_nodes == 1, "overlay carries the node uploaded after the bake", f"nodes={ov_nodes}")
+            demo_ob = http_json("GET", base + "/demo")
+            check(demo_ob.get("mesh_baked") is True and int(demo_ob.get("bake_max_node") or 0) == bake_max, "demo keeps bake coverage until the next bake")
+        # The bake is textured like the phone's Assemble: PLY carries UVs and
+        # the atlas is served as JPEG.
+        check(bake.get("bake_textured") is True and (bk_hdrs.get("x-mesh-textured") or "") == "1", "bake is textured", f"bake_textured={bake.get('bake_textured')} hdr={bk_hdrs.get('x-mesh-textured')}")
+        check(b"property float s\n" in bk_body[:600] and b"property float t\n" in bk_body[:600], "baked PLY has s/t texture coordinates")
+        at_status, at_hdrs, at_body = http("GET", base + "/map.bake.jpg")
+        check(at_status == 200 and (at_hdrs.get("content-type") or "").startswith("image/jpeg") and at_body[:2] == b"\xff\xd8", "GET /map.bake.jpg is a JPEG atlas", f"status={at_status} bytes={len(at_body)}")
+        # POST /reset wipes the room. Phones must join and tag again.
+        http_json("POST", base + "/reset", {})
+        demo_rb = http_json("GET", base + "/demo")
+        check(demo_rb.get("mesh_baked") is not True and int(demo_rb.get("global_nodes") or 0) == 0, "reset wipes the map and bake")
+        rb_status, rb_hdrs, _ = http("GET", base + "/map.mesh?bake=1")
+        check(rb_status == 200 and int(rb_hdrs.get("x-face-count") or 0) == 0, "no baked surface after reset")
+        http_json("POST", base + "/join", {}, "sim-a")
+        http_json("POST", base + "/calibrate", pose(tx=0.04, tz=0.42), "sim-a")
+        http_json("POST", base + "/calibrate", pose(tx=-0.03, tz=0.40), "sim-b")
+
         # 10x lock reliability with pose noise.
         locks = 0
         hides = 0
@@ -394,12 +462,7 @@ def main() -> int:
             noise = 0.01 * (i + 1)
             r1 = http_json("POST", base + "/calibrate", pose(tx=0.02 + noise, tz=0.40 + noise), a)
             demo1 = http_json("GET", base + "/demo")
-            if demo1.get("locked") is True or demo1.get("show_tag") is not True:
-                check(False, f"lock-repeat {i+1} early lock", str(demo1.get("calibrated_count")))
-                continue
-            r2 = http_json("POST", base + "/calibrate", pose(tx=-0.02 - noise, tz=0.41 + noise * 0.5), b)
-            demo2 = http_json("GET", base + "/demo")
-            if r2.get("locked") is True and demo2.get("locked") is True and demo2.get("show_tag") is False:
+            if r1.get("locked") is True and demo1.get("locked") is True and demo1.get("show_tag") is False:
                 locks += 1
                 hides += 1
         check(locks == 10, "10/10 lock with pose noise", f"{locks}/10")

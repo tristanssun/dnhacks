@@ -51,6 +51,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         // Auto collab: register(defaults:) does not overwrite a stored false from an earlier launch.
         defaults.set(true, forKey: "CollabEnabled")
         defaults.set(CollabServerConfig.defaultURL, forKey: "CollabServerURL")
+        CollabDiscovery.shared.start()
         NSLog("CollabSync: launch CollabEnabled=1 server=%@", CollabServerConfig.defaultURL)
         
         // Override point for customization after application launch.

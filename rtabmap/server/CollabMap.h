@@ -126,6 +126,9 @@ public:
 	bool init(std::string & error);
 
 	static const long kActiveTimeoutSec = 45;
+	// Temporary: one tagged phone is enough to start mapping. Set back to 2
+	// to wait for a second connection before the room locks.
+	static const int kLockPhonesRequired = 1;
 	// Phones sit on the tag screen before /calibrate. Do not wipe a waiting
 	// lock just because mapping heartbeats have not started yet.
 	static const long kCalibWaitTimeoutSec = 180;
@@ -145,12 +148,18 @@ public:
 		float tx, float ty, float tz,
 		float qx, float qy, float qz, float qw);
 	CalibrateResult calibrateFromJson(const std::string & clientId, const std::string & jsonBody);
+	// Displayed marker width in meters (black square). Returns false if out of range.
+	bool setTagSizeM(float meters);
+	float tagSizeM() const;
 	void resetDemoRoom();
 	bool isRoomLocked();
 	PullResult exportPull(const std::string & clientId, int sinceGlobalId, const std::string & destDbPath);
 	ServerStatus status() const;
 	bool lastIngestAligned() const;
 	bool optimizeNow(std::string & error);
+	// Run the phone-style assemble (Poisson + color/texture + cleanup) now and
+	// write the pretty mesh file. Heavy; loads under the db lock, computes outside it.
+	bool bakeNow(std::string & error);
 	static bool writeDemoDeltaDb(
 		const std::string & path,
 		int localId,
@@ -164,8 +173,16 @@ public:
 	std::string mapLiveMeshPath() const {return meshPath_;}
 	std::string mapBakedMeshPath() const {return bakedMeshPath_;}
 	bool hasBakedMesh() const;
+	// JPEG atlas for the textured bake (empty path if the last bake had none).
+	std::string bakedAtlasPath() const;
 	int bakeIntervalSec() const {return 0;}
 	int meshGeneration() const;
+	// Binary PLY (same layout as map.mesh) of the cached live node meshes with
+	// global id > sinceNode, placed with the latest tag-frame poses. Empty
+	// string when nothing is newer.
+	std::string liveMeshSince(int sinceNode, int & nodesOut) const;
+	// Nodes whose cleaned live mesh has faces (what the live export can place).
+	int liveMeshNodeCount() const;
 	bool ensureViewerCloud(std::string & error);
 	bool exportLiveMeshNow(std::string & error);
 
@@ -178,7 +195,11 @@ public:
 	// Frame conversions (conventions documented next to the constants in
 	// CollabMap.cpp). Public and static so collab_frame_test can check them.
 	// T_G_from_clientRtabmapWorld from the phone-reported T_arkitWorld_from_tag.
+	// The tag frame is leveled first (see levelArkitTagFrame).
 	static rtabmap::Transform globalFromClientWorld(const rtabmap::Transform & arkitWorldFromTag);
+	// Same tag center and heading, but up taken from ARKit gravity (+y) instead
+	// of the tag's up edge, so a leaning laptop screen does not tilt the map.
+	static rtabmap::Transform levelArkitTagFrame(const rtabmap::Transform & arkitWorldFromTag);
 	// ARKit camera transform (ARKit world, ARKit camera axes) to the rtabmap
 	// world / base_link pose the phone stores for that frame.
 	static rtabmap::Transform rtabmapPoseFromArkit(const rtabmap::Transform & arkitCamera);
@@ -207,6 +228,8 @@ private:
 			poseQz(0.0f),
 			poseQw(1.0f),
 			poseYaw(0.0f),
+			poseRoll(0.0f),
+			posePitch(0.0f),
 			lastLivePoseAt(0)
 		{
 			for(int i = 0; i < 7; ++i)
@@ -237,6 +260,8 @@ private:
 		float poseQz;
 		float poseQw;
 		float poseYaw;
+		float poseRoll;
+		float posePitch;
 		long lastLivePoseAt;
 		std::vector<std::pair<float, float> > trail;
 	};
@@ -267,6 +292,8 @@ private:
 	static bool isActiveSeen(long lastSeen, long now, long timeoutSec);
 	void resetRoomLocked();
 	void clearSessionCalibrationLocked();
+	// Startup: keep recent real calibrations, drop the rest, recompute the lock.
+	void restoreSessionLockLocked();
 	void expireStaleLockLocked();
 	void touchClientLocked(const std::string & clientId, long now);
 	void applyLockFieldsLocked(JoinResult & result) const;
@@ -314,10 +341,30 @@ private:
 	// Per-node live meshes in their camera frame, built once per node. The
 	// live mesh export only reloads poses and meshes nodes it has not seen.
 	NodeMeshCache * meshCache_;
+	mutable std::mutex meshCacheMutex_;
 	// map.cloud / map.ply are downloads, rebuilt on demand when stale.
 	bool cloudStale_;
+	// Phone-style assembled ("pretty") mesh: generation counter, highest node
+	// id it covers (live meshes newer than this are overlaid), last run time.
+	int bakeGen_;
+	int bakeMaxNodeId_;
+	long lastBakeAt_;
+	bool bakeTextured_;
+	std::string bakedAtlasPath_;
+	// Bumped on every room reset; a bake that started under an older epoch is
+	// thrown away instead of resurrecting the previous room's surface.
+	int roomEpoch_;
+	// Tag-frame poses used by the last live mesh export, so an overlay of
+	// "nodes newer than the bake" can be built from the cache without the db.
+	std::map<int, rtabmap::Transform> livePosesG_;
+	static const long kBakeIdleSec = 5;
+	static const long kBakeMinIntervalSec = 60;
+	static const long kBakeMaxIntervalSec = 180;
 	bool roomLocked_;
 	int lockedTagId_;
+	// Physical width of the black marker square as displayed by the admin page
+	// (meters). Reported to phones in /join, /demo and /calibrate; persisted.
+	float tagSizeM_;
 	std::map<std::string, ClientState> clients_;
 
 	mutable std::mutex mutex_;

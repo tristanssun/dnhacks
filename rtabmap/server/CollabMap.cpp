@@ -38,6 +38,7 @@
 #include <pcl/point_types.h>
 #include <pcl/surface/poisson.h>
 #include <opencv2/imgproc.hpp>
+#include <opencv2/imgcodecs.hpp>
 #include <Eigen/Geometry>
 
 #include <algorithm>
@@ -75,6 +76,19 @@ const float kMeshMaxDepth = 2.5f;
 const float kMeshAngleToleranceDeg = 20.0f;
 const int kMeshTrianglePix = 2;
 const uint32_t kMeshMaxFaces = 500000;
+// Phone live-view cleanup, applied to every node mesh here. ARKit depth
+// confidence: the phone's default is "High" (threshold 100), but at the
+// server's budget decimation (8 px) that mask leaves too few valid samples
+// per triangle (275k -> 18k faces on a 272-node room); medium+high (50)
+// still drops the low-confidence flying pixels at depth edges (275k -> 188k)
+// and reads far cleaner. Polygon clusters under 5% of the node's biggest
+// cluster are dropped (phone NoiseFilteringRatio 0.05: the confetti).
+// Triangles with an edge over 3x the expected vertex spacing at that range
+// (decimation * range / fx) are dropped; organizedFastMesh's angle tolerance
+// already catches nearly all of these, this is a safety net.
+const unsigned char kDepthConfidenceThr = 50;
+const float kMeshClusterRatio = 0.05f;
+const float kMeshMaxEdgeFactor = 3.0f;
 
 // Frames. The phone stores node poses in rtabmap world convention (x forward,
 // y left, z up) and reports the start tag in ARKit/OpenGL world convention
@@ -93,8 +107,11 @@ const rtabmap::Transform kOpenGLWorldFromRtabmap(
 	-1.0f, 0.0f, 0.0f, 0.0f);
 
 // iOS Assemble defaults from Settings.bundle / RTABMapApp::exportMesh (optimized).
-const float kAssembleVoxel = 0.01f;
-const float kAssembleMaxDepth = 3.0f;
+// Phone Assemble defaults are voxel 0.01 m and 2.5 m depth. The periodic
+// server bake uses 2 cm voxels so a room reconstructs in tens of seconds
+// instead of minutes; the phone still does its own 1 cm export at stop.
+const float kAssembleVoxel = 0.02f;
+const float kAssembleMaxDepth = 2.5f;
 const float kAssembleMinDepth = 0.0f;
 const int kAssembleDensityLevel = 1;
 const int kAssembleNormalK = 18;
@@ -104,8 +121,21 @@ const bool kAssembleCleanMesh = true;
 const int kAssembleMinCluster = 0;
 const int kAssembleMaxPolygons = 200000;
 const float kAssembleMaxTextureDistance = 3.0f;
-const int kAssembleMinTextureCluster = 50;
-const int kAssembleTextureSize = 1024;
+// Texturing occlusion test (createTextureMesh maxDepthError). Measured on a
+// 272-node room: the phone default (0 = edge length) and a fixed 15 cm both
+// texture ~44k of 126k faces, because decimated faces on slanted surfaces span
+// more depth than the tolerance; -1 (off) textures 81k. Faces are still only
+// textured by cameras they face (winding test), so this trades some
+// bleed-through at occluding edges for far better coverage. Small clusters are
+// speckle.
+const float kAssembleMaxDepthError = -1.0f;
+const int kAssembleMinTextureCluster = 10;
+// After unseen faces are dropped, textured islands smaller than this many
+// polygons are floating specks, not furniture (phone: PolygonFiltering=0 keeps them).
+const int kAssembleTextureIslandMin = 20;
+// 4096 x 1 atlas like the phone (Settings.bundle TextureSize /
+// MaximumOutputTextures); 1024 gave each camera a ~60 px tile, unreadable.
+const int kAssembleTextureSize = 4096;
 const int kAssembleTextureCount = 1;
 const float kBilateralSigmaS = 2.0f;
 const float kBilateralSigmaR = 0.075f;
@@ -862,7 +892,7 @@ void applyTagFrameToPoses(
 }
 
 
-pcl::PointCloud<pcl::PointXYZRGB>::Ptr nodeOrganizedCloudRGB(rtabmap::SensorData & data, int nodeCount = 0)
+pcl::PointCloud<pcl::PointXYZRGB>::Ptr nodeOrganizedCloudRGB(rtabmap::SensorData & data, int nodeCount = 0, int * decimationOut = 0)
 {
 	data.uncompressData();
 	if(data.imageRaw().empty() || data.depthRaw().empty())
@@ -872,8 +902,16 @@ pcl::PointCloud<pcl::PointXYZRGB>::Ptr nodeOrganizedCloudRGB(rtabmap::SensorData
 	const int decimation = nodeCount > 0 ?
 		meshDecimationForBudget(data.depthRaw().cols, data.depthRaw().rows, nodeCount, kMeshMaxFaces) :
 		meshDecimationForSize(data.depthRaw().cols, data.depthRaw().rows);
+	if(decimationOut)
+	{
+		*decimationOut = decimation;
+	}
+	// Same mask as the phone (DepthConfidence "High" -> threshold 100): LiDAR
+	// pixels ARKit marks low/medium confidence are the flying points at
+	// depth edges. Nodes without a confidence image keep every pixel.
 	pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud = rtabmap::util3d::cloudRGBFromSensorData(
-		data, decimation, kMeshMaxDepth);
+		data, decimation, kMeshMaxDepth, 0.0f, 0, rtabmap::ParametersMap(), std::vector<float>(),
+		kDepthConfidenceThr);
 	if(!cloud || cloud->empty())
 	{
 		return pcl::PointCloud<pcl::PointXYZRGB>::Ptr();
@@ -884,6 +922,114 @@ pcl::PointCloud<pcl::PointXYZRGB>::Ptr nodeOrganizedCloudRGB(rtabmap::SensorData
 	}
 	cloud->is_dense = false;
 	return cloud;
+}
+
+// Cleanup the phone applies to each node mesh (RTABMapApp::filterOrganizedPolygons
+// with NoiseFilteringRatio 0.05), plus a depth-edge test: organizedFastMesh
+// still emits long triangles that bridge a depth discontinuity; at the
+// decimated resolution a legit edge is about decimation * z / fx, so anything
+// several times longer is a bridge, not a surface.
+void filterNodePolygons(
+	const pcl::PointCloud<pcl::PointXYZRGB> & cloud,
+	std::vector<pcl::Vertices> & polygons,
+	float depthFx,
+	int decimation)
+{
+	if(polygons.empty())
+	{
+		return;
+	}
+	if(depthFx > 0.0f && decimation > 0)
+	{
+		std::vector<pcl::Vertices> kept;
+		kept.reserve(polygons.size());
+		const float k = kMeshMaxEdgeFactor * float(decimation) / depthFx;
+		for(size_t i = 0; i < polygons.size(); ++i)
+		{
+			const pcl::Vertices & poly = polygons[i];
+			if(poly.vertices.size() < 3)
+			{
+				continue;
+			}
+			bool ok = true;
+			for(size_t j = 0; j < poly.vertices.size() && ok; ++j)
+			{
+				const uint32_t a = poly.vertices[j];
+				const uint32_t b = poly.vertices[(j + 1) % poly.vertices.size()];
+				if(a >= cloud.size() || b >= cloud.size())
+				{
+					ok = false;
+					break;
+				}
+				const pcl::PointXYZRGB & pa = cloud[a];
+				const pcl::PointXYZRGB & pb = cloud[b];
+				if(!pcl::isFinite(pa) || !pcl::isFinite(pb))
+				{
+					ok = false;
+					break;
+				}
+				// The cloud is in the sensor base frame (x forward, z up), so the
+				// range to the camera is the point norm, not z.
+				const float ra = std::sqrt(pa.x * pa.x + pa.y * pa.y + pa.z * pa.z);
+				const float rb = std::sqrt(pb.x * pb.x + pb.y * pb.y + pb.z * pb.z);
+				const float dx = pa.x - pb.x;
+				const float dy = pa.y - pb.y;
+				const float dz = pa.z - pb.z;
+				const float edge2 = dx * dx + dy * dy + dz * dz;
+				// allowed edge at this range (use the farther endpoint)
+				const float allowed = k * std::max(ra, rb);
+				if(edge2 > allowed * allowed)
+				{
+					ok = false;
+				}
+			}
+			if(ok)
+			{
+				kept.push_back(poly);
+			}
+		}
+		polygons.swap(kept);
+	}
+	if(kMeshClusterRatio > 0.0f && !polygons.empty())
+	{
+		std::vector<std::set<int> > neighbors;
+		std::vector<std::set<int> > vertexToPolygons;
+		rtabmap::util3d::createPolygonIndexes(polygons, static_cast<int>(cloud.size()), neighbors, vertexToPolygons);
+		std::list<std::list<int> > clusters = rtabmap::util3d::clusterPolygons(neighbors);
+		size_t biggest = 0;
+		for(std::list<std::list<int> >::const_iterator it = clusters.begin(); it != clusters.end(); ++it)
+		{
+			biggest = std::max(biggest, it->size());
+		}
+		const size_t minCluster = static_cast<size_t>(float(biggest) * kMeshClusterRatio);
+		std::vector<pcl::Vertices> kept;
+		kept.reserve(polygons.size());
+		for(std::list<std::list<int> >::const_iterator it = clusters.begin(); it != clusters.end(); ++it)
+		{
+			if(it->size() >= minCluster)
+			{
+				for(std::list<int>::const_iterator j = it->begin(); j != it->end(); ++j)
+				{
+					kept.push_back(polygons[*j]);
+				}
+			}
+		}
+		polygons.swap(kept);
+	}
+}
+
+float depthImageFx(const rtabmap::SensorData & data)
+{
+	if(data.cameraModels().size() != 1 || data.depthRaw().empty())
+	{
+		return 0.0f;
+	}
+	const rtabmap::CameraModel & m = data.cameraModels()[0];
+	if(m.imageWidth() <= 0)
+	{
+		return static_cast<float>(m.fx());
+	}
+	return static_cast<float>(m.fx()) * float(data.depthRaw().cols) / float(m.imageWidth());
 }
 
 template<typename PointT>
@@ -904,7 +1050,8 @@ bool buildNodeMesh(
 {
 	outCloud.clear();
 	outPolygons.clear();
-	pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud = nodeOrganizedCloudRGB(data, nodeCount);
+	int decimation = 0;
+	pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud = nodeOrganizedCloudRGB(data, nodeCount, &decimation);
 	if(!cloud || !cloud->isOrganized())
 	{
 		return false;
@@ -912,6 +1059,11 @@ bool buildNodeMesh(
 	const double angleRad = kMeshAngleToleranceDeg * M_PI / 180.0;
 	std::vector<pcl::Vertices> polygons = rtabmap::util3d::organizedFastMesh(
 		cloud, angleRad, false, kMeshTrianglePix);
+	if(polygons.empty())
+	{
+		return false;
+	}
+	filterNodePolygons(*cloud, polygons, depthImageFx(data), decimation);
 	if(polygons.empty())
 	{
 		return false;
@@ -967,13 +1119,19 @@ void assembleMapMesh(
 				decimationUsed = meshDecimationForBudget(depth.cols, depth.rows, nodeCount, kMeshMaxFaces);
 			}
 		}
-		pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud = nodeOrganizedCloudRGB(sit->second.sensorData(), nodeCount);
+		int nodeDecimation = 0;
+		pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud = nodeOrganizedCloudRGB(sit->second.sensorData(), nodeCount, &nodeDecimation);
 		if(!cloud || !cloud->isOrganized())
 		{
 			continue;
 		}
 		std::vector<pcl::Vertices> polygons = rtabmap::util3d::organizedFastMesh(
 			cloud, angleRad, false, kMeshTrianglePix);
+		if(polygons.empty())
+		{
+			continue;
+		}
+		filterNodePolygons(*cloud, polygons, depthImageFx(sit->second.sensorData()), nodeDecimation);
 		if(polygons.empty())
 		{
 			continue;
@@ -1042,44 +1200,6 @@ bool plyFileHasFaces(const std::string & path)
 	return false;
 }
 
-void capMeshPolygons(std::vector<pcl::Vertices> & polygons, uint32_t maxFaces)
-{
-	if(maxFaces == 0)
-	{
-		return;
-	}
-	const uint32_t n = triangleCount(polygons);
-	if(n <= maxFaces)
-	{
-		return;
-	}
-	std::vector<pcl::Vertices> kept;
-	kept.reserve(polygons.size());
-	uint32_t faces = 0;
-	const uint32_t stride = std::max(1u, n / maxFaces);
-	uint32_t seen = 0;
-	for(size_t i = 0; i < polygons.size(); ++i)
-	{
-		const size_t v = polygons[i].vertices.size();
-		if(v < 3)
-		{
-			continue;
-		}
-		const uint32_t add = static_cast<uint32_t>(v - 2);
-		++seen;
-		if((seen % stride) != 0 && faces + add > maxFaces)
-		{
-			continue;
-		}
-		if(faces + add > maxFaces)
-		{
-			break;
-		}
-		kept.push_back(polygons[i]);
-		faces += add;
-	}
-	polygons.swap(kept);
-}
 
 void extractRgbMesh(
 	const pcl::PolygonMesh::Ptr & mesh,
@@ -1178,15 +1298,151 @@ void sampleAtlasOntoCloud(
 	}
 }
 
+// Textured form of the bake: vertices carry an atlas UV (welded per vertex+UV,
+// so a vertex on a texture seam is split), plus the merged atlas image (BGR).
+struct TexturedBake
+{
+	pcl::PointCloud<pcl::PointXYZRGB> cloud;
+	std::vector<float> uv; // 2 per vertex, atlas-wide [0,1], v up (PLY/OBJ convention)
+	std::vector<pcl::Vertices> polygons;
+	cv::Mat atlasBgr;
+};
+
+// Unweld a PCL TextureMesh (per-face UVs in per-material tiles) into per-vertex
+// UVs over the whole atlas. Polygons without valid UVs are dropped, like the
+// phone's CleanMesh export.
+void buildTexturedBake(
+	const pcl::TextureMesh & textureMesh,
+	const pcl::PointCloud<pcl::PointXYZRGB> & cloud,
+	const cv::Mat & atlas,
+	TexturedBake & out)
+{
+	out.cloud.clear();
+	out.uv.clear();
+	out.polygons.clear();
+	if(atlas.empty() || textureMesh.tex_polygons.empty())
+	{
+		return;
+	}
+	cv::Mat bgr;
+	if(atlas.channels() == 1)
+	{
+		cv::cvtColor(atlas, bgr, cv::COLOR_GRAY2BGR);
+	}
+	else if(atlas.channels() == 4)
+	{
+		cv::cvtColor(atlas, bgr, cv::COLOR_BGRA2BGR);
+	}
+	else
+	{
+		bgr = atlas;
+	}
+	out.atlasBgr = bgr;
+	const int tiles = std::max(1, bgr.cols / std::max(1, bgr.rows));
+	std::map<std::pair<int, std::pair<int, int> >, uint32_t> welded;
+	size_t rejectedUv = 0;
+	size_t rejectedIndex = 0;
+	size_t skippedMaterials = 0;
+	for(size_t t = 0; t < textureMesh.tex_polygons.size(); ++t)
+	{
+		if((int)t >= tiles)
+		{
+			skippedMaterials += textureMesh.tex_polygons[t].size();
+			continue;
+		}
+		if(t >= textureMesh.tex_coordinates.size())
+		{
+			continue;
+		}
+		const std::vector<pcl::Vertices> & polys = textureMesh.tex_polygons[t];
+		const auto & uvs = textureMesh.tex_coordinates[t];
+		size_t uvIndex = 0;
+		for(size_t p = 0; p < polys.size(); ++p)
+		{
+			const pcl::Vertices & poly = polys[p];
+			const size_t n = poly.vertices.size();
+			if(uvIndex + n > uvs.size())
+			{
+				break;
+			}
+			bool valid = n >= 3;
+			for(size_t k = 0; k < n && valid; ++k)
+			{
+				const Eigen::Vector2f & uv = uvs[uvIndex + k];
+				const int vi = static_cast<int>(poly.vertices[k]);
+				if(vi < 0 || vi >= (int)cloud.size())
+				{
+					valid = false;
+					++rejectedIndex;
+				}
+				else if(uv[0] < 0.0f || uv[1] < 0.0f || uv[0] > 1.0f || uv[1] > 1.0f)
+				{
+					valid = false;
+					++rejectedUv;
+				}
+			}
+			if(valid)
+			{
+				pcl::Vertices tri;
+				tri.vertices.reserve(n);
+				for(size_t k = 0; k < n; ++k)
+				{
+					const Eigen::Vector2f & uv = uvs[uvIndex + k];
+					const int vi = static_cast<int>(poly.vertices[k]);
+					// tile-local u -> atlas-wide u
+					const float ua = (uv[0] + float(t)) / float(tiles);
+					const float va = uv[1];
+					const std::pair<int, std::pair<int, int> > key(
+						vi, std::make_pair((int)std::lround(ua * 65535.0f), (int)std::lround(va * 65535.0f)));
+					std::map<std::pair<int, std::pair<int, int> >, uint32_t>::const_iterator w = welded.find(key);
+					uint32_t idx = 0;
+					if(w == welded.end())
+					{
+						idx = static_cast<uint32_t>(out.cloud.size());
+						out.cloud.push_back(cloud[vi]);
+						out.uv.push_back(ua);
+						out.uv.push_back(va);
+						welded.insert(std::make_pair(key, idx));
+					}
+					else
+					{
+						idx = w->second;
+					}
+					tri.vertices.push_back(idx);
+				}
+				out.polygons.push_back(tri);
+			}
+			uvIndex += n;
+		}
+	}
+	out.cloud.width = static_cast<uint32_t>(out.cloud.size());
+	out.cloud.height = 1;
+	out.cloud.is_dense = true;
+	if(rejectedUv || rejectedIndex || skippedMaterials)
+	{
+		UWARN("Textured bake: atlas %dx%d tiles=%d kept=%d rejected_uv=%d rejected_index=%d skipped_materials=%d",
+			bgr.cols, bgr.rows, tiles, (int)out.polygons.size(),
+			(int)rejectedUv, (int)rejectedIndex, (int)skippedMaterials);
+	}
+}
+
 // Optional Poisson bake. Not used for the admin live view (that is assembleMapMesh).
 bool exportAssembledMesh(
 	const std::map<int, rtabmap::Transform> & poses,
 	std::map<int, rtabmap::Signature> & signatures,
 	pcl::PointCloud<pcl::PointXYZRGB> & outCloud,
-	std::vector<pcl::Vertices> & outPolygons)
+	std::vector<pcl::Vertices> & outPolygons,
+	TexturedBake * textured = 0)
 {
 	outCloud.clear();
 	outPolygons.clear();
+	if(textured)
+	{
+		textured->cloud.clear();
+		textured->uv.clear();
+		textured->polygons.clear();
+		textured->atlasBgr = cv::Mat();
+	}
 	pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr mergedClouds(new pcl::PointCloud<pcl::PointXYZRGBNormal>);
 	std::map<int, rtabmap::Transform> cameraPoses;
 	std::map<int, rtabmap::CameraModel> cameraModels;
@@ -1223,7 +1479,8 @@ bool exportAssembledMesh(
 		const int decimation = meshDecimationDensity(
 			data.depthRaw().cols, data.depthRaw().rows, kAssembleDensityLevel);
 		pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud = rtabmap::util3d::cloudRGBFromSensorData(
-			data, decimation, kAssembleMaxDepth, kAssembleMinDepth, indices.get());
+			data, decimation, kAssembleMaxDepth, kAssembleMinDepth, indices.get(),
+			rtabmap::ParametersMap(), std::vector<float>(), kDepthConfidenceThr);
 		if(!cloud || cloud->empty() || !indices || indices->empty())
 		{
 			continue;
@@ -1329,7 +1586,22 @@ bool exportAssembledMesh(
 	}
 	if(kAssembleMaxPolygons > 0 && (int)mesh->polygons.size() > kAssembleMaxPolygons)
 	{
-		capMeshPolygons(mesh->polygons, static_cast<uint32_t>(kAssembleMaxPolygons));
+		// Same as RTABMapApp::exportMesh: quadric decimation to the polygon
+		// budget keeps the whole surface. Subsampling triangles (the previous
+		// capMeshPolygons) shredded it.
+		const float factor = 1.0f - float(kAssembleMaxPolygons) / float(mesh->polygons.size());
+		UTimer decimTimer;
+		pcl::PolygonMesh::Ptr decimated = rtabmap::util3d::meshDecimation(mesh, factor);
+		if(decimated && !decimated->polygons.empty() && decimated->polygons.size() < mesh->polygons.size())
+		{
+			UINFO("Assemble decimated %d -> %d polygons (factor %.3f, %.1fs)",
+				(int)mesh->polygons.size(), (int)decimated->polygons.size(), factor, decimTimer.ticks());
+			mesh = decimated;
+		}
+		else
+		{
+			UWARN("Assemble mesh decimation failed, keeping %d polygons", (int)mesh->polygons.size());
+		}
 	}
 
 	try
@@ -1349,13 +1621,14 @@ bool exportAssembledMesh(
 		UWARN("denseMeshPostProcessing failed: %s", e.what());
 	}
 
-	extractRgbMesh(mesh, outCloud, outPolygons);
-	if(triangleCount(outPolygons) == 0)
+	if(mesh->polygons.empty())
 	{
 		assembleMapMesh(poses, signatures, outCloud, outPolygons);
 		return triangleCount(outPolygons) > 0;
 	}
 
+	// Texture against the mesh's own (uncompacted) cloud so polygon indices
+	// match; compaction for the vertex-color fallback happens afterwards.
 	if(!cameraPoses.empty() && !cameraModels.empty())
 	{
 		try
@@ -1367,7 +1640,7 @@ bool exportAssembledMesh(
 				cameraModels,
 				cameraDepths,
 				kAssembleMaxTextureDistance,
-				0.0f,
+				kAssembleMaxDepthError,
 				0.0f,
 				kAssembleMinTextureCluster,
 				std::vector<float>(),
@@ -1375,9 +1648,34 @@ bool exportAssembledMesh(
 				&vertexToPixels);
 			if(textureMesh && !textureMesh->tex_materials.empty())
 			{
+				{
+					const rtabmap::CameraModel & cm0 = cameraModels.begin()->second;
+					size_t seen = 0;
+					for(size_t i = 0; i < vertexToPixels.size(); ++i)
+					{
+						if(!vertexToPixels[i].empty()) ++seen;
+					}
+					cv::Mat d0 = cameraDepths.empty() ? cv::Mat() : cameraDepths.begin()->second;
+					cv::Mat i0 = cameraImages.empty() ? cv::Mat() : cameraImages.begin()->second;
+					UINFO("Assemble camera model: fx=%.1f fy=%.1f cx=%.1f cy=%.1f image=%dx%d rgb=%dx%d depth=%dx%d local=%s; vertices seen by >=1 camera: %d/%d",
+						cm0.fx(), cm0.fy(), cm0.cx(), cm0.cy(), cm0.imageWidth(), cm0.imageHeight(),
+						i0.cols, i0.rows, d0.cols, d0.rows, cm0.localTransform().prettyPrint().c_str(),
+						(int)seen, (int)vertexToPixels.size());
+					size_t texturedPolys = 0;
+					int camerasUsed = 0;
+					for(size_t t = 0; t + 1 < textureMesh->tex_polygons.size(); ++t)
+					{
+						texturedPolys += textureMesh->tex_polygons[t].size();
+						if(!textureMesh->tex_polygons[t].empty()) ++camerasUsed;
+					}
+					const size_t untextured = textureMesh->tex_polygons.empty() ? 0 : textureMesh->tex_polygons.back().size();
+					UINFO("Assemble createTextureMesh: %d polygons -> %d textured by %d cameras, %d unseen (dropped)",
+						(int)mesh->polygons.size(), (int)texturedPolys, camerasUsed, (int)untextured);
+				}
 				if(kAssembleCleanMesh && !textureMesh->tex_coordinates.empty())
 				{
-					rtabmap::util3d::cleanTextureMesh(*textureMesh, 0);
+					// Drop untextured (unseen) polygons and tiny textured islands.
+					rtabmap::util3d::cleanTextureMesh(*textureMesh, kAssembleTextureIslandMin);
 				}
 				std::map<int, std::vector<rtabmap::CameraModel> > calibrations;
 				for(std::map<int, rtabmap::CameraModel>::const_iterator cm = cameraModels.begin();
@@ -1400,9 +1698,21 @@ bool exportAssembledMesh(
 					false);
 				if(!atlas.empty())
 				{
-					sampleAtlasOntoCloud(*textureMesh, atlas, outCloud);
+					// Same index space as textureMesh->tex_polygons.
+					pcl::PointCloud<pcl::PointXYZRGB> meshVerts;
+					pcl::fromPCLPointCloud2(textureMesh->cloud, meshVerts);
+					flattenUnorganized(meshVerts);
+					sampleAtlasOntoCloud(*textureMesh, atlas, meshVerts);
 					UINFO("Assemble textured atlas=%dx%d sampled onto %d verts",
-						atlas.cols, atlas.rows, (int)outCloud.size());
+						atlas.cols, atlas.rows, (int)meshVerts.size());
+					if(textured)
+					{
+						buildTexturedBake(*textureMesh, meshVerts, atlas, *textured);
+						UINFO("Assemble textured mesh verts=%d faces=%d",
+							(int)textured->cloud.size(), (int)triangleCount(textured->polygons));
+					}
+					// Vertex-color fallback carries the sampled photo colors too.
+					pcl::toPCLPointCloud2(meshVerts, mesh->cloud);
 				}
 			}
 		}
@@ -1414,6 +1724,13 @@ bool exportAssembledMesh(
 		{
 			UWARN("createTextureMesh/mergeTextures failed, keeping vertex colors");
 		}
+	}
+
+	extractRgbMesh(mesh, outCloud, outPolygons);
+	if(triangleCount(outPolygons) == 0)
+	{
+		assembleMapMesh(poses, signatures, outCloud, outPolygons);
+		return triangleCount(outPolygons) > 0;
 	}
 	UINFO("Assemble exportMesh verts=%d faces=%d", (int)outCloud.size(), (int)triangleCount(outPolygons));
 	return triangleCount(outPolygons) > 0;
@@ -1494,11 +1811,132 @@ bool writeViewerMeshFile(
 	return UFile::rename(tmp, path) == 0;
 }
 
+// Textured variant: x y z s t red green blue. three.js PLYLoader maps s/t to
+// the uv attribute; colors stay as a fallback while the atlas downloads.
+bool writeTexturedMeshFile(
+	const std::string & path,
+	const pcl::PointCloud<pcl::PointXYZRGB> & cloud,
+	const std::vector<float> & uv,
+	const std::vector<pcl::Vertices> & polygons,
+	const char * comment)
+{
+	const uint32_t nVert = static_cast<uint32_t>(cloud.size());
+	if(uv.size() != size_t(nVert) * 2)
+	{
+		return false;
+	}
+	const uint32_t nFace = triangleCount(polygons);
+	std::ostringstream header;
+	header << "ply\n"
+		<< "format binary_little_endian 1.0\n"
+		<< "comment " << (comment ? comment : "rtabmap-collab textured bake") << "\n"
+		<< "comment TextureFile map.bake.jpg\n"
+		<< "element vertex " << nVert << "\n"
+		<< "property float x\nproperty float y\nproperty float z\n"
+		<< "property float s\nproperty float t\n"
+		<< "property uchar red\nproperty uchar green\nproperty uchar blue\n"
+		<< "element face " << nFace << "\n"
+		<< "property list uchar int vertex_indices\n"
+		<< "end_header\n";
+	const std::string headerStr = header.str();
+	const std::string tmp = path + ".tmp";
+	FILE * out = std::fopen(tmp.c_str(), "wb");
+	if(!out)
+	{
+		return false;
+	}
+	bool ok = std::fwrite(headerStr.data(), 1, headerStr.size(), out) == headerStr.size();
+	for(uint32_t i = 0; ok && i < nVert; ++i)
+	{
+		const pcl::PointXYZRGB & p = cloud[i];
+		const float rec[5] = {p.x, p.y, p.z, uv[2 * i], uv[2 * i + 1]};
+		const unsigned char rgb[3] = {p.r, p.g, p.b};
+		ok = std::fwrite(rec, 4, 5, out) == 5 && std::fwrite(rgb, 1, 3, out) == 3;
+	}
+	for(size_t i = 0; ok && i < polygons.size(); ++i)
+	{
+		const pcl::Vertices & poly = polygons[i];
+		if(poly.vertices.size() < 3)
+		{
+			continue;
+		}
+		for(size_t t = 0; ok && t + 2 < poly.vertices.size(); ++t)
+		{
+			const unsigned char n = 3;
+			const int32_t tri[3] = {
+				static_cast<int32_t>(poly.vertices[0]),
+				static_cast<int32_t>(poly.vertices[t + 1]),
+				static_cast<int32_t>(poly.vertices[t + 2])
+			};
+			ok = std::fwrite(&n, 1, 1, out) == 1 && std::fwrite(tri, 4, 3, out) == 3;
+		}
+	}
+	std::fclose(out);
+	if(!ok)
+	{
+		UFile::erase(tmp);
+		return false;
+	}
+	UFile::erase(path);
+	return UFile::rename(tmp, path) == 0;
+}
+
 bool writeEmptyViewerMeshFile(const std::string & path)
 {
 	pcl::PointCloud<pcl::PointXYZRGB> empty;
 	std::vector<pcl::Vertices> none;
 	return writeViewerMeshFile(path, empty, none);
+}
+
+// Same binary PLY layout as writeViewerMeshFile, but into memory (served
+// directly for the "newer than the bake" overlay).
+std::string serializeViewerMeshPly(
+	const pcl::PointCloud<pcl::PointXYZRGB> & cloud,
+	const std::vector<pcl::Vertices> & polygons,
+	const char * comment)
+{
+	const uint32_t nVert = static_cast<uint32_t>(cloud.size());
+	const uint32_t nFace = triangleCount(polygons);
+	std::ostringstream oss;
+	oss << "ply\n"
+		<< "format binary_little_endian 1.0\n"
+		<< "comment " << (comment ? comment : "rtabmap-collab live mesh vertex colors") << "\n"
+		<< "element vertex " << nVert << "\n"
+		<< "property float x\nproperty float y\nproperty float z\n"
+		<< "property uchar red\nproperty uchar green\nproperty uchar blue\n"
+		<< "element face " << nFace << "\n"
+		<< "property list uchar int vertex_indices\n"
+		<< "end_header\n";
+	std::string out = oss.str();
+	out.reserve(out.size() + nVert * 15 + nFace * 13);
+	for(uint32_t i = 0; i < nVert; ++i)
+	{
+		const pcl::PointXYZRGB & p = cloud[i];
+		const float xyz[3] = {p.x, p.y, p.z};
+		const unsigned char rgb[3] = {p.r, p.g, p.b};
+		out.append(reinterpret_cast<const char *>(xyz), sizeof(xyz));
+		out.append(reinterpret_cast<const char *>(rgb), sizeof(rgb));
+	}
+	for(size_t i = 0; i < polygons.size(); ++i)
+	{
+		const pcl::Vertices & poly = polygons[i];
+		if(poly.vertices.size() < 3)
+		{
+			continue;
+		}
+		for(size_t t = 0; t + 2 < poly.vertices.size(); ++t)
+		{
+			const unsigned char n = 3;
+			const int32_t tri[3] = {
+				static_cast<int32_t>(poly.vertices[0]),
+				static_cast<int32_t>(poly.vertices[t + 1]),
+				static_cast<int32_t>(poly.vertices[t + 2])
+			};
+			out.append(reinterpret_cast<const char *>(&n), 1);
+			out.append(reinterpret_cast<const char *>(tri), sizeof(tri));
+		}
+	}
+	return out;
 }
 
 bool writeViewerCloudFile(const std::string & path, const pcl::PointCloud<pcl::PointXYZRGB> & cloud)
@@ -1623,13 +2061,51 @@ rtabmap::Transform CollabMap::openGLWorldFromRtabmap()
 	return kOpenGLWorldFromRtabmap;
 }
 
+rtabmap::Transform CollabMap::levelArkitTagFrame(const rtabmap::Transform & arkitWorldFromTag)
+{
+	if(arkitWorldFromTag.isNull())
+	{
+		return rtabmap::Transform();
+	}
+	// ARKit world is gravity-aligned (+y up). Keep the tag center and heading,
+	// take up from gravity: a laptop lid leans back 10-20 deg and without this
+	// the whole shared frame (floor, walls, phones) pitches by that angle.
+	// columns of the rotation = tag axes expressed in the ARKit world
+	const Eigen::Vector3f up(0.0f, 1.0f, 0.0f);
+	const Eigen::Vector3f n(arkitWorldFromTag.r13(), arkitWorldFromTag.r23(), arkitWorldFromTag.r33()); // tag normal, toward the viewer
+	Eigen::Vector3f zp = n - n.dot(up) * up;
+	if(zp.norm() < 0.2f)
+	{
+		// Tag lying flat (normal near vertical): the reader stands at its bottom
+		// edge, so "toward the viewer" is minus the up edge, projected.
+		const Eigen::Vector3f e(arkitWorldFromTag.r12(), arkitWorldFromTag.r22(), arkitWorldFromTag.r32());
+		zp = -(e - e.dot(up) * up);
+	}
+	if(zp.norm() < 1e-4f)
+	{
+		return arkitWorldFromTag;
+	}
+	zp.normalize();
+	Eigen::Vector3f xp = up.cross(zp); // y x z = x for a right-handed frame
+	xp.normalize();
+	return rtabmap::Transform(
+		xp.x(), up.x(), zp.x(), arkitWorldFromTag.x(),
+		xp.y(), up.y(), zp.y(), arkitWorldFromTag.y(),
+		xp.z(), up.z(), zp.z(), arkitWorldFromTag.z());
+}
+
 rtabmap::Transform CollabMap::globalFromClientWorld(const rtabmap::Transform & arkitWorldFromTag)
 {
 	if(arkitWorldFromTag.isNull())
 	{
 		return rtabmap::Transform();
 	}
-	return kRtabmapWorldFromOpenGL * arkitWorldFromTag.inverse() * kOpenGLWorldFromRtabmap;
+	const rtabmap::Transform leveled = levelArkitTagFrame(arkitWorldFromTag);
+	if(leveled.isNull())
+	{
+		return rtabmap::Transform();
+	}
+	return kRtabmapWorldFromOpenGL * leveled.inverse() * kOpenGLWorldFromRtabmap;
 }
 
 rtabmap::Transform CollabMap::rtabmapPoseFromArkit(const rtabmap::Transform & arkitCamera)
@@ -1656,8 +2132,14 @@ CollabMap::CollabMap(const std::string & dataDir) :
 	lastIngestAt_(0),
 	meshCache_(new NodeMeshCache),
 	cloudStale_(true),
+	bakeGen_(0),
+	bakeMaxNodeId_(0),
+	lastBakeAt_(0),
+	bakeTextured_(false),
+	roomEpoch_(0),
 	roomLocked_(false),
 	lockedTagId_(kDemoTagId),
+	tagSizeM_(kDemoTagSizeM),
 	optimizeRunning_(false),
 	optimizeAgain_(false),
 	bakeRunning_(false),
@@ -1670,12 +2152,40 @@ CollabMap::CollabMap(const std::string & dataDir) :
 	cloudPath_ = dataDir_ + "/map.cloud";
 	meshPath_ = dataDir_ + "/map.mesh.ply";
 	bakedMeshPath_ = dataDir_ + "/map.mesh.baked.ply";
+	bakedAtlasPath_ = dataDir_ + "/map.mesh.baked.jpg";
+	// A bake survives a restart: its sidecar says which nodes it covers and
+	// whether it is textured.
+	if(plyFileHasFaces(bakedMeshPath_))
+	{
+		std::ifstream meta((bakedMeshPath_ + ".meta").c_str());
+		int maxNode = 0;
+		int texturedFlag = 0;
+		if(meta && (meta >> maxNode) && maxNode > 0)
+		{
+			meta >> texturedFlag;
+			bakeGen_ = 1;
+			bakeMaxNodeId_ = maxNode;
+			bakeTextured_ = texturedFlag == 1 && UFile::exists(bakedAtlasPath_) && UFile::length(bakedAtlasPath_) > 0;
+			UINFO("Restored baked mesh covering nodes <= %d (%s)", maxNode, bakeTextured_ ? "textured" : "vertex colors");
+		}
+		else
+		{
+			UFile::erase(bakedMeshPath_);
+			UFile::erase(bakedAtlasPath_);
+		}
+	}
+}
+
+std::string CollabMap::bakedAtlasPath() const
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	return bakeTextured_ ? bakedAtlasPath_ : std::string();
 }
 
 CollabMap::~CollabMap()
 {
-	delete meshCache_;
-	meshCache_ = 0;
+	// Stop and join the maintenance thread before freeing anything it uses
+	// (a heavy pass in flight touches the mesh cache and the db).
 	bakeStop_.store(true);
 	{
 		std::lock_guard<std::mutex> lock(bakeMutex_);
@@ -1685,6 +2195,8 @@ CollabMap::~CollabMap()
 	{
 		bakeThread_.join();
 	}
+	delete meshCache_;
+	meshCache_ = 0;
 }
 
 bool CollabMap::init(std::string & error)
@@ -1695,9 +2207,42 @@ bool CollabMap::init(std::string & error)
 		return false;
 	}
 	loadState();
-	// Lock is session-only: leftover clients.json "locked" / calibrated
-	// from yesterday or an e2e sim must not hide the start tag.
-	clearSessionCalibrationLocked();
+	// The alignment is a function of the raw tag pose; recompute it from the
+	// persisted pose so a rule change (e.g. leveling) applies to a room that
+	// was calibrated by an older binary.
+	for(std::map<std::string, ClientState>::iterator it = clients_.begin(); it != clients_.end(); ++it)
+	{
+		ClientState & c = it->second;
+		if(!c.hasTagXf)
+		{
+			continue;
+		}
+		const rtabmap::Transform raw(
+			c.odomFromTag[0], c.odomFromTag[1], c.odomFromTag[2],
+			c.odomFromTag[3], c.odomFromTag[4], c.odomFromTag[5], c.odomFromTag[6]);
+		if(raw.isNull())
+		{
+			continue;
+		}
+		const rtabmap::Transform t = globalFromClientWorld(raw);
+		if(!t.isNull())
+		{
+			const Eigen::Quaternionf q = t.getQuaternionf();
+			c.tagFromClient[0] = t.x();
+			c.tagFromClient[1] = t.y();
+			c.tagFromClient[2] = t.z();
+			c.tagFromClient[3] = q.x();
+			c.tagFromClient[4] = q.y();
+			c.tagFromClient[5] = q.z();
+			c.tagFromClient[6] = q.w();
+		}
+	}
+	// A restart in the middle of a walk must not throw the phones back to the
+	// tag: keep calibrations that were real detections with a stored tag
+	// transform from phones active in the last kActiveTimeoutSec, and clear
+	// everything else (yesterday's state, an e2e leftover, a fixture without
+	// a transform). The lock is then recomputed from what survived.
+	restoreSessionLockLocked();
 	if(UFile::exists(globalDbPath_))
 	{
 		syncIdsFromDatabase();
@@ -1705,6 +2250,22 @@ bool CollabMap::init(std::string & error)
 		   !UFile::exists(meshPath_) || UFile::length(meshPath_) <= 0)
 		{
 			scheduleOptimize();
+		}
+	}
+	else
+	{
+		// No database: whatever clients.json claims about the map is stale.
+		// Counts come from the db only, so an empty room reports 0 nodes.
+		globalNodes_ = 0;
+		poses_ = 0;
+		loopClosures_ = 0;
+		nextGlobalId_ = 1;
+		nextMapIdBase_ = 0;
+		for(std::map<std::string, ClientState>::iterator it = clients_.begin(); it != clients_.end(); ++it)
+		{
+			it->second.localToGlobal.clear();
+			it->second.nodes = 0;
+			it->second.lastLocalId = 0;
 		}
 	}
 	saveState();
@@ -1715,6 +2276,16 @@ bool CollabMap::init(std::string & error)
 	}
 	UINFO("Collab data dir=%s next_global_id=%d clients=%d nodes=%d live_mesh=organizedFastMesh",
 		dataDir_.c_str(), nextGlobalId_, (int)clients_.size(), globalNodes_);
+	// Rebuild the live mesh from global.db so the admin page is not blank
+	// until the next phone upload. The in-memory node cache is empty on boot.
+	if(globalNodes_ > 0)
+	{
+		std::string meshErr;
+		if(!exportLiveMeshNow(meshErr))
+		{
+			UWARN("Startup live mesh rebuild failed: %s", meshErr.c_str());
+		}
+	}
 	return true;
 }
 
@@ -1833,12 +2404,21 @@ void CollabMap::resetRoomLocked()
 	UFile::erase(cloudPath_);
 	UFile::erase(meshPath_);
 	UFile::erase(bakedMeshPath_);
+	UFile::erase(bakedMeshPath_ + ".meta");
+	UFile::erase(bakedAtlasPath_);
+	bakeTextured_ = false;
+	++roomEpoch_;
 	lastBakedNodes_ = 0;
+	bakeMaxNodeId_ = 0;
+	lastBakeAt_ = 0;
+	++bakeGen_;
 	if(meshCache_)
 	{
+		std::lock_guard<std::mutex> cacheLock(meshCacheMutex_);
 		meshCache_->nodes.clear();
 		meshCache_->decimation = 0;
 	}
+	livePosesG_.clear();
 	++meshGen_;
 	UINFO("Reset room: new global.db and empty client table");
 }
@@ -1855,6 +2435,41 @@ void CollabMap::clearSessionCalibrationLocked()
 	roomLocked_ = false;
 	lockedTagId_ = kDemoTagId;
 	lastIngestAligned_ = false;
+}
+
+void CollabMap::restoreSessionLockLocked()
+{
+	const long now = static_cast<long>(std::time(0));
+	int kept = 0;
+	int cleared = 0;
+	for(std::map<std::string, ClientState>::iterator it = clients_.begin(); it != clients_.end(); ++it)
+	{
+		ClientState & c = it->second;
+		const bool real = c.calibrated && c.detected && c.hasTagXf && c.tagId == kDemoTagId;
+		if(real && isActiveSeen(c.lastSeen, now, kActiveTimeoutSec))
+		{
+			++kept;
+			continue;
+		}
+		if(c.calibrated || c.detected || c.hasTagXf)
+		{
+			++cleared;
+		}
+		c.calibrated = false;
+		c.detected = false;
+		c.tagId = -1;
+		c.hasTagXf = false;
+	}
+	const bool wasLocked = roomLocked_;
+	roomLocked_ = false;
+	lockedTagId_ = kDemoTagId;
+	recomputeLockLocked();
+	if(!roomLocked_)
+	{
+		lastIngestAligned_ = false;
+	}
+	UINFO("Startup lock: kept %d real calibration(s) from phones active in the last %ld s, cleared %d, stored locked=%d -> %s",
+		kept, kActiveTimeoutSec, cleared, wasLocked ? 1 : 0, roomLocked_ ? "locked" : "unlocked");
 }
 
 void CollabMap::expireStaleLockLocked()
@@ -2085,12 +2700,13 @@ void CollabMap::recomputeLockLocked()
 		}
 		++count;
 	}
-	if(count >= 2 && agree && agreedTag == kDemoTagId)
+	if(count >= kLockPhonesRequired && agree && agreedTag == kDemoTagId)
 	{
 		roomLocked_ = true;
 		lockedTagId_ = agreedTag;
 		lastIngestAligned_ = true;
-		UINFO("Room locked: %d phones with real tag %d detect", count, agreedTag);
+		UINFO("Room locked: %d phones with real tag %d detect (need %d)",
+			count, agreedTag, kLockPhonesRequired);
 	}
 }
 
@@ -2158,6 +2774,8 @@ void CollabMap::applyTagPoseLocked(
 	float yaw = 0.0f;
 	world.getEulerAngles(roll, pitch, yaw);
 	client.poseYaw = yaw;
+	client.poseRoll = roll;
+	client.posePitch = pitch;
 	if(fromLive)
 	{
 		client.lastLivePoseAt = static_cast<long>(std::time(0));
@@ -2178,10 +2796,33 @@ void CollabMap::applyTagPoseLocked(
 
 void CollabMap::resetDemoRoom()
 {
+	std::lock_guard<std::mutex> db(dbMutex_);
 	std::lock_guard<std::mutex> lock(mutex_);
-	clearSessionCalibrationLocked();
+	resetRoomLocked();
 	saveState();
-	UINFO("Reset demo room: unlocked, calibration cleared, map kept");
+	UINFO("Reset demo room: map, lock, and clients cleared");
+}
+
+bool CollabMap::setTagSizeM(float meters)
+{
+	if(!std::isfinite(meters) || meters <= 0.02f || meters >= 2.0f)
+	{
+		return false;
+	}
+	std::lock_guard<std::mutex> lock(mutex_);
+	if(std::fabs(tagSizeM_ - meters) > 1e-4f)
+	{
+		UINFO("Tag size %.3f m -> %.3f m (admin page measurement)", tagSizeM_, meters);
+		tagSizeM_ = meters;
+		saveState();
+	}
+	return true;
+}
+
+float CollabMap::tagSizeM() const
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	return tagSizeM_;
 }
 
 bool CollabMap::isRoomLocked()
@@ -2294,6 +2935,8 @@ CalibrateResult CollabMap::calibrate(
 	float yaw = 0.0f;
 	tagFromClient.getEulerAngles(roll, pitch, yaw);
 	client.poseYaw = yaw;
+	client.poseRoll = roll;
+	client.posePitch = pitch;
 	if(client.trail.empty())
 	{
 		client.trail.push_back(std::make_pair(client.poseX, client.poseY));
@@ -2434,7 +3077,7 @@ std::string CollabMap::calibrateJson(const CalibrateResult & result) const
 		<< ",\"show_tag\":" << (result.showTag ? "true" : "false")
 		<< ",\"calibrated_count\":" << result.calibratedCount
 		<< ",\"tag_id\":" << result.tagId
-		<< ",\"tag_size_m\":" << kDemoTagSizeM
+		<< ",\"tag_size_m\":" << tagSizeM_
 		<< "}";
 	return oss.str();
 }
@@ -2453,15 +3096,19 @@ std::string CollabMap::demoJson(const std::string & clientId)
 		<< ",\"show_tag\":" << (roomLocked_ ? "false" : "true")
 		<< ",\"tag_id\":" << kDemoTagId
 		<< ",\"tag_family\":\"" << kDemoTagFamily << "\""
-		<< ",\"tag_size_m\":" << kDemoTagSizeM
+		<< ",\"tag_size_m\":" << tagSizeM_
 		<< ",\"calibrated_count\":" << countCalibratedLocked()
 		<< ",\"aligned\":" << (lastIngestAligned_ ? "true" : "false")
 		<< ",\"global_nodes\":" << globalNodes_
 		<< ",\"mesh_gen\":" << meshGen_
 		<< ",\"mesh_kind\":\"live\""
-		<< ",\"mesh_baked\":false"
-		<< ",\"bake_interval_sec\":0"
+		<< ",\"mesh_baked\":" << ((bakeGen_ > 0 && bakeMaxNodeId_ > 0) ? "true" : "false")
+		<< ",\"bake_gen\":" << bakeGen_
+		<< ",\"bake_max_node\":" << bakeMaxNodeId_
+		<< ",\"bake_textured\":" << (bakeTextured_ ? "true" : "false")
+		<< ",\"bake_interval_sec\":" << kBakeMinIntervalSec
 		<< ",\"pose_interval_ms\":300"
+		<< ",\"server_now\":" << static_cast<long>(std::time(0))
 		<< ",\"calibrated\":[";
 	bool firstCal = true;
 	for(std::map<std::string, ClientState>::const_iterator it = clients_.begin(); it != clients_.end(); ++it)
@@ -2486,8 +3133,26 @@ std::string CollabMap::demoJson(const std::string & clientId)
 			oss << ",";
 		}
 		firstCl = false;
+		float pathM = 0.0f;
+		for(size_t i = 1; i < it->second.trail.size(); ++i)
+		{
+			const float dx = it->second.trail[i].first - it->second.trail[i - 1].first;
+			const float dy = it->second.trail[i].second - it->second.trail[i - 1].second;
+			pathM += std::sqrt(dx * dx + dy * dy);
+		}
+		const bool locked = it->second.calibrated && it->second.detected && it->second.tagId == kDemoTagId;
 		oss << "{\"id\":\"" << jsonEscape(it->first) << "\""
-			<< ",\"locked\":" << ((it->second.calibrated && it->second.detected && it->second.tagId == kDemoTagId) ? "true" : "false")
+			<< ",\"locked\":" << (locked ? "true" : "false")
+			<< ",\"calibrated\":" << (it->second.calibrated ? "true" : "false")
+			<< ",\"detected\":" << (it->second.detected ? "true" : "false")
+			<< ",\"has_fix\":" << (it->second.hasTagXf ? "true" : "false")
+			<< ",\"tag_id\":" << it->second.tagId
+			<< ",\"nodes\":" << it->second.nodes
+			<< ",\"last_local_id\":" << it->second.lastLocalId
+			<< ",\"session_map_id\":" << it->second.sessionMapId
+			<< ",\"map_id_base\":" << it->second.mapIdBase
+			<< ",\"last_seen\":" << it->second.lastSeen
+			<< ",\"last_pose_at\":" << it->second.lastLivePoseAt
 			<< ",\"x\":" << it->second.poseX
 			<< ",\"y\":" << it->second.poseY
 			<< ",\"z\":" << it->second.poseZ
@@ -2496,6 +3161,10 @@ std::string CollabMap::demoJson(const std::string & clientId)
 			<< ",\"qz\":" << it->second.poseQz
 			<< ",\"qw\":" << it->second.poseQw
 			<< ",\"yaw\":" << it->second.poseYaw
+			<< ",\"roll\":" << it->second.poseRoll
+			<< ",\"pitch\":" << it->second.posePitch
+			<< ",\"path_m\":" << pathM
+			<< ",\"trail_n\":" << it->second.trail.size()
 			<< ",\"trail\":[";
 		for(size_t i = 0; i < it->second.trail.size(); ++i)
 		{
@@ -2515,6 +3184,39 @@ bool CollabMap::lastIngestAligned() const
 {
 	std::lock_guard<std::mutex> lock(mutex_);
 	return lastIngestAligned_;
+}
+
+bool CollabMap::bakeNow(std::string & error)
+{
+	// The maintenance thread may be in its heavy pass or its own bake; wait
+	// for it (bounded) instead of failing a manual POST /bake.
+	UTimer waitTimer;
+	bool expected = false;
+	while(!bakeRunning_.compare_exchange_strong(expected, true))
+	{
+		expected = false;
+		if(waitTimer.elapsed() > 600.0)
+		{
+			error = "a bake is already running (waited 10 min)";
+			return false;
+		}
+		uSleep(100);
+	}
+	bool ok = false;
+	try
+	{
+		ok = bakeAndExport(error);
+	}
+	catch(const UException & e)
+	{
+		error = e.what();
+	}
+	catch(const std::exception & e)
+	{
+		error = e.what();
+	}
+	bakeRunning_.store(false);
+	return ok;
 }
 
 bool CollabMap::optimizeNow(std::string & error)
@@ -2614,6 +3316,68 @@ bool CollabMap::exportLiveMeshNow(std::string & error)
 	return exportLiveMeshLocked(error);
 }
 
+int CollabMap::liveMeshNodeCount() const
+{
+	std::lock_guard<std::mutex> cacheLock(meshCacheMutex_);
+	int n = 0;
+	for(std::map<int, NodeMeshCache::Entry>::const_iterator it = meshCache_->nodes.begin(); it != meshCache_->nodes.end(); ++it)
+	{
+		if(!it->second.cloud.empty() && !it->second.polygons.empty())
+		{
+			++n;
+		}
+	}
+	return n;
+}
+
+std::string CollabMap::liveMeshSince(int sinceNode, int & nodesOut) const
+{
+	nodesOut = 0;
+	std::map<int, rtabmap::Transform> poses;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		poses = livePosesG_;
+	}
+	pcl::PointCloud<pcl::PointXYZRGB> meshCloud;
+	std::vector<pcl::Vertices> meshPolygons;
+	flattenUnorganized(meshCloud);
+	{
+		std::lock_guard<std::mutex> cacheLock(meshCacheMutex_);
+		const NodeMeshCache & cache = *meshCache_;
+		for(std::map<int, rtabmap::Transform>::const_iterator it = poses.upper_bound(sinceNode); it != poses.end(); ++it)
+		{
+			if(it->first <= 0 || it->second.isNull())
+			{
+				continue;
+			}
+			std::map<int, NodeMeshCache::Entry>::const_iterator ce = cache.nodes.find(it->first);
+			if(ce == cache.nodes.end() || ce->second.cloud.empty() || ce->second.polygons.empty())
+			{
+				continue;
+			}
+			if(meshPolygons.size() + ce->second.polygons.size() > kMeshMaxFaces)
+			{
+				break;
+			}
+			pcl::PointCloud<pcl::PointXYZRGB>::Ptr placedCloud(new pcl::PointCloud<pcl::PointXYZRGB>(ce->second.cloud));
+			placedCloud = rtabmap::util3d::transformPointCloud(placedCloud, it->second);
+			if(!placedCloud || placedCloud->empty())
+			{
+				continue;
+			}
+			flattenUnorganized(*placedCloud);
+			rtabmap::util3d::appendMesh(meshCloud, meshPolygons, *placedCloud, ce->second.polygons);
+			++nodesOut;
+		}
+	}
+	flattenUnorganized(meshCloud);
+	if(nodesOut == 0)
+	{
+		return std::string();
+	}
+	return serializeViewerMeshPly(meshCloud, meshPolygons, "rtabmap-collab live organizedFastMesh since bake");
+}
+
 bool CollabMap::exportLiveMeshLocked(std::string & error)
 {
 	if(!UFile::exists(globalDbPath_) || UFile::length(globalDbPath_) <= 0)
@@ -2653,6 +3417,16 @@ bool CollabMap::exportLiveMeshLocked(std::string & error)
 		}
 	}
 	const int nodeCount = static_cast<int>(ids.size());
+	// Tag-frame poses first (state mutex), then the cache (cache mutex). The
+	// two are never held together, so /map.mesh?since_node and room resets
+	// cannot deadlock against this export.
+	std::map<int, rtabmap::Transform> posesG = poses;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		alignPosesToTagFrame(posesG);
+		livePosesG_ = posesG;
+	}
+	std::lock_guard<std::mutex> cacheLock(meshCacheMutex_);
 	NodeMeshCache & cache = *meshCache_;
 	// Budget decimation depends on the node count; when it changes every
 	// cached node must be rebuilt at the new resolution.
@@ -2713,15 +3487,11 @@ bool CollabMap::exportLiveMeshLocked(std::string & error)
 	db->closeConnection(false);
 	delete db;
 
-	{
-		std::lock_guard<std::mutex> lock(mutex_);
-		alignPosesToTagFrame(poses);
-	}
 	pcl::PointCloud<pcl::PointXYZRGB> meshCloud;
 	std::vector<pcl::Vertices> meshPolygons;
 	flattenUnorganized(meshCloud);
 	int placed = 0;
-	for(std::map<int, rtabmap::Transform>::const_iterator it = poses.begin(); it != poses.end(); ++it)
+	for(std::map<int, rtabmap::Transform>::const_iterator it = posesG.begin(); it != posesG.end(); ++it)
 	{
 		if(it->first <= 0 || it->second.isNull())
 		{
@@ -2835,7 +3605,7 @@ std::string CollabMap::joinJson(const JoinResult & result) const
 		<< ",\"show_tag\":" << (result.showTag ? "true" : "false")
 		<< ",\"must_wait_for_lock\":" << (result.mustWaitForLock ? "true" : "false")
 		<< ",\"tag_id\":" << result.tagId
-		<< ",\"tag_size_m\":" << kDemoTagSizeM
+		<< ",\"tag_size_m\":" << tagSizeM_
 		<< "}";
 	return oss.str();
 }
@@ -2884,6 +3654,14 @@ bool CollabMap::loadState()
 	// Do not restore room_locked from disk. A leftover lock from a prior
 	// walk or sim is not a current-session lock.
 	if(const JsonValue * v = root.get("locked_tag_id")) lockedTagId_ = v->asInt(kDemoTagId);
+	if(const JsonValue * v = root.get("tag_size_m"))
+	{
+		const float m = static_cast<float>(v->asDouble(kDemoTagSizeM));
+		if(m > 0.02f && m < 2.0f)
+		{
+			tagSizeM_ = m;
+		}
+	}
 	const JsonValue * clients = root.get("clients");
 	if(clients && clients->type == JsonValue::kObject)
 	{
@@ -2989,6 +3767,7 @@ bool CollabMap::saveState() const
 	oss << "  \"last_ingest_aligned\": " << (lastIngestAligned_ ? "true" : "false") << ",\n";
 	oss << "  \"room_locked\": " << (roomLocked_ ? "true" : "false") << ",\n";
 	oss << "  \"locked_tag_id\": " << lockedTagId_ << ",\n";
+	oss << "  \"tag_size_m\": " << tagSizeM_ << ",\n";
 	oss << "  \"clients\": {\n";
 	size_t ci = 0;
 	for(std::map<std::string, ClientState>::const_iterator it = clients_.begin(); it != clients_.end(); ++it, ++ci)
@@ -3335,7 +4114,7 @@ bool CollabMap::ingestLocked(
 	}
 
 	const std::string mapIds = mapIdsSummary(rtabmap.getMemory());
-	const bool tagLock = roomLocked_ && countCalibratedLocked() >= 2;
+	const bool tagLock = roomLocked_ && countCalibratedLocked() >= kLockPhonesRequired;
 	const bool aligned = tagLock || interMapLc > 0;
 
 	rtabmap.close(true);
@@ -3499,12 +4278,31 @@ void CollabMap::bakeOnce(bool forced)
 	{
 		return;
 	}
+	long lastBake = 0;
+	int bakeMaxNode = 0;
+	int maxNodeNow = 0;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		lastBake = lastBakeAt_;
+		bakeMaxNode = bakeMaxNodeId_;
+		maxNodeNow = nextGlobalId_ - 1;
+	}
 	const long now = static_cast<long>(std::time(0));
 	const bool newNodes = nodes != lastHeavyNodes;
 	const bool idle = (now - lastIngest) >= kHeavyIdleSec;
 	const bool minGap = (now - lastHeavy) >= kHeavyPassMinIntervalSec;
 	const bool overdue = (now - lastHeavy) >= kHeavyPassMaxIntervalSec;
-	if(!forced && !(newNodes && ((idle && minGap) || overdue)))
+	const bool runHeavy = forced || (newNodes && ((idle && minGap) || overdue));
+
+	// Pretty bake: same idea, slower cadence. Only when there is something new
+	// since the last bake, the phones have paused a moment (or it is long
+	// overdue), and never twice within kBakeMinIntervalSec.
+	const bool bakeNew = maxNodeNow > bakeMaxNode;
+	const bool bakeIdle = (now - lastIngest) >= kBakeIdleSec;
+	const bool bakeGap = (now - lastBake) >= kBakeMinIntervalSec;
+	const bool bakeOverdue = (now - lastBake) >= kBakeMaxIntervalSec;
+	const bool runBake = bakeNew && bakeGap && (bakeIdle || bakeOverdue);
+	if(!runHeavy && !runBake)
 	{
 		return;
 	}
@@ -3516,19 +4314,34 @@ void CollabMap::bakeOnce(bool forced)
 	std::string err;
 	try
 	{
-		UTimer timer;
-		std::lock_guard<std::mutex> db(dbMutex_);
-		if(!optimizeAndExport(err))
+		if(runHeavy)
 		{
-			UWARN("Background optimize/export failed: %s", err.empty() ? "unknown" : err.c_str());
+			UTimer timer;
+			{
+				std::lock_guard<std::mutex> db(dbMutex_);
+				if(!optimizeAndExport(err))
+				{
+					UWARN("Background optimize/export failed: %s", err.empty() ? "unknown" : err.c_str());
+				}
+			}
+			{
+				std::lock_guard<std::mutex> lock(mutex_);
+				lastHeavyPassAt_ = static_cast<long>(std::time(0));
+				lastBakedNodes_ = globalNodes_;
+			}
+			UINFO("Heavy pass done in %.2fs (idle=%d overdue=%d forced=%d nodes=%d)",
+				timer.ticks(), idle ? 1 : 0, overdue ? 1 : 0, forced ? 1 : 0, nodes);
 		}
+		if(runBake)
 		{
-			std::lock_guard<std::mutex> lock(mutex_);
-			lastHeavyPassAt_ = static_cast<long>(std::time(0));
-			lastBakedNodes_ = globalNodes_;
+			std::string bakeErr;
+			if(!bakeAndExport(bakeErr))
+			{
+				UWARN("Background bake failed: %s", bakeErr.empty() ? "unknown" : bakeErr.c_str());
+				std::lock_guard<std::mutex> lock(mutex_);
+				lastBakeAt_ = static_cast<long>(std::time(0));
+			}
 		}
-		UINFO("Heavy pass done in %.2fs (idle=%d overdue=%d forced=%d nodes=%d)",
-			timer.ticks(), idle ? 1 : 0, overdue ? 1 : 0, forced ? 1 : 0, nodes);
 	}
 	catch(const UException & e)
 	{
@@ -3547,65 +4360,171 @@ void CollabMap::bakeOnce(bool forced)
 	bakeRunning_.store(false);
 }
 
+// The phone's post-stop "Assemble" (RTABMapApp::exportMesh optimized): voxel,
+// viewpoint normals, Poisson, quadric decimation, color radius + clean, texture
+// atlas sampled to vertices. Run periodically here so the admin view gets the
+// same smooth surface the phone shows after a scan; the live per-node meshes
+// stay on top for anything newer than the bake.
 bool CollabMap::bakeAndExport(std::string & error)
 {
+	UTimer timer;
 	std::map<int, rtabmap::Transform> poses;
 	std::map<int, rtabmap::Signature> signatures;
-	int nodes = 0;
+	int maxNodeId = 0;
+	int epoch = 0;
 	{
+		// Plain DBDriver read (no Rtabmap::init): poses plus node data, then
+		// release the lock so uploads continue while Poisson runs.
 		std::lock_guard<std::mutex> db(dbMutex_);
+		{
+			std::lock_guard<std::mutex> lock(mutex_);
+			epoch = roomEpoch_;
+		}
 		if(!UFile::exists(globalDbPath_) || UFile::length(globalDbPath_) <= 0)
 		{
 			error = "no global.db";
 			return false;
 		}
-		rtabmap::Rtabmap rtabmap;
-		try
+		rtabmap::DBDriver * dbd = rtabmap::DBDriver::create();
+		if(!dbd->openConnection(globalDbPath_, false, true))
 		{
-			rtabmap.init(combineParameters(dataDir_), globalDbPath_, false);
-		}
-		catch(const UException & e)
-		{
-			error = e.what();
+			error = "cannot open global.db for the bake";
+			delete dbd;
 			return false;
 		}
-		std::multimap<int, rtabmap::Link> constraints;
-		if(rtabmap.getMemory())
+		std::set<int> ids;
+		dbd->getAllNodeIds(ids, false, false, false);
+		poses = dbd->loadOptimizedPoses();
+		std::map<int, rtabmap::Transform> odom;
+		dbd->getAllOdomPoses(odom, false, false);
+		std::list<int> idList;
+		for(std::set<int>::const_iterator it = ids.begin(); it != ids.end(); ++it)
 		{
-			rtabmap::Transform lastLoc;
-			poses = rtabmap.getMemory()->loadOptimizedPoses(&lastLoc);
+			if(*it <= 0)
+			{
+				continue;
+			}
+			if(poses.find(*it) == poses.end())
+			{
+				std::map<int, rtabmap::Transform>::const_iterator ot = odom.find(*it);
+				if(ot != odom.end() && !ot->second.isNull())
+				{
+					poses[*it] = ot->second;
+				}
+			}
+			idList.push_back(*it);
+			maxNodeId = std::max(maxNodeId, *it);
 		}
-		rtabmap.getGraph(poses, constraints, true, true, &signatures, true, true, false, false, false, false);
-		fillMissingOdomPoses(rtabmap.getMemory(), poses);
-		rtabmap.close(false);
+		std::list<rtabmap::Signature *> loaded;
+		dbd->loadSignatures(idList, loaded);
+		if(!loaded.empty())
+		{
+			dbd->loadNodeData(loaded, true, false, false, false);
+		}
+		for(std::list<rtabmap::Signature *>::iterator it = loaded.begin(); it != loaded.end(); ++it)
+		{
+			if(*it)
+			{
+				signatures.insert(std::make_pair((*it)->id(), **it));
+				delete *it;
+			}
+		}
+		dbd->closeConnection(false);
+		delete dbd;
 		{
 			std::lock_guard<std::mutex> lock(mutex_);
-			nodes = globalNodes_;
 			alignPosesToTagFrame(poses);
 		}
 	}
+	UINFO("Bake: loaded %d nodes in %.1fs, assembling", (int)signatures.size(), timer.ticks());
 
 	pcl::PointCloud<pcl::PointXYZRGB> meshCloud;
 	std::vector<pcl::Vertices> meshPolygons;
-	if(!exportAssembledMesh(poses, signatures, meshCloud, meshPolygons) ||
+	TexturedBake textured;
+	if(!exportAssembledMesh(poses, signatures, meshCloud, meshPolygons, &textured) ||
 	   triangleCount(meshPolygons) == 0)
 	{
 		error = "assemble produced no faces";
 		return false;
 	}
-	if(!writeViewerMeshFile(
-		bakedMeshPath_, meshCloud, meshPolygons,
-		"rtabmap-collab exportMesh assemble"))
+	// Photo texture like the phone's Assemble when the atlas came out; vertex
+	// colors otherwise.
+	const bool useTexture = !textured.atlasBgr.empty() && triangleCount(textured.polygons) > 0;
+	std::vector<unsigned char> jpeg;
+	if(useTexture)
 	{
-		error = "write baked mesh failed";
-		return false;
+		std::vector<int> jpegParams;
+		jpegParams.push_back(cv::IMWRITE_JPEG_QUALITY);
+		jpegParams.push_back(88);
+		if(!cv::imencode(".jpg", textured.atlasBgr, jpeg, jpegParams))
+		{
+			jpeg.clear();
+		}
 	}
+	const bool texturedOut = useTexture && !jpeg.empty();
 	{
+		// Publish under the db lock so a reset cannot interleave with the write.
+		std::lock_guard<std::mutex> db(dbMutex_);
 		std::lock_guard<std::mutex> lock(mutex_);
-		lastBakedNodes_ = nodes;
+		if(epoch != roomEpoch_)
+		{
+			error = "room was reset during the bake; result dropped";
+			return false;
+		}
+		bool wrote = false;
+		if(texturedOut)
+		{
+			const std::string tmpJpg = bakedAtlasPath_ + ".tmp";
+			FILE * jf = std::fopen(tmpJpg.c_str(), "wb");
+			bool jpgOk = jf != 0;
+			if(jf)
+			{
+				jpgOk = std::fwrite(jpeg.data(), 1, jpeg.size(), jf) == jpeg.size();
+				std::fclose(jf);
+			}
+			if(jpgOk)
+			{
+				UFile::erase(bakedAtlasPath_);
+				jpgOk = UFile::rename(tmpJpg, bakedAtlasPath_) == 0;
+			}
+			else
+			{
+				UFile::erase(tmpJpg);
+			}
+			wrote = jpgOk && writeTexturedMeshFile(
+				bakedMeshPath_, textured.cloud, textured.uv, textured.polygons,
+				"rtabmap-collab exportMesh assemble textured");
+		}
+		if(!wrote)
+		{
+			UFile::erase(bakedAtlasPath_);
+			wrote = writeViewerMeshFile(
+				bakedMeshPath_, meshCloud, meshPolygons,
+				"rtabmap-collab exportMesh assemble");
+		}
+		if(!wrote)
+		{
+			error = "write baked mesh failed";
+			return false;
+		}
+		bakeTextured_ = texturedOut && UFile::exists(bakedAtlasPath_);
+		std::ofstream meta((bakedMeshPath_ + ".meta").c_str(), std::ios::trunc);
+		meta << maxNodeId << " " << (bakeTextured_ ? 1 : 0) << "\n";
+		++bakeGen_;
+		bakeMaxNodeId_ = maxNodeId;
+		lastBakeAt_ = static_cast<long>(std::time(0));
 	}
-	UINFO("Wrote unused baked mesh %s verts=%d faces=%d nodes=%d",
-		bakedMeshPath_.c_str(), (int)meshCloud.size(), (int)meshPolygons.size(), nodes);
+	if(texturedOut)
+	{
+		UINFO("Bake: wrote textured %s verts=%d faces=%d atlas=%dx%d jpeg=%dKB up to node %d in %.1fs",
+			bakedMeshPath_.c_str(), (int)textured.cloud.size(), (int)triangleCount(textured.polygons),
+			textured.atlasBgr.cols, textured.atlasBgr.rows, (int)(jpeg.size() / 1024), maxNodeId, timer.elapsed());
+	}
+	else
+	{
+		UINFO("Bake: wrote %s verts=%d faces=%d (vertex colors) up to node %d in %.1fs",
+			bakedMeshPath_.c_str(), (int)meshCloud.size(), (int)meshPolygons.size(), maxNodeId, timer.elapsed());
+	}
 	return true;
 }
 
@@ -3867,7 +4786,7 @@ bool CollabMap::optimizeAndExport(std::string & error)
 	std::map<int, rtabmap::Transform> assemblePoses = poses;
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
-		lastIngestAligned_ = (roomLocked_ && countCalibratedLocked() >= 2) || interMapLc > 0;
+		lastIngestAligned_ = (roomLocked_ && countCalibratedLocked() >= kLockPhonesRequired) || interMapLc > 0;
 		interMapLc_ = interMapLc;
 		alignPosesToTagFrame(assemblePoses);
 		poses_ = newPoses;
@@ -4214,9 +5133,24 @@ bool CollabMap::writeDemoDeltaDb(
 		error = e.what();
 		return false;
 	}
-	cv::Mat rgb(16, 16, CV_8UC3, cv::Scalar(60, 80, 100));
-	cv::Mat depth(16, 16, CV_16UC1, cv::Scalar(800));
-	rtabmap::CameraModel model(200.0, 200.0, 8.0, 8.0, rtabmap::Transform::getIdentity(), 0, cv::Size(16, 16));
+	// A frame that meshes: 128x96, a wall ~0.8 m away tilted so depth varies,
+	// checkerboard colors. Small enough to sync in one request, big enough for
+	// organizedFastMesh and the Poisson bake to produce faces in the tests.
+	const int w = 128;
+	const int h = 96;
+	cv::Mat rgb(h, w, CV_8UC3);
+	cv::Mat depth(h, w, CV_16UC1);
+	for(int v = 0; v < h; ++v)
+	{
+		for(int u = 0; u < w; ++u)
+		{
+			const bool light = ((u / 16) + (v / 16)) % 2 == 0;
+			rgb.at<cv::Vec3b>(v, u) = light ? cv::Vec3b(200, 190, 170) : cv::Vec3b(70, 90, 120);
+			// 0.7 m at the left edge to 0.95 m at the right edge (mm).
+			depth.at<unsigned short>(v, u) = static_cast<unsigned short>(700 + (250 * u) / (w - 1));
+		}
+	}
+	rtabmap::CameraModel model(100.0, 100.0, w / 2.0, h / 2.0, rtabmap::Transform::getIdentity(), 0, cv::Size(w, h));
 	rtabmap::SensorData data(rgb, depth, model, localId > 0 ? localId : 1, 1.0);
 	if(!rtabmap.process(data, rtabmap::Transform(x, y, z, 0, 0, 0, 1)))
 	{

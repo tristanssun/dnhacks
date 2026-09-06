@@ -186,6 +186,22 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
             self.toastLabel.isHidden = true
         }
     }
+
+    func showCollabUnreachable(url: String, detail: String?) {
+        let reason = (detail?.isEmpty == false) ? detail! : "The request timed out."
+        let message = """
+        \(url)
+
+        \(reason)
+
+        On this phone: Settings → Privacy & Security → Local Network → enable Rtab-ian.
+
+        Stay on the same Wi-Fi as the Mac.
+        """
+        let alert = UIAlertController(title: "Cannot reach collab server", message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
+    }
     
     func resetNoTouchTimer(_ showHud: Bool = false) {
         if(showHud)
@@ -589,6 +605,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
     
     @objc func appMovedToForeground() {
         print("appMovedToForeground()")
+        CollabDiscovery.shared.start()
         updateDisplayFromDefaults()
         updateState(state: mState)
         
@@ -1653,7 +1670,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
         seeTagButton.isHidden = !(show && !thisPhoneCalibrated)
         if show {
             if thisPhoneCalibrated {
-                calibBanner.text = "  02 LOCK   Waiting for the other soldier  "
+                calibBanner.text = "  02 LOCK   Waiting for the other unit  "
             } else {
                 calibBanner.text = "  01 ACQUIRE   Point both phones at the start tag  "
             }
@@ -2116,10 +2133,12 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
         present(joining, animated: true)
 
         DispatchQueue.global(qos: .userInitiated).async {
-            guard let join = self.collabSync.joinSession(), join.ok else {
+            let join = self.collabSync.joinSession()
+            guard let join = join, join.ok else {
+                let url = self.collabSync.normalizedServerURL()
                 DispatchQueue.main.async {
                     joining.dismiss(animated: true) {
-                        self.showToast(message: "Cannot reach collab server", seconds: 4)
+                        self.showCollabUnreachable(url: url, detail: join?.error)
                     }
                 }
                 return
@@ -2130,7 +2149,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
                 if !self.collabSync.downloadMapDb(to: tmpDatabase.path) {
                     DispatchQueue.main.async {
                         joining.dismiss(animated: true) {
-                            self.showToast(message: "Cannot reach collab server", seconds: 4)
+                            self.showCollabUnreachable(url: self.collabSync.normalizedServerURL(), detail: "Map download failed.")
                         }
                     }
                     return

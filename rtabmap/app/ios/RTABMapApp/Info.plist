@@ -33,6 +33,11 @@
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>RTAB-Map shares the live room map with other phones on the local network.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_rtabmap-collab._tcp</string>
+		<string>_rtabmap-phone._tcp</string>
+	</array>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
 	<key>NSCameraUsageDescription</key>

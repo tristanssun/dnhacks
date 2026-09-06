@@ -34,6 +34,9 @@ SET(SRC_FILES
 ADD_EXECUTABLE(rtabmap-collab-server ${SRC_FILES})
 
 TARGET_LINK_LIBRARIES(rtabmap-collab-server rtabmap::core)
+IF(APPLE)
+	TARGET_LINK_LIBRARIES(rtabmap-collab-server "-framework CoreFoundation")
+ENDIF(APPLE)
 
 IF(PCL_INCLUDE_DIRS)
 	TARGET_INCLUDE_DIRECTORIES(rtabmap-collab-server SYSTEM PRIVATE ${PCL_INCLUDE_DIRS})

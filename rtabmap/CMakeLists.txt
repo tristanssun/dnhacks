@@ -477,6 +477,15 @@ IF(WITH_QT)
     ENDIF(QT4_FOUND OR Qt5_FOUND OR Qt6_FOUND)
 ENDIF(WITH_QT)
 
+IF(NOT WITH_QT AND NOT VTK_FOUND)
+    # Headless builds (collab server) still want util3d::meshDecimation, which
+    # needs PCL's VTK surface module. Optional: fall back to DISABLE_VTK below.
+    FIND_PACKAGE(VTK QUIET)
+    IF(VTK_FOUND)
+        MESSAGE(STATUS "Found VTK ${VTK_VERSION} (headless): mesh decimation enabled")
+    ENDIF(VTK_FOUND)
+ENDIF()
+
 IF(NOT VTK_FOUND)
     # Newest PCL versions won't set -DDISABLE_VTK
     IF(NOT "${PCL_DEFINITIONS}" MATCHES "-DDISABLE_VTK")

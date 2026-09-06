@@ -6,6 +6,141 @@
 //
 
 import Foundation
+import Network
+
+enum CollabBonjour {
+    static let serverType = "_rtabmap-collab._tcp."
+    static let phoneType = "_rtabmap-phone._tcp."
+}
+
+// Browse/publish Bonjour so iOS actually shows the Local Network prompt.
+// URLSession to a raw LAN IP often times out with no dialog, which is why
+// one phone can join and the other cannot after a reinstall.
+final class CollabDiscovery: NSObject, NetServiceBrowserDelegate, NetServiceDelegate {
+    static let shared = CollabDiscovery()
+
+    private let browser = NetServiceBrowser()
+    private var privacyService: NetService?
+    private var resolving: [NetService] = []
+    private var nwBrowser: NWBrowser?
+    private let lock = NSLock()
+    private var foundURL: String?
+    private let foundSignal = DispatchSemaphore(value: 0)
+    private var signaled = false
+    private var started = false
+
+    func start() {
+        if !started {
+            let privacy = NetService(domain: "local.", type: CollabBonjour.phoneType, name: "Rtab-ian", port: 9)
+            privacy.publish()
+            privacyService = privacy
+
+            let params = NWParameters()
+            params.includePeerToPeer = true
+            let type = String(CollabBonjour.serverType.dropLast())
+            let nw = NWBrowser(for: .bonjour(type: type, domain: "local."), using: params)
+            nw.stateUpdateHandler = { state in
+                NSLog("CollabSync: local-network browse %@", String(describing: state))
+            }
+            nw.start(queue: .main)
+            nwBrowser = nw
+            browser.delegate = self
+            started = true
+        }
+        browser.stop()
+        browser.searchForServices(ofType: CollabBonjour.serverType, inDomain: "local.")
+        NSLog("CollabSync: browsing %@", CollabBonjour.serverType)
+    }
+
+    func waitForURL(timeout: TimeInterval) -> String? {
+        lock.lock()
+        if let foundURL = foundURL {
+            lock.unlock()
+            return foundURL
+        }
+        lock.unlock()
+        _ = foundSignal.wait(timeout: .now() + timeout)
+        lock.lock()
+        defer { lock.unlock() }
+        return foundURL
+    }
+
+    func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {
+        NSLog("CollabSync: bonjour saw %@ type=%@", service.name, service.type)
+        service.delegate = self
+        service.resolve(withTimeout: 5)
+        resolving.append(service)
+    }
+
+    func netServiceBrowser(_ browser: NetServiceBrowser, didNotSearch errorDict: [String : NSNumber]) {
+        NSLog("CollabSync: bonjour browse failed %@", String(describing: errorDict))
+    }
+
+    func netServiceDidResolveAddress(_ sender: NetService) {
+        guard let host = ipv4Host(from: sender), sender.port > 0 else {
+            NSLog("CollabSync: bonjour resolve had no LAN IPv4 name=%@", sender.name)
+            return
+        }
+        let url = "http://\(host):\(sender.port)"
+        lock.lock()
+        foundURL = url
+        let first = !signaled
+        signaled = true
+        lock.unlock()
+        UserDefaults.standard.set(url, forKey: "CollabServerURL")
+        NSLog("CollabSync: bonjour found %@", url)
+        if first {
+            foundSignal.signal()
+        }
+    }
+
+    func netService(_ sender: NetService, didNotResolve errorDict: [String : NSNumber]) {
+        NSLog("CollabSync: bonjour resolve failed %@ %@", sender.name, String(describing: errorDict))
+    }
+
+    private func ipv4Host(from service: NetService) -> String? {
+        guard let addresses = service.addresses else { return nil }
+        let preferred = CollabDiscovery.compiledHost()
+        var fallback: String?
+        for data in addresses {
+            let host: String? = data.withUnsafeBytes { raw -> String? in
+                guard raw.count >= MemoryLayout<sockaddr>.size, let base = raw.baseAddress else {
+                    return nil
+                }
+                let family = base.assumingMemoryBound(to: sockaddr.self).pointee.sa_family
+                guard family == sa_family_t(AF_INET) else { return nil }
+                var addr = base.assumingMemoryBound(to: sockaddr_in.self).pointee
+                var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+                inet_ntop(AF_INET, &addr.sin_addr, &buf, socklen_t(INET_ADDRSTRLEN))
+                return String(cString: buf)
+            }
+            guard let host = host, CollabDiscovery.isLanIPv4(host) else { continue }
+            if host == preferred {
+                return host
+            }
+            if fallback == nil {
+                fallback = host
+            }
+        }
+        return fallback
+    }
+
+    static func compiledHost() -> String? {
+        guard let url = URL(string: CollabSync.defaultServerURL) else { return nil }
+        return url.host
+    }
+
+    static func isLanIPv4(_ host: String) -> Bool {
+        let parts = host.split(separator: ".").compactMap { Int($0) }
+        guard parts.count == 4 else { return false }
+        if parts[0] == 127 || parts[0] == 0 { return false }
+        if parts[0] == 169 && parts[1] == 254 { return false }
+        if parts[0] == 192 && parts[1] == 168 { return true }
+        if parts[0] == 10 { return true }
+        if parts[0] == 172 && parts[1] >= 16 && parts[1] <= 31 { return true }
+        return false
+    }
+}
 
 class CollabSync {
     static let clientIdKey = "CollabClientId"
@@ -111,18 +246,61 @@ class CollabSync {
         return urlString
     }
 
+    private func joinFail(_ message: String) -> JoinResult {
+        NSLog("CollabSync: POST /join failed: %@", message)
+        return JoinResult(
+            ok: false,
+            mode: "",
+            activeClients: 0,
+            globalNodes: 0,
+            mustDownload: false,
+            locked: false,
+            showTag: false,
+            mustWaitForLock: false,
+            tagId: DemoTag.id,
+            error: message
+        )
+    }
+
     func joinSession() -> JoinResult? {
         clientId = CollabSync.persistentClientId()
-        serverURL = UserDefaults.standard.string(forKey: "CollabServerURL") ?? CollabSync.defaultServerURL
-        guard let url = URL(string: normalizedServerURL() + "/join") else {
-            NSLog("CollabSync: invalid join URL %@", serverURL)
+        let discovered = CollabDiscovery.shared.waitForURL(timeout: 2)
+        var candidates: [String] = []
+        let compiled = CollabSync.defaultServerURL
+        candidates.append(compiled)
+        if let discovered = discovered {
+            candidates.append(discovered)
+        }
+        if let stored = UserDefaults.standard.string(forKey: "CollabServerURL"), !stored.isEmpty {
+            candidates.append(stored)
+        }
+        var seen = Set<String>()
+        var lastError = "no server URL"
+        for raw in candidates {
+            var urlString = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            while urlString.hasSuffix("/") { urlString.removeLast() }
+            if urlString.isEmpty || !seen.insert(urlString).inserted { continue }
+            serverURL = urlString
+            if let result = postJoin(to: urlString) {
+                UserDefaults.standard.set(urlString, forKey: "CollabServerURL")
+                return result
+            } else {
+                lastError = "cannot reach \(urlString)"
+            }
+        }
+        return joinFail(lastError)
+    }
+
+    private func postJoin(to server: String) -> JoinResult? {
+        guard let url = URL(string: server + "/join") else {
+            NSLog("CollabSync: invalid join URL %@", server)
             return nil
         }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue(clientId, forHTTPHeaderField: "X-Client-Id")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.timeoutInterval = 15
+        request.timeoutInterval = 8
 
         let semaphore = DispatchSemaphore(value: 0)
         var responseData: Data?
@@ -134,24 +312,25 @@ class CollabSync {
             statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
             semaphore.signal()
         }.resume()
-        _ = semaphore.wait(timeout: .now() + 20)
+        _ = semaphore.wait(timeout: .now() + 10)
 
         if let requestError = requestError {
-            NSLog("CollabSync: POST /join failed: %@", requestError.localizedDescription)
+            NSLog("CollabSync: POST /join failed %@ %@", server, requestError.localizedDescription)
             return nil
         }
         guard statusCode == 200, let responseData = responseData,
               let obj = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any] else {
             let detail = responseData.flatMap { String(data: $0, encoding: .utf8) } ?? ""
-            NSLog("CollabSync: POST /join HTTP %d %@", statusCode, detail)
+            NSLog("CollabSync: POST /join HTTP %d %@ %@", statusCode, server, detail)
             return nil
         }
         let ok = (obj["ok"] as? Bool) ?? false
         if !ok {
-            NSLog("CollabSync: POST /join ok=false %@", String(describing: obj["error"]))
+            NSLog("CollabSync: POST /join ok=false %@ %@", server, String(describing: obj["error"]))
             return nil
         }
         let locked = (obj["locked"] as? Bool) ?? false
+        DemoTag.updateSize(fromServer: obj["tag_size_m"])
         let result = JoinResult(
             ok: true,
             mode: (obj["mode"] as? String) ?? "",
@@ -164,8 +343,8 @@ class CollabSync {
             tagId: jsonInt(obj, "tag_id") ?? DemoTag.id,
             error: ""
         )
-        NSLog("CollabSync: join mode=%@ active=%d nodes=%d must_download=%d locked=%d mustWait=%d",
-              result.mode, result.activeClients, result.globalNodes, result.mustDownload ? 1 : 0,
+        NSLog("CollabSync: join url=%@ mode=%@ active=%d nodes=%d locked=%d mustWait=%d",
+              server, result.mode, result.activeClients, result.globalNodes,
               result.locked ? 1 : 0, result.mustWaitForLock ? 1 : 0)
         return result
     }
@@ -244,6 +423,7 @@ class CollabSync {
                 }
             }
         }
+        DemoTag.updateSize(fromServer: obj["tag_size_m"])
         return DemoStatus(
             ok: (obj["ok"] as? Bool) ?? true,
             locked: locked,
@@ -286,6 +466,7 @@ class CollabSync {
         NSLog("CollabSync: calibrate ok locked=%d show_tag=%d count=%d",
               locked ? 1 : 0, ((obj["show_tag"] as? Bool) ?? !locked) ? 1 : 0,
               jsonInt(obj, "calibrated_count") ?? 0)
+        DemoTag.updateSize(fromServer: obj["tag_size_m"])
         return DemoStatus(
             ok: true,
             locked: locked,

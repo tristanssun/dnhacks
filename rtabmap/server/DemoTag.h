@@ -73,127 +73,113 @@ inline std::string adminPageHtml()
 <title>CMCS</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
 :root{
-  --ink:#05070A;
-  --ink-2:#0A0D11;
-  --panel:#101318;
-  --panel-2:#161A1F;
-  --line:rgba(243,245,244,.14);
-  --line-2:rgba(243,245,244,.08);
-  --text:#F3F5F4;
-  --muted:rgba(243,245,244,.58);
-  --dim:rgba(243,245,244,.34);
-  --orange:#E3942A;
-  --orange-2:#C96A1A;
-  --go:#47FF51;
-  --go-dim:rgba(71,255,81,.16);
-  --forest:#6B8A5A;
-  --bad:#E06B5C;
-  --cta:#F3F5F4;
+  --page:#161514;
+  --panel:#1F1E1D;
+  --card:#2B2A28;
+  --border:#454340;
+  --text-2:#A19F9B;
+  --text-1:#DBDAD9;
+  --sans:Inter, "Segoe UI", system-ui, sans-serif;
+  --mono:"IBM Plex Mono", ui-monospace, monospace;
 }
 *{box-sizing:border-box;}
-html,body{margin:0;height:100%;background:var(--ink);color:var(--text);
-  font-family:Inter, "Segoe UI", sans-serif; letter-spacing:.01em;}
-body{display:flex;flex-direction:column;min-height:100%;background:
-  radial-gradient(1200px 700px at 70% -10%, rgba(227,148,42,.08), transparent 55%),
-  radial-gradient(900px 500px at -10% 110%, rgba(71,255,81,.04), transparent 50%),
-  var(--ink);}
+html,body{margin:0;height:100%;background:var(--page);color:var(--text-1);
+  font-family:var(--sans);font-size:14px;font-weight:400;line-height:1.4;}
+body{display:flex;flex-direction:column;min-height:100%;background:var(--page);}
 #banner{display:none;}
 #top{
-  flex:0 0 58px;display:flex;align-items:center;justify-content:space-between;
-  padding:0 22px;border-bottom:1px solid var(--line);background:rgba(5,7,10,.86);
+  flex:0 0 56px;display:flex;align-items:center;justify-content:space-between;
+  padding:0 22px;border-bottom:1px solid var(--border);background:var(--panel);
   backdrop-filter:blur(10px);z-index:3;
 }
-.brand{display:flex;align-items:center;gap:14px;min-width:0;}
-.mark{width:28px;height:28px;flex:0 0 28px;}
-.brand-copy{display:flex;flex-direction:column;gap:2px;min-width:0;}
-.brand-kicker{font:600 10px/1 Barlow Condensed, sans-serif;letter-spacing:.22em;
-  text-transform:uppercase;color:var(--forest);}
-.brand-name{font:700 22px/.9 Barlow Condensed, sans-serif;letter-spacing:.08em;}
-.phases{display:flex;align-items:stretch;gap:0;height:58px;}
-.phase{display:flex;align-items:center;gap:10px;padding:0 18px;position:relative;
-  color:var(--dim);border-left:1px solid var(--line-2);}
+.brand{display:flex;align-items:center;gap:12px;min-width:0;}
+.mark{width:24px;height:24px;flex:0 0 24px;}
+.brand-copy{display:flex;flex-direction:column;gap:1px;min-width:0;}
+.brand-kicker{font-size:12px;font-weight:400;line-height:1.2;color:var(--text-2);}
+.brand-name{font-size:16px;font-weight:600;line-height:1.2;}
+.phases{display:flex;align-items:stretch;gap:0;height:56px;}
+.phase{display:flex;align-items:center;gap:10px;padding:0 16px;position:relative;
+  color:var(--text-2);border-left:1px solid var(--border);}
 .phase:first-child{border-left:0;}
-.phase span{font:600 11px/1 Barlow Condensed, sans-serif;letter-spacing:.16em;text-transform:uppercase;}
-.phase.on{color:var(--text);}
-.phase.on:after{content:"";position:absolute;left:18px;right:18px;bottom:0;height:2px;background:var(--orange);}
-.meta{display:flex;align-items:center;gap:16px;font:400 11px/1 "IBM Plex Mono", ui-monospace, monospace;color:var(--muted);}
+.phase span{font-size:13px;font-weight:500;letter-spacing:.03em;text-transform:uppercase;}
+.phase.on{color:var(--text-1);}
+.phase.on:after{content:"";position:absolute;left:16px;right:16px;bottom:0;height:2px;background:var(--text-1);}
+.meta{display:flex;align-items:center;gap:16px;font-size:13px;font-weight:400;color:var(--text-2);}
 .link{display:flex;align-items:center;gap:8px;}
-.pulse{width:7px;height:7px;border-radius:50%;background:var(--bad);box-shadow:0 0 0 0 rgba(224,107,92,.4);}
-.link.ok .pulse{background:var(--go);box-shadow:0 0 0 4px var(--go-dim);animation:pulse 1.8s ease-out infinite;}
-@keyframes pulse{0%{box-shadow:0 0 0 0 var(--go-dim);}70%{box-shadow:0 0 0 8px transparent;}100%{box-shadow:0 0 0 0 transparent;}}
-#shell{flex:1 1 auto;min-height:0;display:grid;grid-template-columns:280px minmax(0,1fr);gap:0;}
-#side{min-height:0;display:flex;flex-direction:column;background:var(--panel);border-right:1px solid var(--line);overflow:auto;}
-.side-head{padding:18px 18px 10px;display:flex;align-items:baseline;justify-content:space-between;}
-.side-head h2{margin:0;font:600 12px/1 Barlow Condensed, sans-serif;letter-spacing:.2em;text-transform:uppercase;color:var(--muted);}
-.side-head em{font:400 11px/1 "IBM Plex Mono", ui-monospace, monospace;color:var(--dim);font-style:normal;}
-#dots{display:flex;flex-direction:column;gap:8px;margin:0;padding:0 14px 14px;}
-.dot{display:flex;align-items:flex-start;gap:10px;padding:12px 12px 13px;border:1px solid var(--line);
-  background:var(--ink-2);position:relative;overflow:hidden;}
-.lamp{width:8px;height:8px;margin-top:5px;flex:0 0 8px;border-radius:50%;background:#2a2f34;}
-.lamp.on{background:var(--go);box-shadow:0 0 0 4px var(--go-dim);}
-.dot-meta{min-width:0;flex:1;position:relative;z-index:1;}
-.dot-id{font:600 13px/1.15 Inter, sans-serif;}
-.dot-state{margin-top:4px;font:500 11px/1 "IBM Plex Mono", ui-monospace, monospace;color:var(--orange);letter-spacing:.08em;}
-.dot.on .dot-state{color:var(--go);}
-.dot-pose{margin-top:8px;font:400 11px/1.45 "IBM Plex Mono", ui-monospace, monospace;color:var(--muted);white-space:pre;}
-.side-actions{margin-top:auto;padding:14px;display:flex;flex-direction:column;gap:8px;border-top:1px solid var(--line);}
-.btn{appearance:none;height:36px;border:1px solid var(--line);background:transparent;
-  color:var(--text);font:600 12px/1 Barlow Condensed, sans-serif;letter-spacing:.16em;
-  text-transform:uppercase;cursor:pointer;text-decoration:none;display:flex;align-items:center;justify-content:center;gap:8px;}
-.btn:hover{border-color:var(--orange);color:#fff;}
-.btn:disabled{opacity:.4;cursor:wait;border-color:var(--line);}
-.btn.solid{background:var(--cta);color:var(--ink);border-color:var(--cta);}
-.btn.solid:hover{background:#fff;border-color:#fff;}
-.btn.ghost-bad:hover{border-color:var(--bad);color:var(--bad);}
-.viewport{min-height:0;display:flex;flex-direction:column;background:#05070A;position:relative;}
+.pulse{width:7px;height:7px;border-radius:50%;background:var(--text-2);}
+.link.ok .pulse{background:var(--text-1);}
+#clock{font-family:var(--mono);font-size:13px;font-weight:400;color:var(--text-1);}
+#shell{flex:1 1 auto;min-height:0;display:grid;grid-template-columns:300px minmax(0,1fr);gap:0;}
+#side{min-height:0;display:flex;flex-direction:column;background:var(--panel);border-right:1px solid var(--border);overflow:auto;}
+.tree{margin:0;padding:8px 0;flex:1 1 auto;}
+.tree-kids{display:none;}
+.tree-node.open>.tree-kids{display:block;}
+.tree-row{display:flex;align-items:center;gap:6px;height:26px;padding:0 10px 0 calc(8px + var(--d,0)*14px);
+  cursor:default;user-select:none;}
+.tree-row[data-toggle]{cursor:pointer;}
+.tree-row:hover{background:var(--card);}
+.tree-chev,.tree-ico{flex:0 0 12px;width:12px;height:12px;color:var(--text-2);display:block;}
+.tree-ico{width:14px;height:14px;flex:0 0 14px;}
+.tree-chev{transform:rotate(0deg);transform-origin:50% 50%;}
+.tree-row.open .tree-chev{transform:rotate(90deg);}
+.tree-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-size:13px;font-weight:400;color:var(--text-1);}
+.tree-row.leaf .tree-name{color:var(--text-2);}
+.tree-id{font-weight:600;text-transform:uppercase;}
+.tree-val{flex:0 1 auto;font-family:var(--mono);font-size:12px;font-weight:400;color:var(--text-1);}
+.tree-state{font-size:12px;font-weight:400;color:var(--text-2);}
+.lamp{width:7px;height:7px;flex:0 0 7px;border-radius:50%;background:var(--border);}
+.lamp.on{background:var(--text-1);}
+.side-actions{margin-top:auto;padding:14px;display:flex;flex-direction:column;gap:8px;border-top:1px solid var(--border);}
+.btn{appearance:none;height:36px;border:1px solid var(--border);background:transparent;
+  color:var(--text-1);font-family:var(--sans);font-size:13px;font-weight:500;line-height:1;
+  cursor:pointer;text-decoration:none;display:flex;align-items:center;justify-content:center;gap:8px;}
+.btn:hover{border-color:var(--text-1);color:var(--text-1);}
+.btn:disabled{opacity:.4;cursor:wait;border-color:var(--border);}
+.btn.solid{background:var(--text-1);color:var(--page);border-color:var(--text-1);}
+.btn.solid:hover{background:var(--text-1);border-color:var(--text-1);}
+.btn.ghost-bad:hover{border-color:var(--text-2);color:var(--text-2);}
+.viewport{min-height:0;display:flex;flex-direction:column;background:var(--page);position:relative;}
 .view-stage{flex:1;min-height:0;position:relative;display:flex;}
-#calib-tag{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:36px 28px 48px;gap:22px;}
-.tag-kicker{font:600 11px/1 Barlow Condensed, sans-serif;letter-spacing:.22em;text-transform:uppercase;color:var(--forest);}
-.tag-title{margin:0;font:700 42px/.9 Barlow Condensed, sans-serif;letter-spacing:.02em;text-align:center;}
-.tag-copy{margin:0;max-width:420px;text-align:center;color:var(--muted);font:400 14px/1.45 Inter, sans-serif;}
-.reticle{position:relative;padding:22px;background:#fff;}
-.reticle img{display:block;width:min(42vh,42vw,420px);height:min(42vh,42vw,420px);
+#calib-tag{flex:1;min-height:0;overflow:hidden;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;}
+.reticle{position:relative;padding:8px;background:#fff;flex:0 0 auto;
+  display:flex;align-items:center;justify-content:center;
+  max-width:min(72vmin,100%);max-height:min(72vmin,100%);}
+/* The PNG already carries a 1-cell quiet zone: the black square is 60% of the
+   image. Size against the remaining pane. */
+.reticle img{display:block;width:min(72vmin,100%);height:auto;max-height:min(72vmin,100%);aspect-ratio:1/1;
   background:#fff;image-rendering:pixelated;image-rendering:crisp-edges;}
-.tag-spec{font:400 11px/1 "IBM Plex Mono", ui-monospace, monospace;color:var(--dim);letter-spacing:.06em;}
 #live{display:none;flex:1;min-height:0;width:100%;height:100%;}
 #live.show{display:flex;}
-#map-wrap{position:relative;flex:1;width:100%;height:100%;background:#05070A;border:0;}
+#map-wrap{position:relative;flex:1;width:100%;height:100%;background:var(--page);border:0;}
 #map{width:100%;height:100%;display:block;}
 #map-msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;
-  font:600 13px/1 Barlow Condensed, sans-serif;letter-spacing:.18em;text-transform:uppercase;color:var(--muted);}
+  font-size:13px;font-weight:500;color:var(--text-2);}
 #map-msg.hidden{display:none;}
 .view-tools{position:absolute;left:16px;bottom:16px;display:flex;gap:8px;z-index:2;}
-.chip{appearance:none;height:28px;padding:0 12px;border:1px solid var(--line);background:rgba(5,7,10,.72);
-  color:var(--text);font:600 11px/1 Barlow Condensed, sans-serif;letter-spacing:.14em;text-transform:uppercase;cursor:pointer;}
-.chip:hover,.chip.on{border-color:var(--orange);color:#fff;}
+.chip{appearance:none;height:28px;padding:0 12px;border:1px solid var(--border);background:var(--card);
+  color:var(--text-1);font-family:var(--sans);font-size:13px;font-weight:500;cursor:pointer;}
+.chip:hover,.chip.on{border-color:var(--text-1);color:var(--text-1);}
 .live-stats{position:absolute;top:14px;right:16px;display:flex;gap:8px;z-index:2;pointer-events:none;}
-.stat{min-width:72px;padding:8px 10px;border:1px solid var(--line);background:rgba(5,7,10,.72);}
-.stat b{display:block;font:500 10px/1 Barlow Condensed, sans-serif;letter-spacing:.16em;text-transform:uppercase;color:var(--dim);}
-.stat em{display:block;margin-top:5px;font:600 14px/1 "IBM Plex Mono", ui-monospace, monospace;font-style:normal;color:var(--text);}
-#foot{
-  flex:0 0 30px;display:flex;align-items:center;padding:0 16px;
-  border-top:1px solid var(--line);background:var(--ink-2);
-  font:400 11px/1 "IBM Plex Mono", ui-monospace, monospace;color:var(--muted);
-}
-#footer{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-#confirm{display:none;position:fixed;inset:0;background:rgba(5,7,10,.72);z-index:20;
+.stat{min-width:72px;padding:8px 10px;border:1px solid var(--border);background:var(--card);}
+.stat b{display:block;font-size:12px;font-weight:400;color:var(--text-2);}
+.stat em{display:block;margin-top:4px;font-family:var(--mono);font-size:13px;font-weight:500;font-style:normal;color:var(--text-1);}
+#confirm{display:none;position:fixed;inset:0;background:var(--page);z-index:20;
   align-items:center;justify-content:center;padding:24px;}
 #confirm.open{display:flex;}
-.sheet{width:min(420px,100%);background:var(--panel);border:1px solid var(--line);padding:28px 26px 22px;
-  box-shadow:0 24px 80px rgba(0,0,0,.45);}
-.sheet:before{content:"";display:block;height:2px;background:var(--orange);margin:-28px -26px 20px;}
-.sheet h3{margin:0 0 8px;font:700 28px/.9 Barlow Condensed, sans-serif;letter-spacing:.04em;}
-.sheet p{margin:0 0 22px;color:var(--muted);font:400 14px/1.45 Inter, sans-serif;}
+.sheet{width:min(420px,100%);background:var(--panel);border:1px solid var(--border);padding:24px;}
+.sheet:before{content:"";display:block;height:2px;background:var(--text-1);margin:-24px -24px 20px;}
+.sheet h3{margin:0 0 8px;font-size:16px;font-weight:600;line-height:1.25;}
+.sheet p{margin:0 0 22px;color:var(--text-2);font-size:14px;font-weight:400;line-height:1.45;}
 .sheet-row{display:flex;gap:8px;}
 .sheet-row .btn{flex:1;}
 @media (max-width:900px){
   .phases{display:none;}
   #shell{grid-template-columns:1fr;}
-  #side{max-height:34vh;border-right:0;border-bottom:1px solid var(--line);}
-  .tag-title{font-size:32px;}
+  #side{max-height:48vh;border-right:0;border-bottom:1px solid var(--border);}
 }
 </style>
 <script type="importmap">
@@ -205,9 +191,9 @@ body{display:flex;flex-direction:column;min-height:100%;background:
 <header id="top">
   <div class="brand">
     <svg class="mark" viewBox="0 0 28 28" aria-hidden="true">
-      <path d="M3 8 L14 3 L25 8 L25 20 L14 25 L3 20 Z" fill="none" stroke="#E3942A" stroke-width="1.4"/>
-      <path d="M8 14 L14 8 L20 14" fill="none" stroke="#F3F5F4" stroke-width="1.4"/>
-      <path d="M8 18 L14 12 L20 18" fill="none" stroke="#E3942A" stroke-width="1.4"/>
+      <path d="M3 8 L14 3 L25 8 L25 20 L14 25 L3 20 Z" fill="none" stroke="#DBDAD9" stroke-width="1.4"/>
+      <path d="M8 14 L14 8 L20 14" fill="none" stroke="#A19F9B" stroke-width="1.4"/>
+      <path d="M8 18 L14 12 L20 18" fill="none" stroke="#DBDAD9" stroke-width="1.4"/>
     </svg>
     <div class="brand-copy">
       <div class="brand-kicker">Collaborative mapping</div>
@@ -221,31 +207,24 @@ body{display:flex;flex-direction:column;min-height:100%;background:
     <div class="phase" data-i="3"><span>Operate</span></div>
   </nav>
   <div class="meta">
-    <div class="link" id="link"><i class="pulse"></i><span id="link-txt">DISCONNECTED</span></div>
+    <div class="link" id="link"><i class="pulse"></i><span id="link-txt">Disconnected</span></div>
     <div id="clock">00:00:00</div>
   </div>
 </header>
 <div id="shell">
   <aside id="side">
-    <div class="side-head"><h2>Soldiers</h2><em id="sta-count">0 / 2</em></div>
-    <div id="dots"></div>
+    <div id="dots" class="tree"></div>
     <div class="side-actions">
       <button type="button" class="btn" id="opt-btn">Optimize</button>
-      <a class="btn" id="dl-db" href="/map.db">Map.db</a>
-      <a class="btn" id="dl-ply" href="/map.ply">Map.ply</a>
       <button type="button" class="btn ghost-bad" id="reset-btn">Reset</button>
     </div>
   </aside>
   <section class="viewport">
     <div class="view-stage">
       <div id="calib-tag">
-        <div class="tag-kicker">Start mark</div>
-        <h1 class="tag-title">Point both phones here.</h1>
-        <p class="tag-copy">Lock the shared frame, then walk the room. The live mesh appears the moment the second soldier locks.</p>
         <div class="reticle">
           <img id="calib-tag-img" src="/tag.png" alt="ArUco 4x4 start tag id 0"/>
         </div>
-        <div class="tag-spec">ArUco 4x4_50  ·  id 0  ·  0.20 m</div>
       </div>
       <div id="live">
         <div id="map-wrap">
@@ -254,28 +233,23 @@ body{display:flex;flex-direction:column;min-height:100%;background:
           <div class="live-stats">
             <div class="stat"><b>Nodes</b><em id="stat-nodes">0</em></div>
             <div class="stat"><b>Mesh</b><em id="stat-mesh">0</em></div>
-            <div class="stat"><b>Align</b><em id="stat-align">NO</em></div>
+            <div class="stat"><b>Align</b><em id="stat-align">No</em></div>
           </div>
           <div class="view-tools">
             <button type="button" class="chip" id="fit-btn">Fit</button>
-            <button type="button" class="chip on" id="grid-btn">Grid</button>
           </div>
         </div>
       </div>
     </div>
   </section>
 </div>
-<div id="foot">
-  <div id="footer">Assumed on-screen tag width: 0.20 m (ArUco )HTML"
-		<< kDemoTagFamily << " id " << kDemoTagId << R"HTML(). Fullscreen the browser so the tag is large enough for both phones.</div>
-</div>
 <div id="confirm">
   <div class="sheet" role="dialog" aria-labelledby="confirm-title">
     <h3 id="confirm-title">Reset the room?</h3>
-    <p>Clears the session lock and calibration. The stored map stays on disk.</p>
+    <p>Deletes the stored map and unlocks the session. Both phones must join and point at the tag again.</p>
     <div class="sheet-row">
       <button type="button" class="btn" id="confirm-no">Cancel</button>
-      <button type="button" class="btn solid" id="confirm-go">Reset &gt;&gt;</button>
+      <button type="button" class="btn solid" id="confirm-go">Reset</button>
     </div>
   </div>
 </div>
@@ -283,10 +257,21 @@ body{display:flex;flex-direction:column;min-height:100%;background:
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+// Assumed on-screen tag width: 0.20 m. Live view uses organizedFastMesh + RGB.
 const TAG_SIZE_M = )HTML" << kDemoTagSizeM << R"HTML(;
-const COLORS = ['#E3942A', '#47FF51', '#F3F5F4', '#C96A1A'];
+const COLORS = ['#DBDAD9', '#A19F9B', '#454340', '#2B2A28'];
 function shouldShowTag(demo) {
   return demo.show_tag === true && demo.locked !== true;
+}
+// ?view=map keeps the 3D map up even when the room is not locked.
+const FORCE_MAP = new URLSearchParams(location.search).get('view') === 'map';
+// After a server restart the session lock is gone, but the map is still on
+// disk. Keep the 3D view up whenever there is already a map (or the room is
+// locked). The tag is only for a fresh empty room.
+function shouldShowMap(demo) {
+  if (FORCE_MAP) return true;
+  if (demo.locked === true) return true;
+  return (demo.global_nodes || 0) > 0;
 }
 function hideTag() {
   const tag = document.getElementById('calib-tag');
@@ -295,10 +280,6 @@ function hideTag() {
 function hideLive() {
   const live = document.getElementById('live');
   if (live) { live.style.display = 'none'; live.classList.remove('show'); }
-}
-function shortId(id) {
-  if (!id) return 'STA';
-  return id.length > 10 ? id.slice(0, 8) : id;
 }
 function pad2(n) { return n < 10 ? '0' + n : '' + n; }
 function esc(s) {
@@ -313,17 +294,109 @@ function findClient(demo, id) {
   }
   return null;
 }
-function clientNodes(id) {
+function clientStatus(id) {
   const list = (lastStatus && lastStatus.clients) || [];
   for (let i = 0; i < list.length; i++) {
-    if (list[i].id === id) return list[i].nodes;
+    if (list[i].id === id) return list[i];
   }
   return null;
 }
-function fmtPose(c) {
-  if (!c || typeof c.x !== 'number') return 'NO FIX';
-  function n(v) { return (v >= 0 ? '+' : '') + v.toFixed(2); }
-  return 'E ' + n(c.x) + '\nN ' + n(c.y) + '\nU ' + n(c.z);
+function numOr(v, fallback) {
+  return (typeof v === 'number' && isFinite(v)) ? v : fallback;
+}
+function fmtSigned(v, digits) {
+  if (typeof v !== 'number' || !isFinite(v)) return 'n/a';
+  return (v >= 0 ? '+' : '') + v.toFixed(digits);
+}
+function fmtMeters(v) {
+  if (typeof v !== 'number' || !isFinite(v)) return 'n/a';
+  return v.toFixed(3) + ' m';
+}
+function fmtDeg(rad) {
+  if (typeof rad !== 'number' || !isFinite(rad)) return 'n/a';
+  return (rad * 180 / Math.PI).toFixed(1) + '\u00b0';
+}
+function headingDeg(rad) {
+  if (typeof rad !== 'number' || !isFinite(rad)) return 'n/a';
+  let d = rad * 180 / Math.PI;
+  d = ((d % 360) + 360) % 360;
+  return d.toFixed(1) + '\u00b0';
+}
+function eulerFromQuat(qx, qy, qz, qw) {
+  const sinp = 2 * (qw * qy - qz * qx);
+  const pitch = Math.abs(sinp) >= 1 ? Math.sign(sinp) * Math.PI / 2 : Math.asin(sinp);
+  return {
+    roll: Math.atan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx * qx + qy * qy)),
+    pitch: pitch,
+    yaw: Math.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
+  };
+}
+function rpyOf(cl) {
+  const have = function(v) { return typeof v === 'number' && isFinite(v); };
+  if (have(cl.roll) && have(cl.pitch) && (Math.abs(cl.roll) + Math.abs(cl.pitch) > 1e-5)) {
+    return { roll: cl.roll, pitch: cl.pitch, yaw: cl.yaw };
+  }
+  if (have(cl.qx) && have(cl.qy) && have(cl.qz) && have(cl.qw)) {
+    const e = eulerFromQuat(cl.qx, cl.qy, cl.qz, cl.qw);
+    if (have(cl.yaw)) e.yaw = cl.yaw;
+    return e;
+  }
+  return { roll: cl.roll, pitch: cl.pitch, yaw: cl.yaw };
+}
+function unitItems(demo) {
+  const seen = {};
+  const items = [];
+  function add(c) {
+    if (!c || !c.id || c.id === 'waiting' || seen[c.id]) return;
+    seen[c.id] = true;
+    items.push({ id: c.id, locked: !!c.locked });
+  }
+  (demo.calibrated || []).forEach(add);
+  const now = numOr(demo.server_now, Date.now() / 1000);
+  (demo.clients || []).forEach(function(c) {
+    const age = (c.last_seen > 0) ? (now - c.last_seen) : 1e9;
+    if (c.locked || age < 45) add(c);
+  });
+  return items;
+}
+function ageLabel(unix, now) {
+  if (!unix || unix <= 0) return 'n/a';
+  const s = Math.max(0, now - unix);
+  if (s < 1) return '<1s';
+  if (s < 60) return Math.round(s) + 's';
+  const m = Math.floor(s / 60);
+  return m + 'm ' + Math.round(s % 60) + 's';
+}
+function shortClientId(id) {
+  const s = String(id || '');
+  if (s.length <= 8) return s;
+  return s.slice(-8);
+}
+const treeOpen = {};
+function folderOpen(path, fallback) {
+  return Object.prototype.hasOwnProperty.call(treeOpen, path) ? treeOpen[path] : fallback;
+}
+function ico(kind) {
+  if (kind === 'chev') {
+    return '<svg class="tree-chev" viewBox="0 0 12 12" aria-hidden="true"><path d="M4 2.5 L8.5 6 L4 9.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  }
+  if (kind === 'folder') {
+    return '<svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.6h4.1l1.2 1.5H14V13H2z" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>';
+  }
+  return '<svg class="tree-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.2" y="3.4" width="7.6" height="9.2" rx="0.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>';
+}
+function treeFolder(path, depth, name, extra, kids, openDefault) {
+  const open = folderOpen(path, openDefault);
+  let html = '<div class="tree-node' + (open ? ' open' : '') + '">';
+  html += '<div class="tree-row' + (open ? ' open' : '') + '" style="--d:' + depth + '" data-toggle="' + esc(path) + '">';
+  html += ico('chev') + ico('folder') + '<span class="tree-name' + (depth === 1 ? ' tree-id' : '') + '">' + esc(name) + '</span>' + (extra || '') + '</div>';
+  html += '<div class="tree-kids">' + kids + '</div></div>';
+  return html;
+}
+function treeLeaf(depth, name, value) {
+  return '<div class="tree-row leaf" style="--d:' + depth + '">' + ico('file') +
+    '<span class="tree-name">' + esc(name) + '</span>' +
+    (value != null ? '<span class="tree-val">' + esc(value) + '</span>' : '') + '</div>';
 }
 function phaseIndex(demo) {
   if (demo.locked && demo.aligned) return 3;
@@ -342,17 +415,16 @@ function setStats(demo) {
   const mesh = document.getElementById('stat-mesh');
   const align = document.getElementById('stat-align');
   if (nodes) nodes.textContent = String(demo.global_nodes || 0);
-  if (mesh) mesh.textContent = String(demo.mesh_gen || 0);
-  if (align) align.textContent = demo.aligned ? 'YES' : 'NO';
-  const count = document.getElementById('sta-count');
-  if (count) count.textContent = (demo.calibrated_count || 0) + ' / 2';
+  // live generation, plus the assembled-surface generation once one exists
+  if (mesh) mesh.textContent = String(demo.mesh_gen || 0) + (demo.mesh_baked ? (' / B' + (demo.bake_gen || 0)) : '');
+  if (align) align.textContent = demo.aligned ? 'Yes' : 'No';
 }
 function setLink(ok) {
   const el = document.getElementById('link');
   const txt = document.getElementById('link-txt');
   if (!el || !txt) return;
   el.classList.toggle('ok', !!ok);
-  txt.textContent = ok ? 'LIVE' : 'DISCONNECTED';
+  txt.textContent = ok ? 'Live' : 'Disconnected';
 }
 const sessionStart = Date.now();
 function tickClock() {
@@ -364,33 +436,149 @@ function tickClock() {
 function renderDots(demo) {
   const dots = document.getElementById('dots');
   if (!dots) return;
-  const items = (demo.calibrated || []).slice();
-  while (items.length < 2) items.push({id: 'waiting', locked: false});
-  dots.innerHTML = items.slice(0, 4).map(function(c, i) {
-    const on = c.locked ? ' on' : '';
-    const waiting = c.id === 'waiting';
-    const label = waiting ? ('SOL-' + pad2(i + 1)) : shortId(c.id);
-    const state = c.locked ? 'LOCKED' : 'STBY';
-    const cl = waiting ? null : findClient(demo, c.id);
-    let pose = waiting ? 'NO FIX' : fmtPose(cl);
-    const n = waiting ? null : clientNodes(c.id);
-    if (n != null) pose += '\nKF ' + n;
-    return '<div class="dot' + on + '"><span class="lamp' + on + '"></span><div class="dot-meta"><div class="dot-id">' + esc(label) + '</div><div class="dot-state">' + state + '</div><div class="dot-pose">' + esc(pose) + '</div></div></div>';
+  const items = unitItems(demo);
+  const now = numOr(demo.server_now, Date.now() / 1000);
+  const kids = items.slice(0, 4).map(function(c, i) {
+    const cl = findClient(demo, c.id) || {};
+    const st = clientStatus(c.id) || {};
+    const rpy = rpyOf(cl);
+    const seen = numOr(cl.last_seen, st.last_seen);
+    const poseAt = numOr(cl.last_pose_at, 0);
+    const seenAge = (seen > 0) ? (now - seen) : 1e9;
+    const live = seenAge < 5;
+    const stale = seen > 0 && seenAge >= 45;
+    const locked = !!(c.locked || cl.locked);
+    let state = 'Standby';
+    if (stale) state = 'Stale';
+    else if (locked) state = 'Locked';
+    else if (seen <= 0) state = 'Offline';
+    const x = cl.x, y = cl.y, z = cl.z;
+    const hasPos = typeof x === 'number' && typeof y === 'number' && typeof z === 'number';
+    const range = hasPos ? Math.hypot(x, y, z) : NaN;
+    const ground = hasPos ? Math.hypot(x, y) : NaN;
+    const nodes = numOr(cl.nodes, st.nodes);
+    const localId = numOr(cl.last_local_id, st.last_local_id);
+    const session = numOr(cl.session_map_id, -1);
+    const mapBase = numOr(cl.map_id_base, -1);
+    const pathM = numOr(cl.path_m, NaN);
+    const trailN = numOr(cl.trail_n, (cl.trail || []).length);
+    const tagId = numOr(cl.tag_id, -1);
+    const path = c.id;
+    const extra = '<span class="tree-state">' + esc(state) + '</span><span class="lamp' + (live ? ' on' : '') + '"></span>';
+    let body = treeLeaf(2, shortClientId(c.id));
+    body += treeFolder(path + '/position', 2, 'Position', '',
+      treeLeaf(3, 'E', hasPos ? fmtSigned(x, 3) + ' m' : 'n/a') +
+      treeLeaf(3, 'N', hasPos ? fmtSigned(y, 3) + ' m' : 'n/a') +
+      treeLeaf(3, 'U', hasPos ? fmtSigned(z, 3) + ' m' : 'n/a') +
+      treeLeaf(3, 'Range', isFinite(range) ? fmtMeters(range) : 'n/a') +
+      treeLeaf(3, 'Ground', isFinite(ground) ? fmtMeters(ground) : 'n/a') +
+      treeLeaf(3, 'Heading', headingDeg(rpy.yaw)), true);
+    body += treeFolder(path + '/attitude', 2, 'Attitude', '',
+      treeLeaf(3, 'Yaw', fmtDeg(rpy.yaw)) +
+      treeLeaf(3, 'Pitch', fmtDeg(rpy.pitch)) +
+      treeLeaf(3, 'Roll', fmtDeg(rpy.roll)) +
+      treeLeaf(3, 'Quat', [cl.qx, cl.qy, cl.qz, cl.qw].every(function(v) {
+        return typeof v === 'number' && isFinite(v);
+      }) ? fmtSigned(cl.qx, 2) + ' ' + fmtSigned(cl.qy, 2) + ' ' + fmtSigned(cl.qz, 2) + ' ' + fmtSigned(cl.qw, 2) : 'n/a'), true);
+    body += treeFolder(path + '/mapping', 2, 'Mapping', '',
+      treeLeaf(3, 'Keyframes', nodes != null ? String(nodes) : 'n/a') +
+      treeLeaf(3, 'Local id', localId != null ? String(localId) : 'n/a') +
+      treeLeaf(3, 'Session', session >= 0 ? String(session) : 'n/a') +
+      treeLeaf(3, 'Map base', mapBase >= 0 ? String(mapBase) : 'n/a') +
+      treeLeaf(3, 'Path', isFinite(pathM) ? fmtMeters(pathM) : 'n/a') +
+      treeLeaf(3, 'Samples', String(trailN || 0)) +
+      treeLeaf(3, 'Fix', cl.has_fix === true ? 'Yes' : (cl.has_fix === false ? 'No' : 'n/a')) +
+      treeLeaf(3, 'Tag', tagId >= 0 ? String(tagId) : 'n/a'), true);
+    body += treeFolder(path + '/link', 2, 'Link', '',
+      treeLeaf(3, 'Seen', ageLabel(seen, now)) +
+      treeLeaf(3, 'Pose', ageLabel(poseAt, now)), true);
+    return treeFolder(path, 1, 'UNIT-' + pad2(i + 1), extra, body, true);
   }).join('');
+  dots.innerHTML = treeFolder('units', 0, 'Units',
+    '<span class="tree-val" id="dot-count">' + items.length + '</span>', kids, true);
 }
 function setBanner(demo, live) {
   renderDots(demo);
   setPhases(demo);
   setStats(demo);
 }
+// Physical size of the displayed marker. Browsers do not expose screen DPI, so
+// estimate mm per CSS pixel from known Apple panels (the demo laptop), fall back
+// to a typical value, and let the operator override with a ruler measurement.
+// Whatever value wins is POSTed to /tag_size; phones read it back from /join
+// and /demo, so their tag-distance estimate matches what is on the screen.
+const TAG_BLACK_FRACTION = 0.6; // black square / PNG width (1-cell quiet zone each side)
+let serverTagSizeM = TAG_SIZE_M;
+let lastReportedTagM = 0;
+function mmPerCssPx() {
+  const w = screen.width, h = screen.height, dpr = window.devicePixelRatio || 1;
+  const known = {
+    '1512x982': 0.201,  // MacBook Pro 14 (2021+)
+    '1728x1117': 0.200, // MacBook Pro 16 (2021+)
+    '1470x956': 0.203,  // MacBook Air 13.6
+    '1440x900': 0.199,  // MacBook Pro 13 / Air 13.3 (2x)
+    '1280x832': 0.224,  // MacBook Air 13.3 at "more space"
+    '1710x1112': 0.185, // MacBook Air 15
+  };
+  const key = w + 'x' + h;
+  if (known[key]) return known[key];
+  return dpr >= 2 ? 0.20 : 0.27;
+}
+function displayedBlackSquareMeters() {
+  const img = document.getElementById('calib-tag-img');
+  if (!img) return 0;
+  const r = img.getBoundingClientRect();
+  if (!r.width) return 0;
+  return r.width * TAG_BLACK_FRACTION * mmPerCssPx() / 1000.0;
+}
+function manualTagSizeM() {
+  const v = parseFloat(localStorage.getItem('collabTagSizeCm') || '');
+  return (isFinite(v) && v > 2 && v < 200) ? v / 100.0 : 0;
+}
+function postTagSize(m) {
+  if (!(m > 0.02 && m < 2.0)) return;
+  if (Math.abs(m - lastReportedTagM) < 0.0005) return;
+  lastReportedTagM = m;
+  fetch('/tag_size', {method: 'POST', cache: 'no-store', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({tag_size_m: m})}).then(function(r) { return r.json(); }).then(function(res) {
+    if (res && res.tag_size_m) serverTagSizeM = res.tag_size_m;
+    refreshTagSizeLabel();
+  }).catch(function() {});
+}
+function refreshTagSizeLabel() {
+  const est = displayedBlackSquareMeters();
+  const manual = manualTagSizeM();
+  return manual || est;
+}
+function reportTagSize() {
+  const used = refreshTagSizeLabel();
+  if (used > 0) postTagSize(used);
+}
+(function wireTagSize() {
+  const input = document.getElementById('tag-size-input');
+  if (input) {
+    input.addEventListener('change', function() {
+      const cm = parseFloat(input.value);
+      if (isFinite(cm) && cm > 2 && cm < 200) {
+        localStorage.setItem('collabTagSizeCm', String(cm));
+      } else {
+        localStorage.removeItem('collabTagSizeCm');
+      }
+      lastReportedTagM = 0;
+      reportTagSize();
+    });
+  }
+  window.addEventListener('resize', function() { lastReportedTagM = 0; reportTagSize(); });
+  const img = document.getElementById('calib-tag-img');
+  if (img) img.addEventListener('load', reportTagSize);
+})();
 function showCalib(demo) {
   const tag = document.getElementById('calib-tag');
   if (tag) tag.style.display = 'flex';
   hideLive();
   setBanner(demo, false);
-  document.getElementById('footer').textContent =
-    'Assumed on-screen tag width: ' + TAG_SIZE_M.toFixed(2) +
-    ' m. Fullscreen the browser so the tag is large enough for both phones.';
+  if (typeof demo.tag_size_m === 'number') serverTagSizeM = demo.tag_size_m;
+  reportTagSize();
 }
 function setMapMsg(text) {
   const msg = document.getElementById('map-msg');
@@ -405,22 +593,34 @@ let renderer = null, scene = null, camera = null, controls = null;
 // start tag. three.js is y-up, so all G content lives under this group, whose
 // fixed rotation maps G axes onto three axes (G.x -> -Z, G.y -> -X, G.z -> +Y).
 // No guessing of the up axis from mesh extents.
-let world = null, grid = null;
-let liveMesh = null, meshReady = false, meshFramed = false;
+let world = null;
+// Two layers. bakedMesh: the phone-style assembled surface (Poisson, colored,
+// cleaned) the server rebuilds when the phones pause. liveMesh: per-keyframe
+// organizedFastMesh for everything newer than the bake, so new scans show up
+// within a couple of seconds and get absorbed into the smooth surface later.
+let liveMesh = null, bakedMesh = null, meshReady = false, meshFramed = false;
 let lastMeshNodes = -1, lastMeshGen = -1, meshLoading = false, lastMeshAt = 0;
-let lastStatus = null, gridOn = true;
+let lastBakeGen = -1, bakeMaxNode = 0, bakeLoading = false;
+let lastStatus = null, lastDemo = null;
 const userGroups = {};
 function hexColor(hex) { return new THREE.Color(hex); }
 function gToThree(v) {
   // Same mapping as the world group, for camera framing in scene coordinates.
   return new THREE.Vector3(-v.y, v.z, -v.x);
 }
+function disposeObj(obj) {
+  if (!obj) return;
+  world.remove(obj);
+  if (obj.geometry) obj.geometry.dispose();
+  if (obj.material) obj.material.dispose();
+}
 function disposeLiveMesh() {
-  if (!liveMesh) return;
-  world.remove(liveMesh);
-  if (liveMesh.geometry) liveMesh.geometry.dispose();
-  if (liveMesh.material) liveMesh.material.dispose();
+  disposeObj(liveMesh);
   liveMesh = null;
+}
+function disposeBakedMesh() {
+  disposeObj(bakedMesh);
+  bakedMesh = null;
 }
 function fitCameraToMesh(geom) {
   if (!geom) return;
@@ -432,28 +632,21 @@ function fitCameraToMesh(geom) {
   box.getSize(size);
   box.getCenter(centerG);
   if (!isFinite(size.lengthSq()) || size.lengthSq() < 1e-8) return;
-  // Frame from an elevated three-quarter view. Robust to outlier nodes: use
-  // the bulk extent (clamped) rather than the full AABB diagonal.
-  const extent = Math.min(Math.max(size.length() * 0.55, 1.5), 12);
+  // Frame from an elevated three-quarter view so the whole walk fits: the
+  // camera backs off with the AABB diagonal (a 22 m loop needs ~15 m).
+  const extent = Math.min(Math.max(size.length() * 0.7, 2.0), 40);
   const center = gToThree(centerG);
   camera.position.set(center.x + extent * 0.7, center.y + extent * 0.6, center.z + extent * 0.7);
   controls.target.copy(center);
   controls.update();
-  // Ground grid at the lowest mesh height (G z-min maps to three y).
-  if (grid) grid.position.y = box.min.z;
   meshFramed = true;
 }
 function refit() {
-  if (liveMesh && liveMesh.geometry) {
+  const target = bakedMesh || liveMesh;
+  if (target && target.geometry) {
     meshFramed = false;
-    fitCameraToMesh(liveMesh.geometry);
+    fitCameraToMesh(target.geometry);
   }
-}
-function toggleGrid() {
-  gridOn = !gridOn;
-  if (grid) grid.visible = gridOn;
-  const btn = document.getElementById('grid-btn');
-  if (btn) btn.classList.toggle('on', gridOn);
 }
 function copyArrayBuffer(buf) {
   return buf.slice(0);
@@ -491,65 +684,145 @@ function fetchMeshBuffer(url) {
     });
   });
 }
-function applyMeshBuffer(buf) {
-  if (!buf || buf.byteLength < 20) {
-    if (!meshReady) setMapMsg('Awaiting keyframes');
-    return false;
-  }
+function parsePly(buf) {
+  if (!buf || buf.byteLength < 20) return null;
   let geom = null;
   try {
     geom = new PLYLoader().parse(copyArrayBuffer(buf));
   } catch (e) {
     console.warn('PLY parse failed', e);
-    if (!meshReady) setMapMsg('Awaiting keyframes');
-    return false;
+    return null;
   }
   const pos = geom.getAttribute('position');
+  if (!pos || pos.count <= 0) return null;
+  return geom;
+}
+function meshFromGeometry(geom, material) {
   const idx = geom.getIndex();
-  const nPos = pos ? pos.count : 0;
   const nIdx = idx ? idx.count : 0;
   const hasColor = !!geom.getAttribute('color');
-  if (nPos <= 0) {
-    if (!meshReady) setMapMsg('Awaiting keyframes');
-    return false;
-  }
-  disposeLiveMesh();
   if (nIdx >= 3) {
     geom.computeVertexNormals();
     geom.computeBoundingSphere();
-    liveMesh = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({
-      vertexColors: hasColor,
-      color: hasColor ? 0xffffff : 0x9aa3ad,
-      roughness: 0.88,
-      metalness: 0.02,
-      side: THREE.DoubleSide
-    }));
-  } else {
-    console.info('mesh has no faces, drawing points', nPos);
-    liveMesh = new THREE.Points(geom, new THREE.PointsMaterial({
-      size: 0.03, vertexColors: hasColor, color: hasColor ? 0xffffff : 0x9aa3ad
-    }));
+    return new THREE.Mesh(geom, material);
   }
+  console.info('mesh has no faces, drawing points', geom.getAttribute('position').count);
+  return new THREE.Points(geom, new THREE.PointsMaterial({
+    size: 0.03, vertexColors: hasColor, color: hasColor ? 0xffffff : 0xA19F9B
+  }));
+}
+function vertexColorMaterial(geom, baked) {
+  const hasColor = !!geom.getAttribute('color');
+  return new THREE.MeshStandardMaterial({
+    vertexColors: hasColor,
+    color: hasColor ? 0xffffff : 0xA19F9B,
+    roughness: baked ? 0.82 : 0.88,
+    metalness: 0.02,
+    side: THREE.DoubleSide
+  });
+}
+function buildMeshObject(buf, baked) {
+  const geom = parsePly(buf);
+  if (!geom) return null;
+  return meshFromGeometry(geom, vertexColorMaterial(geom, baked));
+}
+// The bake's photo atlas, drawn unlit exactly like the phone's textured mesh.
+function loadBakeTexture(gen) {
+  return new Promise(function(resolve) {
+    new THREE.TextureLoader().load('/map.bake.jpg?g=' + gen, function(tex) {
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.anisotropy = renderer ? renderer.capabilities.getMaxAnisotropy() : 1;
+      tex.generateMipmaps = true;
+      tex.minFilter = THREE.LinearMipmapLinearFilter;
+      resolve(tex);
+    }, undefined, function(err) {
+      console.warn('bake atlas failed', err);
+      resolve(null);
+    });
+  });
+}
+function applyMeshBuffer(buf) {
+  const obj = buildMeshObject(buf, false);
+  disposeLiveMesh();
+  if (!obj) {
+    if (!meshReady) setMapMsg('Awaiting keyframes');
+    return false;
+  }
+  liveMesh = obj;
   world.add(liveMesh);
   meshReady = true;
   setMapMsg('');
-  if (!meshFramed) fitCameraToMesh(geom);
+  if (!meshFramed) fitCameraToMesh(obj.geometry);
   return true;
 }
+function placeBaked(obj) {
+  disposeBakedMesh();
+  bakedMesh = obj;
+  world.add(bakedMesh);
+  meshReady = true;
+  setMapMsg('');
+  if (!meshFramed) fitCameraToMesh(obj.geometry);
+  return true;
+}
+// Textured when the PLY carries UVs and the atlas downloads; vertex colors otherwise.
+function applyBakedBuffer(buf, textured, gen) {
+  const geom = parsePly(buf);
+  if (!geom) return Promise.resolve(false);
+  const hasUv = !!geom.getAttribute('uv');
+  if (!(textured && hasUv)) {
+    return Promise.resolve(placeBaked(meshFromGeometry(geom, vertexColorMaterial(geom, true))));
+  }
+  return loadBakeTexture(gen).then(function(tex) {
+    if (!tex) return placeBaked(meshFromGeometry(geom, vertexColorMaterial(geom, true)));
+    const mat = new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide });
+    console.info('bake textured atlas ' + tex.image.width + 'x' + tex.image.height);
+    return placeBaked(meshFromGeometry(geom, mat));
+  });
+}
+// Assembled surface: refetch when the server reports a new bake generation.
+function loadBake(bakeGen, maxNode, textured) {
+  if (bakeLoading) return;
+  if (!(bakeGen > 0) || bakeGen === lastBakeGen) return;
+  bakeLoading = true;
+  fetchMeshBuffer('/map.mesh?bake=1').then(function(buf) {
+    lastBakeGen = bakeGen;
+    if (!buf) return false;
+    return applyBakedBuffer(buf, textured === true, bakeGen);
+  }).then(function(ok) {
+    if (ok) {
+      bakeMaxNode = maxNode || 0;
+      // The overlay must now only carry nodes newer than this bake.
+      lastMeshGen = -1;
+      console.info('bake applied gen=' + bakeGen + ' up to node ' + bakeMaxNode);
+    }
+  }).catch(function(err) {
+    console.warn('bake load failed', err);
+  }).then(function() { bakeLoading = false; });
+}
+// Live layer: everything (no bake yet) or only nodes newer than the bake.
 function loadMesh(nodes, meshGen) {
   if (meshLoading) return;
   const changed = nodes !== lastMeshNodes || meshGen !== lastMeshGen;
   if (!changed && meshReady) return;
   meshLoading = true;
-  fetchMeshBuffer('/map.mesh').then(function(buf) {
+  // Overlay only when the bake actually covers most of the room. A leftover
+  // bake of a couple of nodes (typical after a restart) must not hide the
+  // live mesh of the rest of the walk.
+  const bakeCoversRoom = !!(bakedMesh && bakeMaxNode > 0 && nodes > 0 && bakeMaxNode * 2 >= nodes);
+  const reqSince = bakeCoversRoom ? bakeMaxNode : -1;
+  const url = reqSince >= 0 ? ('/map.mesh?since_node=' + reqSince) : '/map.mesh';
+  fetchMeshBuffer(url).then(function(buf) {
     lastMeshNodes = nodes;
     lastMeshGen = meshGen;
     lastMeshAt = Date.now();
     if (!buf) {
-      if (!meshReady) setMapMsg('Awaiting keyframes');
-      return;
+      // Nothing newer than the bake (or nothing at all yet).
+      if (bakedMesh) { disposeLiveMesh(); }
+      else if (!meshReady) setMapMsg('Awaiting keyframes');
+    } else {
+      applyMeshBuffer(buf);
     }
-    applyMeshBuffer(buf);
+    if ((bakedMesh ? bakeMaxNode : -1) !== reqSince) lastMeshGen = -1;
   }).catch(function(err) {
     console.warn('mesh load failed', err);
     if (!meshReady) setMapMsg('Awaiting keyframes');
@@ -557,7 +830,7 @@ function loadMesh(nodes, meshGen) {
 }
 function phoneMarkerLabel(id, index) {
   const last4 = (id && id.length >= 4) ? id.slice(-4) : (id || ('P' + (index + 1)));
-  return 'SOL-' + pad2(index + 1) + ' / ' + last4;
+  return 'UNIT-' + pad2(index + 1) + ' / ' + last4;
 }
 function hasClientQuat(c) {
   if (typeof c.qx !== 'number' || typeof c.qy !== 'number' || typeof c.qz !== 'number' || typeof c.qw !== 'number') return false;
@@ -580,15 +853,15 @@ function makeLabelSprite(text, color) {
   canvas.width = 640;
   canvas.height = 160;
   const ctx = canvas.getContext('2d');
-  ctx.fillStyle = 'rgba(5,7,10,0.88)';
+  ctx.fillStyle = 'rgba(22,21,20,0.88)';
   ctx.beginPath();
   ctx.rect(8, 24, 624, 112);
   ctx.fill();
-  ctx.strokeStyle = color.getStyle ? color.getStyle() : '#E3942A';
+  ctx.strokeStyle = color.getStyle ? color.getStyle() : '#A19F9B';
   ctx.lineWidth = 3;
   ctx.stroke();
-  ctx.fillStyle = '#F3F5F4';
-  ctx.font = '600 56px "IBM Plex Mono", monospace';
+  ctx.fillStyle = '#DBDAD9';
+  ctx.font = '600 56px Inter, sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(text, 320, 80);
@@ -605,7 +878,7 @@ function makeUserGroup(color, label) {
     color: color, roughness: 0.38, metalness: 0.08,
     emissive: color, emissiveIntensity: 0.28
   });
-  const darkMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.45, metalness: 0.2 });
+  const darkMat = new THREE.MeshStandardMaterial({ color: 0x2B2A28, roughness: 0.45, metalness: 0.2 });
   // Body: built y-up, then rotated so its up is G's +Z. Hangs below the camera.
   const holder = new THREE.Group();
   holder.rotation.x = Math.PI / 2;
@@ -634,7 +907,7 @@ function makeUserGroup(color, label) {
   }));
   const frustumWire = new THREE.LineSegments(
     new THREE.EdgesGeometry(frustumGeom),
-    new THREE.LineBasicMaterial({ color: 0xffffff })
+    new THREE.LineBasicMaterial({ color: 0xDBDAD9 })
   );
   camInner.add(frustum);
   camInner.add(frustumWire);
@@ -718,8 +991,38 @@ function updateUsers(demo) {
     }
   });
 }
+const held = Object.create(null);
+const flyClock = new THREE.Clock();
+function mapKeysActive() {
+  const live = document.getElementById('live');
+  const confirm = document.getElementById('confirm');
+  return !!(live && live.classList.contains('show') && confirm && !confirm.classList.contains('open'));
+}
+function flyCamera(dt) {
+  if (!camera || !controls || !mapKeysActive()) return;
+  const boost = held.ShiftLeft || held.ShiftRight;
+  const speed = (boost ? 14 : 5.5) * dt;
+  const forward = new THREE.Vector3();
+  camera.getWorldDirection(forward);
+  forward.y = 0;
+  if (forward.lengthSq() < 1e-6) forward.set(0, 0, -1);
+  else forward.normalize();
+  const right = new THREE.Vector3().crossVectors(forward, camera.up).normalize();
+  const delta = new THREE.Vector3();
+  if (held.KeyW || held.ArrowUp) delta.add(forward);
+  if (held.KeyS || held.ArrowDown) delta.sub(forward);
+  if (held.KeyA || held.ArrowLeft) delta.sub(right);
+  if (held.KeyD || held.ArrowRight) delta.add(right);
+  if (held.KeyE) delta.y += 1;
+  if (held.KeyQ) delta.y -= 1;
+  if (delta.lengthSq() === 0) return;
+  delta.normalize().multiplyScalar(speed);
+  camera.position.add(delta);
+  controls.target.add(delta);
+}
 function tick() {
   requestAnimationFrame(tick);
+  flyCamera(Math.min(flyClock.getDelta(), 0.05));
   if (controls) controls.update();
   if (renderer && scene && camera) renderer.render(scene, camera);
 }
@@ -746,12 +1049,17 @@ function initViewer() {
     return false;
   }
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-  renderer.setClearColor(0x05070A, 1);
+  renderer.setClearColor(0x161514, 1);
   scene = new THREE.Scene();
   camera = new THREE.PerspectiveCamera(60, 1, 0.05, 200);
   camera.position.set(2.2, 1.8, 2.2);
   controls = new OrbitControls(camera, canvas);
   controls.enableDamping = true;
+  controls.enablePan = true;
+  controls.screenSpacePanning = true;
+  controls.panSpeed = 1.1;
+  controls.minDistance = 0.12;
+  controls.maxDistance = 80;
   controls.target.set(0, 0, 0);
   // G (rtabmap, z up) -> three (y up): G.x -> -Z, G.y -> -X, G.z -> +Y.
   world = new THREE.Group();
@@ -761,19 +1069,16 @@ function initViewer() {
     new THREE.Vector3(-1, 0, 0),
     new THREE.Vector3(0, 1, 0));
   scene.add(world);
-  scene.add(new THREE.AmbientLight(0xffffff, 0.32));
-  scene.add(new THREE.HemisphereLight(0xf3f5f4, 0x3a2a18, 0.62));
-  const key = new THREE.DirectionalLight(0xfff4e0, 0.85);
+  scene.add(new THREE.AmbientLight(0xdbdad9, 0.32));
+  scene.add(new THREE.HemisphereLight(0xdbdad9, 0x1F1E1D, 0.62));
+  const key = new THREE.DirectionalLight(0xdbdad9, 0.85);
   key.position.set(2.4, 4.2, 2.8);
   scene.add(key);
-  const fill = new THREE.DirectionalLight(0xe3942a, 0.18);
+  const fill = new THREE.DirectionalLight(0xA19F9B, 0.18);
   fill.position.set(-2.2, 1.4, -1.6);
   scene.add(fill);
-  grid = new THREE.GridHelper(12, 24, 0x2a2418, 0x16140f);
-  grid.visible = gridOn;
-  scene.add(grid);
   // Start tag origin, drawn as a small square in the tag plane (G y-z plane).
-  const origin = new THREE.Mesh(new THREE.SphereGeometry(0.04, 12, 10), new THREE.MeshBasicMaterial({ color: 0xE3942A }));
+  const origin = new THREE.Mesh(new THREE.SphereGeometry(0.04, 12, 10), new THREE.MeshBasicMaterial({ color: 0xA19F9B }));
   world.add(origin);
   const tagPlane = new THREE.Mesh(
     new THREE.PlaneGeometry(TAG_SIZE_M, TAG_SIZE_M),
@@ -791,28 +1096,32 @@ function showLive(demo) {
   live.style.display = 'flex';
   live.classList.add('show');
   setBanner(demo, true);
-  document.getElementById('footer').textContent =
-    'Live keyframe meshes (organizedFastMesh + RGB), same as the phone. Drag to orbit, scroll to zoom. Origin is the start tag.';
   if (!initViewer()) return;
   resizeViewer();
   updateUsers(demo);
   const nodes = demo.global_nodes || 0;
   const meshGen = demo.mesh_gen || 0;
   if (!meshReady) setMapMsg('Awaiting keyframes');
+  if (demo.mesh_baked) {
+    loadBake(demo.bake_gen || 0, demo.bake_max_node || 0, demo.bake_textured === true);
+  }
   loadMesh(nodes, meshGen);
 }
 function applyDemo(demo) {
   if (!demo || demo.ok === false) return;
-  if (shouldShowTag(demo) || demo.locked !== true) showCalib(demo);
-  else showLive(demo);
+  lastDemo = demo;
+  if (shouldShowMap(demo)) showLive(demo);
+  else showCalib(demo);
 }
 function resetRoom() {
   lastMeshNodes = -1;
   lastMeshGen = -1;
   lastMeshAt = 0;
+  lastBakeGen = -1;
+  bakeMaxNode = 0;
   meshReady = false;
   meshFramed = false;
-  if (scene) disposeLiveMesh();
+  if (scene) { disposeLiveMesh(); disposeBakedMesh(); }
   fetch('/reset', {method: 'POST', cache: 'no-store'}).then(function(r) { return r.json(); }).then(function() {
     return fetch('/demo', {cache: 'no-store'}).then(function(r) { return r.json(); });
   }).then(applyDemo).catch(function() {});
@@ -842,8 +1151,18 @@ function poll() {
 function pollStatus() {
   fetch('/status', {cache: 'no-store'}).then(function(r) { return r.json(); }).then(function(st) {
     lastStatus = st;
+    if (lastDemo) renderDots(lastDemo);
   }).catch(function() {});
 }
+document.getElementById('dots').addEventListener('click', function(e) {
+  const row = e.target.closest('[data-toggle]');
+  if (!row || !this.contains(row)) return;
+  const path = row.getAttribute('data-toggle');
+  const next = !row.parentElement.classList.contains('open');
+  treeOpen[path] = next;
+  row.parentElement.classList.toggle('open', next);
+  row.classList.toggle('open', next);
+});
 document.getElementById('reset-btn').addEventListener('click', function() { setConfirm(true); });
 document.getElementById('confirm-no').addEventListener('click', function() { setConfirm(false); });
 document.getElementById('confirm-go').addEventListener('click', function() { setConfirm(false); resetRoom(); });
@@ -852,11 +1171,19 @@ document.getElementById('confirm').addEventListener('click', function(e) {
 });
 document.getElementById('opt-btn').addEventListener('click', optimizeNow);
 document.getElementById('fit-btn').addEventListener('click', refit);
-document.getElementById('grid-btn').addEventListener('click', toggleGrid);
 window.addEventListener('keydown', function(e) {
   if (e.key === 'Escape') setConfirm(false);
   if (e.key === 'f' || e.key === 'F') refit();
-  if (e.key === 'g' || e.key === 'G') toggleGrid();
+  held[e.code] = true;
+  if (mapKeysActive() && (e.code === 'KeyW' || e.code === 'KeyA' || e.code === 'KeyS' ||
+      e.code === 'KeyD' || e.code === 'KeyQ' || e.code === 'KeyE' ||
+      e.code === 'ArrowUp' || e.code === 'ArrowDown' || e.code === 'ArrowLeft' || e.code === 'ArrowRight')) {
+    e.preventDefault();
+  }
+});
+window.addEventListener('keyup', function(e) { held[e.code] = false; });
+window.addEventListener('blur', function() {
+  Object.keys(held).forEach(function(k) { held[k] = false; });
 });
 tickClock();
 setInterval(tickClock, 1000);
