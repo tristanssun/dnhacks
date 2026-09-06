@@ -23,10 +23,6 @@ const intoMap = document.querySelector(".into-map");
 const zoomStartEl = document.getElementById("zoom-start");
 const mapWrap = document.getElementById("map-wrap");
 const commandScene = document.querySelector(".command-scene");
-const phoneVideo = document.querySelector(".phone-bezel video");
-
-phoneVideo?.play().catch(() => {});
-
 const cmcs = document.querySelector(".cmcs");
 const laptopScreen = document.querySelector(".laptop-screen");
 const map = initMap();
