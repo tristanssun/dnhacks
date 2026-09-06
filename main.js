@@ -7,10 +7,15 @@ window.scrollTo(0, 0);
 const lenis = new Lenis({
   autoRaf: true,
   anchors: true,
+  syncTouch: true,
   prevent: (node) =>
     !!node.closest("#player") ||
     (document.body.classList.contains("is-map-full") && !!node.closest("#map-wrap")),
 });
+
+function isMobile() {
+  return window.matchMedia("(max-width: 800px)").matches;
+}
 
 const scrollHint = document.querySelector(".scroll-hint");
 const phone = document.querySelector(".phone");
@@ -46,12 +51,14 @@ function whenLoaded(el) {
 }
 
 const bootWait = [
-  map?.ready ?? Promise.resolve(),
   document.fonts ? document.fonts.ready : Promise.resolve(),
   ...[...document.images].map(whenLoaded),
 ];
-Promise.all(bootWait).then(() => requestAnimationFrame(revealSite));
-window.setTimeout(revealSite, 12000);
+Promise.race([
+  Promise.all(bootWait),
+  new Promise((resolve) => window.setTimeout(resolve, 2500)),
+]).then(() => requestAnimationFrame(revealSite));
+window.setTimeout(revealSite, 6000);
 
 function pad2(n) {
   return n < 10 ? `0${n}` : String(n);
@@ -239,11 +246,21 @@ function syncPhone(scroll) {
     return;
   }
 
+  if (isMobile()) {
+    phone.style.transform = "";
+    return;
+  }
+
   phone.style.transform = `translate3d(0, ${phoneShift(scroll)}px, 0)`;
 }
 
 function syncFeature(scroll) {
   if (!feature) {
+    return;
+  }
+
+  if (isMobile()) {
+    feature.style.opacity = "1";
     return;
   }
 

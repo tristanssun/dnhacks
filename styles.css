@@ -722,53 +722,135 @@ body.is-map-full .map-note.is-off {
 }
 
 @media (max-width: 800px) {
+  html,
+  body {
+    overflow-x: clip;
+  }
+
+  .hero {
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    padding-top: 8svh;
+  }
+
   .hero-copy {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 100%;
     padding: 0 6vw;
-    --hero-title: 17vw;
+    text-align: center;
+    --hero-title: min(22vw, 4.8rem);
   }
 
   h1 {
     padding: 0;
     font-size: var(--hero-title);
+    text-align: center;
   }
 
   .hero-kicker {
     padding: 0;
+    margin-left: 0;
+    max-width: 14em;
+    font-size: clamp(1.15rem, 5.6vw, 1.45rem);
+    text-align: center;
   }
 
   .phone {
-    right: 4vw;
+    top: 32svh;
+    right: auto;
+    left: 50%;
+    margin-left: calc(var(--phone-w) / -2);
+    --phone-h: 50svh;
+    --phone-w: calc(50svh * 9 / 19.5);
+  }
+
+  .phone-bezel {
+    box-shadow: none;
+  }
+
+  .phone-bezel img {
+    object-fit: cover;
+  }
+
+  .scroll-hint {
+    bottom: 1.6rem;
+  }
+
+  .next {
+    min-height: auto;
+    justify-content: center;
+    padding: 3.2rem 0 1.2rem;
   }
 
   .feature {
+    max-width: none;
+    width: 100%;
     padding: 0 6vw;
+    text-align: center;
+  }
+
+  .feature h2 {
+    font-size: clamp(2.3rem, 11vw, 3.4rem);
+    line-height: 0.94;
   }
 
   .relay {
     flex-direction: column;
     justify-content: center;
-    gap: 2.2rem;
-    padding: 3.2rem 6vw;
+    align-items: center;
+    gap: 2rem;
+    padding: 2.4rem 6vw 3.2rem;
+    text-align: center;
   }
 
   .relay-copy,
   .relay-copy-end {
+    flex-basis: auto;
     max-width: 22rem;
     text-align: center;
   }
 
+  .relay-copy h2,
+  .relay-copy-end h2 {
+    font-size: clamp(2rem, 10vw, 2.8rem);
+  }
+
+  .relay-stats {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .relay-stage {
+    width: 100%;
+    justify-content: center;
+  }
+
   .relay-handset {
-    height: min(26vh, 12rem);
+    height: min(20vh, 8.8rem);
   }
 
   .relay-link {
-    height: min(26vh, 12rem);
-    min-width: 2.4rem;
+    height: min(20vh, 8.8rem);
+    flex-basis: 2rem;
+    min-width: 1.6rem;
+    max-width: 3.4rem;
+  }
+
+  .command-copy {
+    text-align: center;
+  }
+
+  .command-copy h2 {
+    font-size: clamp(2.4rem, 12vw, 3.4rem);
   }
 
   .map-note {
-    width: min(11.5rem, calc(100vw - 1.6rem));
-    padding: 0.7rem 0.8rem 0.75rem;
+    width: min(9.4rem, calc(50vw - 1.1rem));
+    padding: 0.65rem 0.7rem 0.7rem;
   }
 
   .map-note-body {
@@ -777,31 +859,31 @@ body.is-map-full .map-note.is-off {
 
   .map-note[data-slot="tl"] {
     top: 11vh;
-    left: 7vw;
+    left: 4vw;
   }
 
   .map-note[data-slot="tr"] {
     top: 11vh;
-    right: 7vw;
+    right: 4vw;
   }
 
   .map-note[data-slot="ml"] {
     top: 40vh;
-    left: 7vw;
+    left: 4vw;
   }
 
   .map-note[data-slot="mr"] {
     top: 40vh;
-    right: 7vw;
+    right: 4vw;
   }
 
   .map-note[data-slot="bl"] {
     bottom: 11vh;
-    left: 7vw;
+    left: 4vw;
   }
 
   .map-note[data-slot="br"] {
     bottom: 11vh;
-    right: 7vw;
+    right: 4vw;
   }
 }
