@@ -251,6 +251,27 @@ h1 {
   letter-spacing: -0.02em;
 }
 
+.relay-copy-end {
+  text-align: right;
+}
+
+.relay-stats {
+  margin-top: 0.85rem;
+  list-style: none;
+}
+
+.relay-stats li {
+  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  font-size: clamp(1.05rem, 1.8vw, 1.35rem);
+  font-weight: 400;
+  line-height: 1.35;
+  letter-spacing: -0.02em;
+}
+
+.relay-stats b {
+  font-weight: 600;
+}
+
 .relay-stage {
   display: flex;
   align-items: center;
@@ -726,13 +747,10 @@ body.is-map-full .map-note.is-off {
     padding: 3.2rem 6vw;
   }
 
-  .relay-copy {
+  .relay-copy,
+  .relay-copy-end {
     max-width: 22rem;
     text-align: center;
-  }
-
-  .relay-copy[aria-hidden="true"] {
-    display: none;
   }
 
   .relay-handset {
