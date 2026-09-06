@@ -158,15 +158,73 @@
   display: flex;
   min-height: 0;
   flex-direction: column;
-  overflow: auto;
+  overflow: hidden;
   border-right: 1px solid var(--border);
   background: var(--panel);
 }
 
+.cmcs #side-map {
+  position: relative;
+  z-index: 4;
+  flex: 0 0 auto;
+  padding: 10px 10px 0;
+}
+
+.cmcs .place-search {
+  position: relative;
+  margin: 0 0 8px;
+}
+
+.cmcs #place-search {
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text-1);
+  font-family: var(--sans);
+  font-size: 12px;
+}
+
+.cmcs #place-search:focus {
+  outline: none;
+  border-color: var(--text-1);
+}
+
+.cmcs #scan-map {
+  position: relative;
+  height: 168px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background:
+    #1a1918 url("assets/scan-map.jpg") center / cover no-repeat;
+}
+
+.cmcs .scan-pin {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  margin: -7px 0 0 -7px;
+  border: 2px solid var(--page);
+  border-radius: 50%;
+  background: var(--text-1);
+  box-shadow: 0 0 0 1px var(--border);
+}
+
+.cmcs .side-rule {
+  flex: 0 0 auto;
+  height: 1px;
+  margin: 10px 10px 0;
+  border: 0;
+  background: #5c5a56;
+}
+
 .cmcs .tree {
   flex: 1 1 auto;
+  min-height: 0;
   margin: 0;
   padding: 8px 0;
+  overflow: auto;
 }
 
 .cmcs .tree-kids {
