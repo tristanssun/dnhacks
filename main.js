@@ -1,5 +1,5 @@
 import { initMap } from "./map.js?v=20";
-import { initParticleText } from "./particles.js?v=6";
+import { initParticleText } from "./particles.js?v=7";
 
 history.scrollRestoration = "manual";
 window.scrollTo(0, 0);

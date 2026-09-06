@@ -26,6 +26,7 @@ export function initParticleText(canvas, options = {}) {
   let started = false;
   let startAt = 0;
   let raf = 0;
+  let dotSize = particleSize;
 
   function hexToRgb(hex) {
     const n = hex.replace("#", "");
@@ -54,9 +55,15 @@ export function initParticleText(canvas, options = {}) {
   }
 
   function sample() {
+    const nextW = Math.max(1, Math.round(canvas.clientWidth));
+    const nextH = Math.max(1, Math.round(canvas.clientHeight));
+    if (nextW < 8 || nextH < 8) {
+      requestAnimationFrame(sample);
+      return;
+    }
+
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const nextW = Math.max(1, canvas.clientWidth);
-    const nextH = Math.max(1, canvas.clientHeight);
+    const narrow = nextW < 500;
     width = nextW;
     height = nextH;
     canvas.width = Math.floor(nextW * dpr);
@@ -64,14 +71,17 @@ export function initParticleText(canvas, options = {}) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
     const off = document.createElement("canvas");
-    off.width = Math.floor(nextW);
-    off.height = Math.floor(nextH);
+    off.width = nextW;
+    off.height = nextH;
     const octx = off.getContext("2d", { willReadFrequently: true });
-    let size = Math.min(nextH * 0.42, nextW * 0.18);
+    let size = narrow
+      ? Math.min(nextH * 0.22, nextW * 0.24)
+      : Math.min(nextH * 0.42, nextW * 0.18);
     octx.font = `${fontWeight} ${size}px ${fontFamily}`;
     const measured = octx.measureText(text).width;
-    if (measured > nextW * 0.88) {
-      size *= (nextW * 0.88) / Math.max(measured, 1);
+    const maxWidth = nextW * (narrow ? 0.86 : 0.88);
+    if (measured > maxWidth) {
+      size *= maxWidth / Math.max(measured, 1);
       octx.font = `${fontWeight} ${size}px ${fontFamily}`;
     }
     octx.fillStyle = "#000";
@@ -81,14 +91,18 @@ export function initParticleText(canvas, options = {}) {
 
     const data = octx.getImageData(0, 0, off.width, off.height).data;
     const next = [];
-    const step = Math.max(2, density);
-    const jitter = step * 0.7;
+    const step = narrow
+      ? Math.max(3, Math.round(size / 20))
+      : Math.max(2, density);
+    const skip = narrow ? 0.04 : 0.16;
+    const jitter = step * (narrow ? 0.28 : 0.7);
+    dotSize = narrow ? Math.max(particleSize, step * 0.52) : particleSize;
     for (let y = 0; y < off.height; y += step) {
       for (let x = 0; x < off.width; x += step) {
         if (data[(y * off.width + x) * 4 + 3] < 90) {
           continue;
         }
-        if (Math.random() < 0.16) {
+        if (Math.random() < skip) {
           continue;
         }
         const angle = Math.random() * Math.PI * 2;
@@ -167,12 +181,12 @@ export function initParticleText(canvas, options = {}) {
       if (glow) {
         ctx.fillStyle = `rgba(${rgb.r},${rgb.g},${rgb.b},0.16)`;
         ctx.beginPath();
-        ctx.arc(x, y, particleSize * 2.4, 0, Math.PI * 2);
+        ctx.arc(x, y, dotSize * 2.4, 0, Math.PI * 2);
         ctx.fill();
       }
       ctx.fillStyle = `rgb(${rgb.r},${rgb.g},${rgb.b})`;
       ctx.beginPath();
-      ctx.arc(x, y, particleSize * p.size, 0, Math.PI * 2);
+      ctx.arc(x, y, dotSize * p.size, 0, Math.PI * 2);
       ctx.fill();
     });
   }
