@@ -109,8 +109,8 @@ final class TacticalMapModel: ObservableObject {
     }
 
     static let positionInterval: TimeInterval = 1.0 / 3
-    static let facingEveryNTicks = 4
-    static let facingTurnDuration: TimeInterval = 0.45
+    static let facingEveryNTicks = 3
+    static let facingTurnDuration: TimeInterval = 0.35
     static let ladderFeet: [Float] = [10, 16, 25, 40, 65, 100, 160]
 
     @Published private(set) var tracks: [Track] = []
@@ -322,8 +322,8 @@ final class TacticalMapModel: ObservableObject {
     private func commit(at now: TimeInterval) {
         tickCount += 1
         let commitsFacing = tickCount.isMultiple(of: Self.facingEveryNTicks)
-        // Averaging the whole 1.33 s period meant a turn took two commits to
-        // settle; keeping only the last half of it settles in one.
+        // Averaging the whole 1 s period meant a turn took two commits to
+        // settle; keeping only the last two thirds of it settles in one.
         let clearsFacingWindow = tickCount % Self.facingEveryNTicks == Self.facingEveryNTicks / 2
         var idsToRemove: [String] = []
 

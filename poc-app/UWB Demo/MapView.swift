@@ -275,6 +275,17 @@ struct MapView: View {
         centre: CGPoint,
         pointsPerMetre: CGFloat
     ) {
+        for marker in markers where marker.track.hasBearing && marker.hasFacing {
+            drawDirectionCone(
+                in: &context,
+                centre: marker.point,
+                rotation: marker.rotation,
+                radius: 34,
+                color: marker.markerColor,
+                opacity: marker.opacity * 0.9
+            )
+        }
+
         for marker in markers {
             if marker.track.hasBearing {
                 let path = arrowPath(
@@ -371,6 +382,14 @@ struct MapView: View {
     }
 
     private func drawSelfMarker(in context: inout GraphicsContext, centre: CGPoint, time: TimeInterval) {
+        drawDirectionCone(
+            in: &context,
+            centre: centre,
+            rotation: 0,
+            radius: 54,
+            color: Theme.ember,
+            opacity: 1
+        )
         let glowArrow = arrowPath(width: 22 * 1.6, height: 26 * 1.6, centre: centre, rotation: 0)
         context.fill(glowArrow, with: .color(Theme.ember.opacity(0.10)))
         context.drawLayer { layer in
@@ -453,6 +472,45 @@ struct MapView: View {
         var arc = Path()
         arc.addArc(center: centre, radius: 60, startAngle: start, endAngle: end, clockwise: false)
         context.stroke(arc, with: .color(Theme.ember.opacity(0.35)), lineWidth: 1)
+    }
+
+    /// Half-angle of the direction cone, so the beam spans 28 degrees. A
+    /// published bearing is only good to a handful of degrees, and the arrow
+    /// alone reads as a claim of precision we cannot make; the cone says
+    /// "roughly this way" the way Apple Maps' beam does while the arrow inside
+    /// it still carries the exact heading.
+    private static let coneHalfAngle = 14.0 * Double.pi / 180
+
+    private func drawDirectionCone(
+        in context: inout GraphicsContext,
+        centre: CGPoint,
+        rotation: Float,
+        radius: CGFloat,
+        color: Color,
+        opacity: Double
+    ) {
+        // arrowPath points its tip up at rotation 0, which is -pi/2 in the
+        // arc's own angle convention.
+        let axis = Double(rotation) - .pi / 2
+        var cone = Path()
+        cone.move(to: centre)
+        cone.addArc(
+            center: centre,
+            radius: radius,
+            startAngle: .radians(axis - Self.coneHalfAngle),
+            endAngle: .radians(axis + Self.coneHalfAngle),
+            clockwise: false
+        )
+        cone.closeSubpath()
+        context.fill(
+            cone,
+            with: .radialGradient(
+                Gradient(colors: [color.opacity(0.30 * opacity), color.opacity(0)]),
+                center: centre,
+                startRadius: radius * 0.12,
+                endRadius: radius
+            )
+        )
     }
 
     private func arrowPath(width: CGFloat, height: CGFloat, centre: CGPoint, rotation: Float) -> Path {
