@@ -1,5 +1,5 @@
 import { initMap } from "./map.js?v=20";
-import { initParticleText } from "./particles.js?v=5";
+import { initParticleText } from "./particles.js?v=6";
 
 history.scrollRestoration = "manual";
 window.scrollTo(0, 0);
@@ -328,7 +328,7 @@ initParticleText(document.getElementById("name-particles"), {
   fontWeight: 700,
   color: "#f4f1ea",
   highlightColor: "#dbdad9",
-  density: 13,
+  density: 11,
   particleSize: 2.1,
   glow: false,
   idleDrift: 1.6,
