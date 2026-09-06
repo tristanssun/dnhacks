@@ -9,6 +9,10 @@ struct ContentView: View {
     @StateObject private var model = TacticalMapModel()
     @State private var snapshots: [PeerSnapshot] = []
     @State private var showDiagnostics = false
+    @AppStorage(DisplayName.key) private var callsign = ""
+    @State private var editingCallsign = false
+    @State private var callsignDraft = ""
+    @State private var relaunchNoticeShown = false
 
     @ViewBuilder
     var body: some View {
@@ -101,6 +105,17 @@ struct ContentView: View {
                         hasPeers: !model.tracks.isEmpty
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .overlay(alignment: .bottomTrailing) {
+                        CallsignChip(name: callsign) {
+                            callsignDraft = callsign
+                            editingCallsign = true
+                        }
+                        // Clears the canvas' bottom-right corner bracket, which
+                        // runs 14pt in from a 12pt inset.
+                        .padding(.trailing, 30)
+                        .padding(.bottom, 9)
+                        .padding(.trailing, proxy.safeAreaInsets.trailing)
+                    }
 
                     Rectangle()
                         .fill(Theme.line)
@@ -139,6 +154,26 @@ struct ContentView: View {
         }
         .background(Theme.ground.ignoresSafeArea())
         .preferredColorScheme(.dark)
+        .onAppear { callsign = DisplayName.resolved() }
+        .alert("CALLSIGN", isPresented: $editingCallsign) {
+            TextField("CALLSIGN", text: $callsignDraft)
+                .textInputAutocapitalization(.characters)
+                .autocorrectionDisabled()
+            Button("CANCEL", role: .cancel) {}
+            Button("SET") {
+                if DisplayName.set(callsignDraft) {
+                    callsign = DisplayName.resolved()
+                    relaunchNoticeShown = true
+                }
+            }
+        } message: {
+            Text("How your team sees you on their map.")
+        }
+        .alert("RELAUNCH TO APPLY", isPresented: $relaunchNoticeShown) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Your team keeps seeing the old callsign until you quit and reopen the app — the radio identity is fixed for the life of a session.")
+        }
     }
 
     private func rosterHeight(peerCount: Int, bottomInset: CGFloat) -> CGFloat {
@@ -162,6 +197,33 @@ struct ContentView: View {
             }
         }
         .preferredColorScheme(.dark)
+    }
+}
+
+private struct CallsignChip: View {
+    let name: String
+    let onTap: () -> Void
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Text("YOU")
+                .foregroundStyle(Theme.inkFaint)
+            Text("·")
+                .foregroundStyle(Theme.line)
+            Text(name.isEmpty ? "SET NAME" : name.uppercased())
+                .foregroundStyle(name.isEmpty ? Theme.ember : Theme.inkDim)
+                .lineLimit(1)
+        }
+        .font(Theme.mono(10))
+        .kerning(Theme.tracking(10))
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .overlay {
+            Rectangle().stroke(Theme.line, lineWidth: 1)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onTap)
+        .accessibilityLabel("YOUR CALLSIGN, \(name). TAP TO EDIT.")
     }
 }
 
@@ -266,10 +328,10 @@ private struct RosterRow: View {
 
             HStack(spacing: 7) {
                 if track == nil {
-                    Text("LINKING")
+                    Text(snapshot.source.hasLostUWB ? "NO UWB" : "LINKING")
                         .font(Theme.mono(9, .medium))
                         .kerning(Theme.tracking(9))
-                        .foregroundStyle(Theme.inkFaint)
+                        .foregroundStyle(snapshot.source.hasLostUWB ? Theme.alarm : Theme.inkFaint)
                     LinkPips(stage: snapshot.linkStage)
                     Spacer(minLength: 4)
                 } else if track?.hasBearing != true {
@@ -337,7 +399,7 @@ private struct RosterRow: View {
             Text("NO RANGE")
                 .font(Theme.mono(12, .medium))
                 .kerning(Theme.tracking(12))
-                .foregroundStyle(Theme.inkFaint)
+                .foregroundStyle(snapshot.source.hasLostUWB ? Theme.alarm : Theme.inkFaint)
         }
     }
 

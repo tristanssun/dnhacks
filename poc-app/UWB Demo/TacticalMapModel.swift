@@ -125,8 +125,19 @@ final class TacticalMapModel: ObservableObject {
     }
 
     static let positionInterval: TimeInterval = 1.0 / 3
-    static let facingEveryNTicks = 3
-    static let facingTurnDuration: TimeInterval = 0.35
+    /// 1 = the arrow turns on every commit, so heading lands at the same rate as
+    /// position rather than lagging behind it. The throttle is kept rather than
+    /// deleted because it is the one dial that trades heading latency against
+    /// arrow jitter if the bearings ever get noisier than they are now.
+    static let facingEveryNTicks = 1
+    /// Just under `positionInterval`, so each turn finishes as the next commit
+    /// arrives instead of being cut off part-way and dragging a step behind.
+    static let facingTurnDuration: TimeInterval = 0.3
+    /// How long a peer may sit with no UWB of our own before its arrow comes off
+    /// the map. The roster row stays — the teammate still exists, we just have
+    /// nothing trustworthy left to draw. The arrow returns on its own when
+    /// ranging resumes.
+    static let uwbDropTimeout: TimeInterval = 5
     static let ladderFeet: [Float] = [10, 16, 25, 40, 65, 100, 160]
 
     @Published private(set) var tracks: [Track] = []
@@ -248,6 +259,9 @@ final class TacticalMapModel: ObservableObject {
         var lastSeen: TimeInterval
         var lastBearingSeen: TimeInterval?
         var bearingSeenSinceCommit = false
+        /// When the source last transitioned into a lost-UWB state, or nil while
+        /// UWB is healthy.
+        var lostUWBSince: TimeInterval?
         var facingSin: Float = 0
         var facingCos: Float = 0
         var facingCount = 0
@@ -328,7 +342,13 @@ final class TacticalMapModel: ObservableObject {
 
             state.latest = latest
             state.lastSeen = time
-            if state.track?.fadingSince != nil {
+            // A fade started by silence is cancelled the moment the peer speaks
+            // again. A fade started by losing UWB is not: the peer never stopped
+            // talking, so cancelling here would reset the drop timer on every
+            // snapshot and the arrow would never come off the map. It does still
+            // cancel once ranging recovers, which is what lets a brief blip heal
+            // mid-fade instead of blinking out.
+            if state.track?.fadingSince != nil, !latest.source.hasLostUWB {
                 state.track?.fadingSince = nil
             }
             states[snapshot.id] = state
@@ -338,8 +358,9 @@ final class TacticalMapModel: ObservableObject {
     private func commit(at now: TimeInterval) {
         tickCount += 1
         let commitsFacing = tickCount.isMultiple(of: Self.facingEveryNTicks)
-        // Averaging the whole 1 s period meant a turn took two commits to
-        // settle; keeping only the last two thirds of it settles in one.
+        // Only matters when the throttle is dialled back above 1: it drops the
+        // front of the averaging window so a turn settles in one commit instead
+        // of two. At 1 the window is a single tick and this is always true.
         let clearsFacingWindow = tickCount % Self.facingEveryNTicks == Self.facingEveryNTicks / 2
         var idsToRemove: [String] = []
 
@@ -347,6 +368,13 @@ final class TacticalMapModel: ObservableObject {
             guard var state = states[id], state.distance.hasValue else { continue }
             let hasRecentBearing = state.bearingSeenSinceCommit
                 || state.lastBearingSeen.map { now - $0 <= 1.5 } == true
+
+            if state.latest.source.hasLostUWB {
+                if state.lostUWBSince == nil { state.lostUWBSince = now }
+            } else {
+                state.lostUWBSince = nil
+            }
+            let droppedForUWB = state.lostUWBSince.map { now - $0 >= Self.uwbDropTimeout } == true
             let position: SIMD2<Float>
             if state.position.hasValue {
                 // Lead the glide by one interval of output velocity once the
@@ -376,15 +404,27 @@ final class TacticalMapModel: ObservableObject {
                     track.facingStart = now
                 }
 
-                if now - state.lastSeen > 1.0, track.fadingSince == nil {
+                let peerGone = now - state.lastSeen > 1.0
+                if peerGone || droppedForUWB, track.fadingSince == nil {
                     track.fadingSince = now
                 }
                 if let fadingSince = track.fadingSince, now - fadingSince > 0.6 {
-                    idsToRemove.append(id)
+                    if peerGone {
+                        idsToRemove.append(id)
+                    } else {
+                        // Still talking to us, just not over UWB. Keeping the
+                        // state — filters, last position, `lostUWBSince` — is
+                        // what stops `ingest` from immediately rebuilding the
+                        // arrow we just dropped, while leaving it ready to come
+                        // straight back the moment ranging resumes.
+                        state.track = nil
+                    }
                 } else {
                     state.track = track
                 }
-            } else {
+            } else if now - state.lastSeen > 1.0 {
+                idsToRemove.append(id)
+            } else if !droppedForUWB {
                 var track = Track(
                     id: id,
                     name: state.latest.name,

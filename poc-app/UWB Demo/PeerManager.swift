@@ -192,8 +192,17 @@ final class PeerManager: NSObject, ObservableObject {
     private var tracks: [MCPeerID: RangeTrack] = [:]
     private var bearingConfidence: [MCPeerID: Float] = [:]
     private var lastNIDirection: [MCPeerID: (direction: simd_float3, date: Date)] = [:]
-    /// Latest body azimuth to each peer (0 forward, positive right), radians.
-    private var lastBearing: [MCPeerID: (angle: Float, date: Date)] = [:]
+    /// Latest body azimuth to each peer (0 forward, positive right), radians,
+    /// together with the world-frame azimuth psi derived from it at the instant
+    /// of measurement.
+    ///
+    /// psi has to be captured here rather than recomputed later. It is
+    /// `localYaw - bodyAngle`, and `localYaw` moves with the phone, so deriving
+    /// it at exchange time reads the *current* yaw against a bearing up to
+    /// `maxLag` old. Any rotation inside that window then enters theta as pure
+    /// error: at a mild 100 deg/s over a 0.3 s lag that is 30 deg injected into
+    /// a measurement the filter accepts as good to 10.
+    private var lastBearing: [MCPeerID: (angle: Float, psi: Float?, date: Date)] = [:]
     /// Newest peer-to-peer range sample already fed to the filter, keyed "a|b".
     private var peerRangeDates: [String: Date] = [:]
     /// Newest §8 estimate per anchor and target; unreliable packets may reorder.
@@ -240,14 +249,17 @@ final class PeerManager: NSObject, ObservableObject {
         return id
     }
 
+    /// The archived `MCPeerID` is reused across launches so reconnecting peers
+    /// see a stable identity — but only while it still matches the callsign the
+    /// user has chosen. Renaming re-mints it, which is why an edit needs a
+    /// relaunch to reach the team.
     private static func storedPeerID() -> MCPeerID {
+        let name = DisplayName.resolved()
         if let data = UserDefaults.standard.data(forKey: "UWBDemo.mcPeerID"),
-           let peer = try? NSKeyedUnarchiver.unarchivedObject(ofClass: MCPeerID.self, from: data) {
+           let peer = try? NSKeyedUnarchiver.unarchivedObject(ofClass: MCPeerID.self, from: data),
+           peer.displayName == name {
             return peer
         }
-        let base = UIDevice.current.name
-        let suffix = String(UUID().uuidString.prefix(4))
-        let name = (base.isEmpty || base == "iPhone") ? "iPhone \(suffix)" : base
         let peer = MCPeerID(displayName: name)
         if let data = try? NSKeyedArchiver.archivedData(withRootObject: peer, requiringSecureCoding: true) {
             UserDefaults.standard.set(data, forKey: "UWBDemo.mcPeerID")
@@ -445,8 +457,8 @@ final class PeerManager: NSObject, ObservableObject {
     /// Addressed to one peer and carrying only the bearing for that link, so
     /// unlike 0x57 there is no UUID and no list — an exchange only ever
     /// concerns the pair that made it.
-    private func sendBearing(_ angle: Float, at date: Date, to peerID: MCPeerID) {
-        guard let psi = locar.worldAzimuth(bodyAngle: angle) else {
+    private func sendBearing(_ psi: Float?, at date: Date, to peerID: MCPeerID) {
+        guard let psi else {
             bearingLog("send-skip", peerID, "no world azimuth (ARKit not tracking)")
             return
         }
@@ -477,7 +489,9 @@ final class PeerManager: NSObject, ObservableObject {
             bearingLog("theta-skip", peerID, "no bearing of our own")
             return
         }
-        guard let ourPsi = locar.worldAzimuth(bodyAngle: mine.angle) else {
+        // Deliberately the psi captured when the bearing was measured, not one
+        // re-derived from `mine.angle` now: see `lastBearing`.
+        guard let ourPsi = mine.psi else {
             bearingLog("theta-skip", peerID, "no world azimuth")
             return
         }
@@ -753,11 +767,19 @@ final class PeerManager: NSObject, ObservableObject {
         return true
     }
 
+    /// Body azimuth to this peer for display, corrected for rotation since the
+    /// measurement.
+    ///
+    /// The stored sample is up to `directionWindow` old and the phone keeps
+    /// turning underneath it, so replaying the raw body angle swings the arrow
+    /// with every rotation. Re-deriving it from the world azimuth captured at
+    /// measurement time keeps the arrow pointing at the same place in the room.
     private func freshBearing(for peerID: MCPeerID, at now: Date) -> Float? {
         guard let sample = lastBearing[peerID], now.timeIntervalSince(sample.date) < directionWindow else {
             return nil
         }
-        return sample.angle
+        guard let psi = sample.psi else { return sample.angle }
+        return LocAREngine.wrapAngle(locar.localYaw - psi)
     }
 
     /// Body azimuth from this NI update. Camera-assisted `horizontalAngle` when
@@ -828,10 +850,6 @@ final class PeerManager: NSObject, ObservableObject {
         // Cleared on the attempt, not on success: `calibrate` also declines when
         // the estimate already agrees with the range, which needs no retry.
         pendingRecalibration.remove(peerID)
-        pendingInvites[peerID] = nil
-        lastInviteReceived[peerID] = nil
-        lastRemoteYaw[peerID] = nil
-        lastThetaAnchor[peerID] = nil
         let direction = freshDirection(for: peerID, at: now)
         if locar.calibrate(peerID: peerID, range: range, direction: direction) {
             lastCalibration[peerID] = now
@@ -1687,6 +1705,8 @@ final class PeerManager: NSObject, ObservableObject {
         pingSentAt[peerID] = nil
         forgetBluetooth(for: peerID)
         lastEstimate[peerID] = nil
+        lastRemoteYaw[peerID] = nil
+        lastThetaAnchor[peerID] = nil
         lastRangeIngest[peerID] = nil
         lastBearingIngest[peerID] = nil
         lastThetaIngest[peerID] = nil
@@ -1730,7 +1750,8 @@ final class PeerManager: NSObject, ObservableObject {
             lastNIDirection[peerID] = (direction, now)
         }
         var changed = false
-        if bodyAngle(horizontalAngle: horizontalAngle, direction: direction) == nil {
+        let bearing = bodyAngle(horizontalAngle: horizontalAngle, direction: direction)
+        if bearing == nil {
             // "no bearing of our own" is where the theta exchange dies, so name
             // which input was missing rather than just that the result was nil.
             bearingLog(
@@ -1740,9 +1761,11 @@ final class PeerManager: NSObject, ObservableObject {
                     + (useCameraAssistance ? "" : " camOff")
             )
         }
-        if let angle = bodyAngle(horizontalAngle: horizontalAngle, direction: direction) {
-            lastBearing[peerID] = (angle, now)
-            sendBearing(angle, at: now, to: peerID)
+        if let angle = bearing {
+            // Resolved here, against the yaw this bearing was actually taken at.
+            let psi = locar.worldAzimuth(bodyAngle: angle)
+            lastBearing[peerID] = (angle, psi, now)
+            sendBearing(psi, at: now, to: peerID)
             // Gated separately from range: bearing is a different information
             // channel and shouldn't be starved by range traffic, or vice versa.
             if shouldIngest(peerID, .bearing, at: now) {
