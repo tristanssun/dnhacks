@@ -1,370 +1,468 @@
-import simd
 import SwiftUI
 
 struct ContentView: View {
+    #if targetEnvironment(simulator)
+    @StateObject private var demo = DemoTeam()
+    #else
     @StateObject private var manager = PeerManager()
+    #endif
+    @StateObject private var model = TacticalMapModel()
+    @State private var snapshots: [PeerSnapshot] = []
+    @State private var showDiagnostics = false
 
+    @ViewBuilder
     var body: some View {
-        if let message = manager.unsupportedMessage {
-            Text(message)
-                .multilineTextAlignment(.center)
-                .padding()
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            GeometryReader { proxy in
-                // Capped at 60. ProMotion was driving this at 120+, and the
-                // radar carries no detail that a 120 Hz redraw resolves — it
-                // just doubled layout work on the same thread the filter and
-                // ARKit frame delivery share.
-                TimelineView(.animation(minimumInterval: 1.0 / 60, paused: manager.peers.isEmpty)) { context in
-                    radar(size: proxy.size, safeArea: proxy.safeAreaInsets, date: context.date)
-                }
-            }
-            .ignoresSafeArea()
-            .overlay(alignment: .top) {
-                VStack(spacing: 2) {
-                    PerfHUD(perf: manager.perf)
-                    Text("ARKit \(manager.trackingState)")
-                        .font(.system(size: 10).monospaced())
-                        .foregroundStyle(manager.trackingState == "normal" ? Color.secondary : Color.red)
-                }
-            }
-        }
-    }
-
-    private func radar(size: CGSize, safeArea: EdgeInsets, date: Date) -> some View {
-        // One call per TimelineView tick, so this is the rate the user sees.
-        perfCounters.recordUIFrame()
-        let pad: CGFloat = 24
-        let local = CGPoint(x: size.width / 2, y: size.height - safeArea.bottom - pad)
-        let minX = pad
-        let maxX = size.width - pad
-        let minY = max(safeArea.top, 54) + 56
-        let maxY = local.y
-        let usableHeight = max(maxY - minY, 1)
-        let marks = Self.marks(from: Array(manager.peers.values).sorted { $0.displayName < $1.displayName }, at: date)
-        // Fixed 8 m full-scale pinned every peer to the screen edge at the
-        // ranges actually being tested (6-9 m), so the drawn position stopped
-        // tracking reality well before any estimation error did. Scale to the
-        // farthest peer instead, with headroom so a peer walking out does not
-        // sit on the boundary, and a floor so a close pair is not magnified
-        // into jitter.
-        let span = Self.radarSpan(for: marks)
-        let scale = usableHeight / span
-        let placed = Self.placedMarks(
-            from: marks,
-            local: local,
-            scale: scale,
-            minX: minX,
-            maxX: maxX,
-            minY: minY,
-            maxY: maxY
+        #if targetEnvironment(simulator)
+        tacticalLayout(
+            yaw: demo.yaw,
+            heading: demo.heading,
+            trackingState: demo.trackingState,
+            peerCount: snapshots.count,
+            perf: demo.perf
         )
-
-        return ZStack(alignment: .topLeading) {
-            ArrowMark()
-                .frame(width: 16, height: 28)
-                .offset(x: local.x - 8, y: local.y - 14)
-
-            // The span moves with the farthest peer, so it has to be readable
-            // or the radar silently rescales under you.
-            Text(String(format: "%.0f ft", span * 3.28084))
-                .font(.system(size: 10).monospacedDigit())
-                .foregroundStyle(.secondary)
-                .offset(x: minX, y: minY - 16)
-
-            ForEach(placed) { item in
-                let mark = item.mark
-                let point = item.point
-                let rotation = Self.rotation(for: mark, localHeading: manager.localHeading)
-                ArrowMark()
-                    .frame(width: 14, height: 26)
-                    .rotationEffect(.radians(Double(rotation)))
-                    .offset(x: point.x - 7, y: point.y - 13)
-                VStack(spacing: 1) {
-                    Text(mark.peer.displayName)
-                    Text(Self.distanceLabel(for: mark))
-                    Text(Self.latency(mark.latencyMs))
-                    if mark.direction == nil {
-                        // This is the only actionable line on screen and it was
-                        // rendered as quiet secondary text below the label, so a
-                        // camera-assistance convergence stuck on "Move a little"
-                        // for a whole session read as the app simply not working.
-                        // Nearby Interaction's own reason when it has one,
-                        // otherwise parallax: successive ranges from different
-                        // vantage points triangulate the peer, so stepping
-                        // sideways feeds the filter and walking straight at them
-                        // does not.
-                        Text(mark.peer.hint ?? "Step side to side")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(Color.orange)
-                    }
-                    if let link = mark.peer.link {
-                        Text(link)
-                            .font(.system(size: 9).monospaced())
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .font(.caption)
-                .multilineTextAlignment(.center)
-                .frame(width: 150)
-                .offset(x: point.x - 75, y: min(point.y + 16, maxY - 4))
-            }
-        }
-        .frame(width: size.width, height: size.height, alignment: .topLeading)
-        .clipped()
-    }
-
-    /// Metres represented by the full height of the radar.
-    private static func radarSpan(for marks: [Mark]) -> CGFloat {
-        let farthest = marks.map { CGFloat($0.distance) }.max() ?? 0
-        return min(max(farthest * 1.25, 4), 40)
-    }
-
-    private struct Mark: Identifiable {
-        let id: String
-        let peer: PeerManager.Peer
-        let distance: Float
-        let source: PeerManager.Peer.DistanceSource
-        let direction: simd_float3?
-        let latencyMs: Int?
-    }
-
-    private struct PlacedMark: Identifiable {
-        var id: String { mark.id }
-        let mark: Mark
-        let point: CGPoint
-    }
-
-    private static func placedMarks(
-        from marks: [Mark],
-        local: CGPoint,
-        scale: CGFloat,
-        minX: CGFloat,
-        maxX: CGFloat,
-        minY: CGFloat,
-        maxY: CGFloat
-    ) -> [PlacedMark] {
-        let raw = marks.map { mark in
-            clampedPoint(
-                distance: mark.distance,
-                direction: mark.direction,
-                local: local,
-                scale: scale,
-                minX: minX,
-                maxX: maxX,
-                minY: minY,
-                maxY: maxY
+        .onReceive(demo.$snapshots) { peers in
+            snapshots = peers.sorted { $0.name < $1.name }
+            model.ingest(
+                peers,
+                yaw: demo.yaw,
+                frameEpoch: demo.frameEpoch,
+                at: Date().timeIntervalSinceReferenceDate
             )
         }
-        let spread = spreadSideBySide(raw, minX: minX, maxX: maxX)
-        return zip(marks, spread).map { PlacedMark(mark: $0, point: $1) }
-    }
-
-    private static func spreadSideBySide(
-        _ points: [CGPoint],
-        minX: CGFloat,
-        maxX: CGFloat,
-        clusterRadius: CGFloat = 96,
-        spacing: CGFloat = 156
-    ) -> [CGPoint] {
-        let count = points.count
-        guard count > 1 else { return points }
-
-        var parent = Array(0..<count)
-        func find(_ index: Int) -> Int {
-            if parent[index] != index {
-                parent[index] = find(parent[index])
-            }
-            return parent[index]
-        }
-        func union(_ a: Int, _ b: Int) {
-            let pa = find(a)
-            let pb = find(b)
-            if pa != pb {
-                parent[pa] = pb
-            }
-        }
-
-        for i in 0..<count {
-            for j in (i + 1)..<count {
-                let dx = points[i].x - points[j].x
-                let dy = points[i].y - points[j].y
-                if (dx * dx) + (dy * dy) < clusterRadius * clusterRadius {
-                    union(i, j)
-                }
-            }
-        }
-
-        var groups: [Int: [Int]] = [:]
-        for index in 0..<count {
-            groups[find(index), default: []].append(index)
-        }
-
-        var result = points
-        for indices in groups.values where indices.count > 1 {
-            let sorted = indices.sorted()
-            let centerX = sorted.reduce(CGFloat.zero) { $0 + points[$1].x } / CGFloat(sorted.count)
-            let centerY = sorted.reduce(CGFloat.zero) { $0 + points[$1].y } / CGFloat(sorted.count)
-            let slots = CGFloat(sorted.count)
-            var gap = spacing
-            let usable = max(maxX - minX, 1)
-            if (slots - 1) * gap > usable {
-                gap = usable / max(slots - 1, 1)
-            }
-            let width = (slots - 1) * gap
-            var start = centerX - width / 2
-            if start < minX {
-                start = minX
-            }
-            if start + width > maxX {
-                start = maxX - width
-            }
-            for (slot, index) in sorted.enumerated() {
-                result[index] = CGPoint(x: start + CGFloat(slot) * gap, y: centerY)
-            }
-        }
-        return result
-    }
-
-    private static func marks(from peers: [PeerManager.Peer], at date: Date) -> [Mark] {
-        peers.compactMap { peer in
-            guard let display = peer.displayDistance(at: date) else {
-                return nil
-            }
-            return Mark(
-                id: "\(peer.displayName)-\(peer.id.hashValue)",
-                peer: peer,
-                distance: display.meters,
-                source: display.source,
-                direction: peer.locarDirection,
-                latencyMs: peer.uwbLatencyMs ?? peer.bluetoothLatencyMs
-            )
-        }
-    }
-
-    private static func clampedPoint(
-        distance: Float,
-        direction: simd_float3?,
-        local: CGPoint,
-        scale: CGFloat,
-        minX: CGFloat,
-        maxX: CGFloat,
-        minY: CGFloat,
-        maxY: CGFloat
-    ) -> CGPoint {
-        let meters = CGFloat(distance)
-        var x = local.x
-        var y = local.y
-        if let direction {
-            x = local.x + CGFloat(direction.x) * meters * scale
-            y = local.y - CGFloat(direction.y) * meters * scale
+        .onAppear { demo.start() }
+        .onDisappear { demo.stop() }
+        #else
+        if let message = manager.unsupportedMessage {
+            unsupported(message: message)
         } else {
-            y = local.y - meters * scale
+            tacticalLayout(
+                yaw: manager.localYaw,
+                heading: manager.localHeading,
+                trackingState: manager.trackingState,
+                peerCount: manager.peers.count,
+                perf: manager.perf
+            )
+            .onReceive(manager.$peers) { peers in
+                let date = Date()
+                let next = peers.values.map {
+                    PeerSnapshot(peer: $0, localHeading: manager.localHeading, at: date)
+                }
+                snapshots = next.sorted { $0.name < $1.name }
+                model.ingest(
+                    next,
+                    yaw: manager.localYaw,
+                    frameEpoch: manager.frameEpoch,
+                    at: date.timeIntervalSinceReferenceDate
+                )
+            }
         }
-        if y < minY { y = minY }
-        if y > maxY { y = maxY }
-        if x < minX { x = minX }
-        if x > maxX { x = maxX }
-        return CGPoint(x: x, y: y)
+        #endif
     }
 
-    /// Peer arrow rotation from compass: their magnetic heading minus ours.
-    private static func rotation(for mark: Mark, localHeading: Float) -> Float {
-        guard let heading = mark.peer.heading else { return 0 }
-        return heading - localHeading
-    }
+    private func tacticalLayout(
+        yaw: Float,
+        heading: Float,
+        trackingState: String,
+        peerCount: Int,
+        perf: PerfMonitor
+    ) -> some View {
+        GeometryReader { proxy in
+            let rosterHeight = rosterHeight(peerCount: snapshots.count, bottomInset: proxy.safeAreaInsets.bottom)
 
-    /// "12.4 ft" live UWB. "~12.4 ft" VIO-propagated or stale. Trailing "?" means
-    /// no usable bearing, so the arrow is drawn straight ahead.
-    private static func distanceLabel(for mark: Mark) -> String {
-        let feet = Double(mark.distance) * 3.28084
-        var text = String(format: "%.1f ft", feet)
-        switch mark.source {
-        case .live:
-            break
-        case .relayed:
-            // Not our measurement gone stale — someone else's, arriving
-            // second-hand. That is the expected state past our own UWB range,
-            // so it reads differently from a reading we let go cold.
-            text = "!" + text
-        case .aging, .inferred:
-            text = "~" + text
+            ZStack {
+                Theme.ground.ignoresSafeArea()
+
+                VStack(spacing: 0) {
+                    StatusBar(
+                        peerCount: peerCount,
+                        hasLiveTrack: model.tracks.contains { $0.source == .live },
+                        trackingState: trackingState,
+                        cameraAssisted: snapshots.contains { $0.cameraAssisted }
+                    )
+                    .padding(.top, proxy.safeAreaInsets.top)
+                    .padding(.leading, proxy.safeAreaInsets.leading)
+                    .padding(.trailing, proxy.safeAreaInsets.trailing)
+                    .frame(height: 44 + proxy.safeAreaInsets.top)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        withAnimation(Theme.ease) {
+                            showDiagnostics.toggle()
+                        }
+                    }
+
+                    Rectangle()
+                        .fill(Theme.line)
+                        .frame(height: 1)
+
+                    MapView(
+                        model: model,
+                        yaw: yaw,
+                        heading: heading,
+                        hasPeers: !model.tracks.isEmpty
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                    Rectangle()
+                        .fill(Theme.line)
+                        .frame(height: 1)
+
+                    Roster(
+                        snapshots: snapshots,
+                        tracks: model.tracks,
+                        safeArea: proxy.safeAreaInsets
+                    )
+                    .frame(height: rosterHeight)
+                }
+                .frame(width: proxy.size.width, height: proxy.size.height)
+
+                if showDiagnostics {
+                    VStack(spacing: 0) {
+                        Spacer(minLength: 0)
+                        DiagnosticsSheet(
+                            perf: perf,
+                            snapshots: snapshots,
+                            trackingState: trackingState,
+                            horizontalInsets: EdgeInsets(
+                                top: 0,
+                                leading: proxy.safeAreaInsets.leading,
+                                bottom: 0,
+                                trailing: proxy.safeAreaInsets.trailing
+                            )
+                        )
+                    }
+                    .padding(.bottom, rosterHeight)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height)
+            .ignoresSafeArea()
         }
-        return mark.direction == nil ? "\(text)?" : text
+        .background(Theme.ground.ignoresSafeArea())
+        .preferredColorScheme(.dark)
     }
 
-    private static func latency(_ ms: Int?) -> String {
-        guard let ms else { return "- ms" }
-        return "\(ms) ms"
+    private func rosterHeight(peerCount: Int, bottomInset: CGFloat) -> CGFloat {
+        let contentHeight: CGFloat = peerCount == 0 ? 36 : CGFloat(min(peerCount, 4)) * 56
+        return contentHeight + bottomInset
+    }
+
+    private func unsupported(message: String) -> some View {
+        ZStack {
+            Theme.ground.ignoresSafeArea()
+            VStack(spacing: 12) {
+                Text("UWB UNAVAILABLE")
+                    .font(Theme.mono(12, .semibold))
+                    .kerning(Theme.tracking(12))
+                    .foregroundStyle(Theme.ink)
+                Text(message)
+                    .font(Theme.display(13))
+                    .foregroundStyle(Theme.inkDim)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 280)
+            }
+        }
+        .preferredColorScheme(.dark)
     }
 }
 
-/// A/B controls and live counters for the progressive-slowdown test.
-/// Flip a toggle mid-run: the same session, map, and thermal state on both
-/// sides of the switch is a far cleaner comparison than two separate runs.
+private struct StatusBar: View {
+    let peerCount: Int
+    let hasLiveTrack: Bool
+    let trackingState: String
+    let cameraAssisted: Bool
+
+    var body: some View {
+        HStack(spacing: 9) {
+            ZStack {
+                if hasLiveTrack {
+                    Circle()
+                        .fill(Theme.ember.opacity(0.7))
+                        .frame(width: 6, height: 6)
+                        .blur(radius: 6)
+                }
+                Circle()
+                    .fill(hasLiveTrack ? Theme.ember : Theme.inkFaint)
+                    .frame(width: 6, height: 6)
+            }
+
+            Text("LINK · \(peerCount)")
+                .foregroundStyle(Theme.inkDim)
+
+            Spacer(minLength: 10)
+
+            Text("ARKIT \(trackingState.uppercased())")
+                .foregroundStyle(trackingState == "normal" ? Theme.inkDim : Theme.inkFaint)
+
+            if cameraAssisted {
+                Text("CAM")
+                    .foregroundStyle(Theme.inkDim)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 3)
+                    .overlay {
+                        Rectangle().stroke(Theme.line, lineWidth: 1)
+                    }
+            }
+        }
+        .font(Theme.mono(10))
+        .kerning(Theme.tracking(10))
+        .padding(.horizontal, 16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.ground)
+    }
+}
+
+private struct Roster: View {
+    let snapshots: [PeerSnapshot]
+    let tracks: [TacticalMapModel.Track]
+    let safeArea: EdgeInsets
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if snapshots.isEmpty {
+                Text("SCANNING")
+                    .font(Theme.mono(9))
+                    .kerning(Theme.tracking(9))
+                    .foregroundStyle(Theme.inkFaint)
+                    .frame(maxWidth: .infinity, minHeight: 36, maxHeight: 36)
+            } else {
+                ScrollView(.vertical, showsIndicators: false) {
+                    LazyVStack(spacing: 0) {
+                        ForEach(snapshots) { snapshot in
+                            RosterRow(
+                                snapshot: snapshot,
+                                track: tracks.first { $0.id == snapshot.id }
+                            )
+                        }
+                    }
+                }
+            }
+
+            Theme.ground
+                .frame(height: safeArea.bottom)
+        }
+        .padding(.leading, safeArea.leading)
+        .padding(.trailing, safeArea.trailing)
+        .background(Theme.ground)
+    }
+}
+
+private struct RosterRow: View {
+    let snapshot: PeerSnapshot
+    let track: TacticalMapModel.Track?
+
+    var body: some View {
+        VStack(spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(snapshot.name.uppercased())
+                    .font(Theme.mono(12, .semibold))
+                    .kerning(Theme.tracking(12))
+                    .foregroundStyle(Theme.ink)
+                    .lineLimit(1)
+
+                Spacer(minLength: 8)
+
+                rosterDistance
+            }
+
+            HStack(spacing: 7) {
+                if track == nil {
+                    Text("LINKING")
+                        .font(Theme.mono(9, .medium))
+                        .kerning(Theme.tracking(9))
+                        .foregroundStyle(Theme.inkFaint)
+                    LinkPips(stage: snapshot.linkStage)
+                    Spacer(minLength: 4)
+                } else if track?.hasBearing != true {
+                    Text((track?.hint ?? snapshot.hint ?? "STEP SIDE TO SIDE").uppercased())
+                        .font(Theme.mono(9, .medium))
+                        .kerning(Theme.tracking(9))
+                        .foregroundStyle(Theme.ember)
+                        .lineLimit(1)
+
+                    Spacer(minLength: 4)
+
+                    Text("NO FIX")
+                        .font(Theme.mono(9))
+                        .kerning(Theme.tracking(9))
+                        .foregroundStyle(Theme.inkFaint)
+                } else {
+                    Text(statusLabel)
+                        .font(Theme.mono(9, .medium))
+                        .kerning(Theme.tracking(9))
+                        .foregroundStyle(statusColor)
+
+                    if let latency = track?.latencyMs ?? snapshot.latencyMs {
+                        Text("· \(latency) MS")
+                            .font(Theme.mono(9))
+                            .foregroundStyle(Theme.inkFaint)
+                    }
+
+                    LinkPips(stage: track?.linkStage ?? snapshot.linkStage)
+
+                    Spacer(minLength: 4)
+                }
+
+                if track?.cameraAssisted == true || snapshot.cameraAssisted {
+                    Text("CAM")
+                        .font(Theme.mono(9))
+                        .kerning(Theme.tracking(9))
+                        .foregroundStyle(Theme.inkFaint)
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .frame(height: 56)
+        .background(Theme.panel)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Theme.line)
+                .frame(height: 1)
+        }
+    }
+
+    @ViewBuilder
+    private var rosterDistance: some View {
+        if let track {
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text(distanceNumber(track.distance))
+                    .font(Theme.mono(20, .medium))
+                    .monospacedDigit()
+                Text("FT")
+                    .font(Theme.mono(10))
+                    .kerning(Theme.tracking(10))
+            }
+            .foregroundStyle(track.source == .live ? Theme.ink : Theme.inkDim)
+        } else {
+            Text("NO RANGE")
+                .font(Theme.mono(12, .medium))
+                .kerning(Theme.tracking(12))
+                .foregroundStyle(Theme.inkFaint)
+        }
+    }
+
+    private var statusLabel: String {
+        switch track?.source ?? snapshot.source {
+        case .live: return "LIVE"
+        case .aging: return "AGING"
+        case .relayed: return "RELAY"
+        case .inferred: return "DR"
+        case .none: return "NO FIX"
+        }
+    }
+
+    private var statusColor: Color {
+        switch track?.source ?? snapshot.source {
+        case .live: return Theme.ember
+        case .aging: return Theme.inkDim
+        case .relayed: return Theme.frost
+        case .inferred, .none: return Theme.inkFaint
+        }
+    }
+
+    private func distanceNumber(_ metres: Float) -> String {
+        let feet = metres / 0.3048
+        return feet < 100
+            ? String(format: "%.1f", Double(feet))
+            : String(format: "%.0f", Double(feet))
+    }
+}
+
+private struct LinkPips: View {
+    let stage: Int
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(0..<4, id: \.self) { index in
+                Rectangle()
+                    .fill(index < stage ? Theme.inkDim : Theme.line)
+                    .frame(width: 3, height: 8)
+            }
+        }
+        .accessibilityLabel("LINK STAGE \(stage) OF 4")
+    }
+}
+
+private struct DiagnosticsSheet: View {
+    @ObservedObject var perf: PerfMonitor
+    let snapshots: [PeerSnapshot]
+    let trackingState: String
+    let horizontalInsets: EdgeInsets
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            PerfHUD(perf: perf)
+
+            Rectangle()
+                .fill(Theme.line)
+                .frame(height: 1)
+
+            Text("ARKIT \(trackingState.uppercased())")
+                .font(Theme.mono(9))
+                .kerning(Theme.tracking(9))
+                .foregroundStyle(Theme.inkFaint)
+
+            ForEach(snapshots) { snapshot in
+                Text("\(snapshot.name.uppercased())  \(snapshot.link ?? "—")")
+                    .font(Theme.mono(9))
+                    .foregroundStyle(Theme.inkFaint)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
+        }
+        .padding(.leading, 14 + horizontalInsets.leading)
+        .padding(.trailing, 14 + horizontalInsets.trailing)
+        .padding(.vertical, 11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.ground.opacity(0.92))
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(Theme.line)
+                .frame(height: 1)
+        }
+    }
+}
+
 private struct PerfHUD: View {
     @ObservedObject var perf: PerfMonitor
 
     var body: some View {
         let snapshot = perf.snapshot
-        VStack(spacing: 5) {
-            HStack(spacing: 12) {
-                metric("AR", snapshot.arHz, "%.0f", "Hz")
-                metric("UI", snapshot.uiHz, "%.0f", "Hz")
-                metric("pub", snapshot.publishHz, "%.0f", "Hz")
-                metric("hop p95", snapshot.hopP95Ms, "%.1f", "ms")
-                metric("recenter", snapshot.recenterMsPerSec, "%.0f", "ms/s")
-                metric("mem", snapshot.memoryMB, "%.0f", "MB")
-                VStack(spacing: 0) {
-                    Text("thermal")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.secondary)
-                    Text(PerfMonitor.thermalNames[min(snapshot.thermal, 3)])
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(snapshot.thermal >= 2 ? .red : .primary)
-                }
+        HStack(spacing: 10) {
+            metric("AR", snapshot.arHz, "%.0f", "HZ")
+            metric("UI", snapshot.uiHz, "%.0f", "HZ")
+            metric("PUB", snapshot.publishHz, "%.0f", "HZ")
+            metric("HOP P95", snapshot.hopP95Ms, "%.1f", "MS")
+            metric("RECENTER", snapshot.recenterMsPerSec, "%.0f", "MS/S")
+            metric("MEM", snapshot.memoryMB, "%.0f", "MB")
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("THERMAL")
+                    .font(Theme.mono(8))
+                    .kerning(Theme.tracking(8))
+                    .foregroundStyle(Theme.inkFaint)
+                Text(thermalValue(snapshot.thermal))
+                    .font(Theme.mono(11, .medium))
+                    .foregroundStyle(snapshot.thermal >= 2 ? Theme.ink : Theme.inkDim)
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
-        .padding(.top, 2)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func metric(_ label: String, _ value: Double, _ format: String, _ unit: String) -> some View {
-        VStack(spacing: 0) {
+        VStack(alignment: .leading, spacing: 1) {
             Text(label)
-                .font(.system(size: 9))
-                .foregroundStyle(.secondary)
+                .font(Theme.mono(8))
+                .kerning(Theme.tracking(8))
+                .foregroundStyle(Theme.inkFaint)
             Text(String(format: format, value) + unit)
-                .font(.system(size: 12, weight: .medium).monospacedDigit())
+                .font(Theme.mono(11, .medium))
+                .monospacedDigit()
+                .foregroundStyle(Theme.ink)
         }
     }
-}
 
-private struct ArrowMark: View {
-    var body: some View {
-        ArrowShape()
-            .fill(Color.primary)
-    }
-}
-
-private struct ArrowShape: Shape {
-    func path(in rect: CGRect) -> Path {
-        let width = rect.width
-        let height = rect.height
-        let stem = width * 0.32
-        let head = height * 0.42
-        var path = Path()
-        path.move(to: CGPoint(x: width / 2, y: 0))
-        path.addLine(to: CGPoint(x: width, y: head))
-        path.addLine(to: CGPoint(x: width / 2 + stem / 2, y: head))
-        path.addLine(to: CGPoint(x: width / 2 + stem / 2, y: height))
-        path.addLine(to: CGPoint(x: width / 2 - stem / 2, y: height))
-        path.addLine(to: CGPoint(x: width / 2 - stem / 2, y: head))
-        path.addLine(to: CGPoint(x: 0, y: head))
-        path.closeSubpath()
-        return path
+    private func thermalValue(_ level: Int) -> String {
+        let name = PerfMonitor.thermalNames[min(max(level, 0), 3)].uppercased()
+        return level >= 2 ? "!\(name)" : name
     }
 }

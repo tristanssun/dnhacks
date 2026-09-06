@@ -71,6 +71,15 @@ final class PeerManager: NSObject, ObservableObject {
     /// this is the only signal that says whether `horizontalAngle` is even
     /// possible on this device.
     @Published var trackingState = "init"
+    /// Bumped on every ARKit re-origin (tracking resumed after a loss). The
+    /// map keeps peer positions in the ARKit horizontal frame so they hold
+    /// still while the phone turns; a re-origin changes what that frame means,
+    /// so the map rotates its state to preserve body-relative positions.
+    @Published private(set) var frameEpoch = 0
+    /// Our azimuth in the ARKit horizontal frame, radians. Increases
+    /// counter-clockwise viewed from above (ARKit: turning right moves forward
+    /// from -z toward +x, which is a falling `atan2(x, z)`).
+    var localYaw: Float { locar.localYaw }
 
     private let serviceType = "uwbdemo"
     private nonisolated let discoveryID: String
@@ -312,6 +321,7 @@ final class PeerManager: NSObject, ObservableObject {
         guard pose.isReliable else { return }
         if pose.didResume {
             pendingVIOReset = true
+            frameEpoch += 1
         }
         let now = Date()
         locar.setLocal(pose)
@@ -1363,9 +1373,21 @@ final class PeerManager: NSObject, ObservableObject {
     private func updateThetaPrior(for peerID: MCPeerID) {
         guard let theirHeading = peers[peerID]?.heading,
               let theirYaw = lastRemoteYaw[peerID] else { return }
-        let ourOffset = localHeading - locar.localYaw
-        let theirOffset = theirHeading - theirYaw
-        let compassTheta = theirOffset - ourOffset
+        // Heading and ARKit yaw rotate in opposite senses: compass heading
+        // grows clockwise, ARKit yaw (`atan2(forward.x, forward.z)`) grows
+        // counter-clockwise viewed from above — turning right takes forward
+        // from -z toward +x, a falling angle. So the per-device constant that
+        // survives rotation is `heading + yaw`, the azimuth of north in that
+        // device's ARKit frame. θ rotates the peer's frame into ours, and north
+        // is north in both: north_theirs + θ = north_ours.
+        //
+        // This used to be `heading - yaw`, which is only invariant when the two
+        // phones face the same or opposite directions — exactly the two ways a
+        // pair is usually tested, so the prior looked right until the phones
+        // were held at 90°, where it was off by 180°.
+        let ourNorth = localHeading + locar.localYaw
+        let theirNorth = theirHeading + theirYaw
+        let compassTheta = LocAREngine.wrapAngle(ourNorth - theirNorth)
         locar.setThetaPrior(compassTheta, for: peerID)
 
         // Fed as an observation only once θ has degenerated. The compass is
