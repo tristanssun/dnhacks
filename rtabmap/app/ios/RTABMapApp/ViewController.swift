@@ -17,17 +17,6 @@ extension Array {
     }
 }
 
-private enum MissionTheme {
-    static let ink = UIColor(red: 5/255, green: 7/255, blue: 10/255, alpha: 1)
-    static let text = UIColor(red: 243/255, green: 245/255, blue: 244/255, alpha: 1)
-    static let muted = UIColor(red: 243/255, green: 245/255, blue: 244/255, alpha: 0.58)
-    static let orange = UIColor(red: 227/255, green: 148/255, blue: 42/255, alpha: 1)
-    static let go = UIColor(red: 71/255, green: 255/255, blue: 81/255, alpha: 1)
-    static let forest = UIColor(red: 107/255, green: 138/255, blue: 90/255, alpha: 1)
-    static let panel = UIColor(red: 16/255, green: 19/255, blue: 24/255, alpha: 0.92)
-    static let line = UIColor(red: 243/255, green: 245/255, blue: 244/255, alpha: 0.16)
-}
-
 class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIPickerViewDataSource, UIPickerViewDelegate, CLLocationManagerDelegate {
     
     private let session = ARSession()
@@ -158,15 +147,22 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
     private var waitingForRoomLock = false
     private var thisPhoneCalibrated = false
     private var roomLocked = false
+    private var lockPhonesRequired = 1
+    private var calibratedCount = 0
     private var lastCalibPost = Date.distantPast
     private var lastDemoPoll = Date.distantPast
     private var lastLivePosePost = Date.distantPast
+    private var demoPollInFlight = false
+    private var calibPostInFlight = false
     private var calibWaitStarted = Date.distantPast
     private let calibBanner = UILabel()
     private let seeTagButton = UIButton(type: .system)
-    private let welcomeKicker = UILabel()
     private let welcomeTitle = UILabel()
     private let welcomeSub = UILabel()
+    private let welcomeBackdrop = UIView()
+    private let settingsButton = UIButton(type: .system)
+    private let statusPanel = UIView()
+    private let toastPanel = UIView()
 
     func getDocumentDirectory() -> URL {
         return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -188,8 +184,23 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
         }
         self.toastLabel.text = message
         self.toastLabel.isHidden = false
+        self.toastPanel.isHidden = false
+        self.toastLabel.alpha = 0
+        self.toastPanel.alpha = 0
+        UIView.animate(withDuration: 0.18) {
+            self.toastLabel.alpha = 1
+            self.toastPanel.alpha = 1
+        }
         DispatchQueue.main.asyncAfter(deadline: DispatchTime.now() + seconds) {
-            self.toastLabel.isHidden = true
+            UIView.animate(withDuration: 0.2, animations: {
+                self.toastLabel.alpha = 0
+                self.toastPanel.alpha = 0
+            }, completion: { _ in
+                self.toastLabel.isHidden = true
+                self.toastPanel.isHidden = true
+                self.toastLabel.alpha = 1
+                self.toastPanel.alpha = 1
+            })
         }
     }
 
@@ -242,9 +253,9 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
     func addShadow(_ view: UIView, _ offset: Int = 4)
     {
         view.layer.shadowColor = UIColor.black.cgColor
-        view.layer.shadowRadius = 3.0
-        view.layer.shadowOpacity = 1.0
-        view.layer.shadowOffset = CGSize(width: offset, height: offset)
+        view.layer.shadowRadius = 8.0
+        view.layer.shadowOpacity = 0.35
+        view.layer.shadowOffset = CGSize(width: 0, height: 2)
         view.layer.masksToBounds = false
     }
     
@@ -256,11 +267,13 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
         // Do any additional setup after loading the view.
         
         self.toastLabel.isHidden = true
+        self.toastPanel.isHidden = true
         session.delegate = self
         
         addShadow(stopButton)
         addShadow(recordButton)
         addShadow(menuButton)
+        addShadow(settingsButton)
         addShadow(viewButton)
         addShadow(newScanButtonLarge)
         addShadow(libraryButton)
@@ -294,6 +307,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
         }
         
         menuButton.showsMenuAsPrimaryAction = true
+        settingsButton.showsMenuAsPrimaryAction = true
         viewButton.showsMenuAsPrimaryAction = true
         statusLabel.numberOfLines = 0
         statusLabel.text = ""
@@ -345,6 +359,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
                 self.statusLabel.text =
                     "Status: \(self.getStateString(state: self.mState))\n" +
                     "RAM Usage (MB): \(usedMem) / \(self.mMaximumMemory)"
+                self.refreshStatusChrome()
                 self.progressStatusUpdate()
             }
         }
@@ -401,6 +416,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
             self.statusLabel.text =
                 "Status: " + (status == 1 && msg.isEmpty ? self.mState == State.STATE_CAMERA ? "Camera Preview" : "Idle" : msg) + "\n" +
             	"RAM Usage (MB): \(usedMem) / \(self.mMaximumMemory)"
+            self.refreshStatusChrome()
         }
     }
         
@@ -515,6 +531,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
                     String(format: "Travelled distance: %.2f m\n", distanceTravelled) +
                     String(format: "Pose (x,y,z): %.2f %.2f %.2f", x, y, z)
             }
+            self.refreshStatusChrome()
             if(self.mState == .STATE_MAPPING || self.mState == .STATE_VISUALIZING_CAMERA)
             {
                 if(loopClosureId > 0) {
@@ -549,7 +566,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
             }
             if(self.mState == .STATE_MAPPING)
             {
-                if(availableMem < 400)
+                if(availableMem < 150)
                 {
                     let msg = "Scanning will be stopped because the free memory is too "
                     + "low (\(availableMem) MB). You should be able to save the database but some post-processing and exporting options may fail. "
@@ -563,10 +580,10 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
                     alert.addAction(alertActionYes)
                     self.present(alert, animated: true, completion: nil)
                 }
-                else if(!self.lowMemoryWarningShown && usedMem*3 > availableMem && !self.mDataRecording)
+                else if(!self.lowMemoryWarningShown && usedMem*2 > availableMem && !self.mDataRecording)
                 {
                     self.lowMemoryWarningShown = true
-                    let msg = "Available memory (\(availableMem) MB) should be at least 3 times the "
+                    let msg = "Available memory (\(availableMem) MB) should be at least 2 times the "
                     + "memory used (\(usedMem) MB) so that some post-processing and exporting options "
                     + "have enough memory to work correctly. If you just want to save the database "
                     + "after scanning, you can continue until the next warning.\n\n"
@@ -760,6 +777,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
             libraryButton.isEnabled = false
             libraryButton.isHidden = false
             menuButton.isHidden = false
+            settingsButton.isHidden = false
             viewButton.isHidden = false
             newScanButtonLarge.isHidden = true // WELCOME button
             recordButton.isHidden = waitingForRoomLock
@@ -786,6 +804,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
             libraryButton.isEnabled = false
             libraryButton.isHidden = !mHudVisible
             menuButton.isHidden = !mHudVisible
+            settingsButton.isHidden = !mHudVisible
             viewButton.isHidden = !mHudVisible
             newScanButtonLarge.isHidden = true // WELCOME button
             recordButton.isHidden = true
@@ -815,6 +834,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
             libraryButton.isEnabled = false
             libraryButton.isHidden = !mHudVisible
             menuButton.isHidden = !mHudVisible
+            settingsButton.isHidden = !mHudVisible
             viewButton.isHidden = !mHudVisible
             newScanButtonLarge.isHidden = true // WELCOME button
             recordButton.isHidden = true
@@ -841,6 +861,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
             libraryButton.isEnabled = !databases.isEmpty
             libraryButton.isHidden = !mHudVisible
             menuButton.isHidden = !mHudVisible
+            settingsButton.isHidden = !mHudVisible
             viewButton.isHidden = !mHudVisible
             newScanButtonLarge.isHidden = true // WELCOME button
             recordButton.isHidden = true
@@ -865,8 +886,9 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
             actionMeasuringEnabled = true
         default: // IDLE // WELCOME
             libraryButton.isEnabled = !databases.isEmpty
-            libraryButton.isHidden = mState != .STATE_WELCOME && !mHudVisible
-            menuButton.isHidden = mState != .STATE_WELCOME && !mHudVisible
+            libraryButton.isHidden = mState == .STATE_WELCOME || !mHudVisible
+            menuButton.isHidden = mState == .STATE_WELCOME || !mHudVisible
+            settingsButton.isHidden = mState != .STATE_WELCOME && !mHudVisible
             viewButton.isHidden = mState != .STATE_WELCOME && !mHudVisible
             newScanButtonLarge.isHidden = mState != .STATE_WELCOME
             recordButton.isHidden = true
@@ -891,6 +913,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
             actionMeasuringEnabled = false
         }
         setWelcomeVisible(mState == .STATE_WELCOME)
+        refreshStatusChrome()
 
         let view = self.view as? GLKView
         if(mState != .STATE_MAPPING && mState != .STATE_CAMERA && mState != .STATE_VISUALIZING_CAMERA && mState != .STATE_VISUALIZING_AND_MEASURING)
@@ -1103,32 +1126,10 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
              })
         ])
 
-        menuButton.menu = UIMenu(title: "", children: [fileMenu, settingsMenu])
+        menuButton.menu = UIMenu(title: "", children: [fileMenu])
         menuButton.addTarget(self, action: #selector(ViewController.menuOpened(_:)), for: .menuActionTriggered)
-        
-        // Camera menu
-        let renderingMenu = UIMenu(title: "Rendering", options: .displayInline, children: [
-            UIAction(title: "Texture/Color Blend", image: self.textureColorSeamsShown ? UIImage(systemName: "checkmark.circle") : UIImage(systemName: "circle"), attributes: self.mState == .STATE_VISUALIZING || self.mState == .STATE_VISUALIZING_CAMERA || self.mState == .STATE_VISUALIZING_AND_MEASURING || self.mState == .STATE_VISUALIZING_WHILE_LOADING ? [] : .disabled, handler: { _ in
-                self.textureColorSeamsShown = !self.textureColorSeamsShown
-                self.rtabmap!.setTextureColorSeamsHidden(hidden: !self.textureColorSeamsShown)
-                self.resetNoTouchTimer(true)
-            }),
-            UIAction(title: "Wireframe", image: self.wireframeShown ? UIImage(systemName: "checkmark.circle") : UIImage(systemName: "circle"), handler: { _ in
-                self.wireframeShown = !self.wireframeShown
-                self.rtabmap!.setWireframe(enabled: self.wireframeShown)
-                self.resetNoTouchTimer(true)
-            }),
-            UIAction(title: "Lighting", image: self.lightingShown ? UIImage(systemName: "checkmark.circle") : UIImage(systemName: "circle"), attributes: self.mState == .STATE_VISUALIZING || self.mState == .STATE_VISUALIZING_CAMERA || self.mState == .STATE_VISUALIZING_AND_MEASURING || self.mState == .STATE_VISUALIZING_WHILE_LOADING ? [] : .disabled, handler: { _ in
-                self.lightingShown = !self.lightingShown
-                self.rtabmap!.setLighting(enabled: self.lightingShown)
-                self.resetNoTouchTimer(true)
-            }),
-            UIAction(title: "Backface", image: self.backfaceShown ? UIImage(systemName: "checkmark.circle") : UIImage(systemName: "circle"), handler: { _ in
-                self.backfaceShown = !self.backfaceShown
-                self.rtabmap!.setBackfaceCulling(enabled: !self.backfaceShown)
-                self.resetNoTouchTimer(true)
-            })
-        ])
+        settingsButton.menu = UIMenu(title: "", children: [settingsMenu])
+        settingsButton.addTarget(self, action: #selector(ViewController.menuOpened(_:)), for: .menuActionTriggered)
         
         let cameraMenu = UIMenu(title: "View", options: .displayInline, children: [
             UIAction(title: "First-P. View", image: cameraMode == 0 ? UIImage(systemName: "checkmark.circle") : UIImage(systemName: "circle"), attributes: (self.mState == .STATE_CAMERA || self.mState == .STATE_VISUALIZING || self.mState == .STATE_MAPPING || self.mState == .STATE_VISUALIZING_CAMERA || self.mState == .STATE_VISUALIZING_AND_MEASURING) ? [] : .disabled, handler: { _ in
@@ -1159,27 +1160,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
             })
         ])
         
-        let showCloudMeshActions = mState != .STATE_VISUALIZING && mState != .STATE_VISUALIZING_CAMERA && mState != .STATE_VISUALIZING_AND_MEASURING && mState != .STATE_PROCESSING && mState != .STATE_VISUALIZING_WHILE_LOADING
-        let cloudMeshMenu = UIMenu(title: "CloudMesh", options: .displayInline, children: [
-            UIAction(title: "Point Cloud", image: viewMode == 0 ? UIImage(systemName: "checkmark.circle") : UIImage(systemName: "circle"), attributes: showCloudMeshActions ? [] : .disabled, handler: { _ in
-                self.setMeshRendering(viewMode: 0)
-                self.resetNoTouchTimer(true)
-            }),
-            UIAction(title: "Mesh", image: viewMode == 1 ? UIImage(systemName: "checkmark.circle") : UIImage(systemName: "circle"), attributes: showCloudMeshActions ? [] : .disabled, handler: { _ in
-                self.setMeshRendering(viewMode: 1)
-                self.resetNoTouchTimer(true)
-            }),
-            UIAction(title: "Texture Mesh", image: viewMode == 2 ? UIImage(systemName: "checkmark.circle") : UIImage(systemName: "circle"), attributes: showCloudMeshActions ? [] : .disabled, handler: { _ in
-                self.setMeshRendering(viewMode: 2)
-                self.resetNoTouchTimer(true)
-            })
-        ])
-
-        var viewMenuChildren: [UIMenuElement] = []
-        viewMenuChildren.append(cameraMenu)
-        viewMenuChildren.append(renderingMenu)
-        viewMenuChildren.append(cloudMeshMenu)
-        viewButton.menu = UIMenu(title: "", children: viewMenuChildren)
+        viewButton.menu = UIMenu(title: "", children: [cameraMenu])
         viewButton.addTarget(self, action: #selector(ViewController.menuOpened(_:)), for: .menuActionTriggered)
     }
     
@@ -1619,60 +1600,105 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
         statusLabel.font = UIFont.monospacedSystemFont(ofSize: 11, weight: .medium)
         statusLabel.textColor = MissionTheme.text
 
-        toastLabel.font = UIFont.systemFont(ofSize: 13, weight: .semibold)
+        statusPanel.translatesAutoresizingMaskIntoConstraints = false
+        statusPanel.backgroundColor = MissionTheme.panel
+        statusPanel.layer.cornerRadius = 10
+        statusPanel.layer.borderWidth = 1
+        statusPanel.layer.borderColor = MissionTheme.line.cgColor
+        statusPanel.isUserInteractionEnabled = false
+        statusPanel.isHidden = true
+        view.insertSubview(statusPanel, belowSubview: statusLabel)
+        statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: libraryButton.leadingAnchor, constant: -16).isActive = true
+        NSLayoutConstraint.activate([
+            statusPanel.leadingAnchor.constraint(equalTo: statusLabel.leadingAnchor, constant: -10),
+            statusPanel.trailingAnchor.constraint(equalTo: statusLabel.trailingAnchor, constant: 10),
+            statusPanel.topAnchor.constraint(equalTo: statusLabel.topAnchor, constant: -8),
+            statusPanel.bottomAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 8)
+        ])
+
+        toastLabel.font = UIFont.systemFont(ofSize: 14, weight: .semibold)
         toastLabel.textColor = MissionTheme.ink
-        toastLabel.backgroundColor = MissionTheme.text
-        toastLabel.layer.cornerRadius = 0
-        toastLabel.clipsToBounds = true
+        toastLabel.backgroundColor = .clear
+        toastPanel.translatesAutoresizingMaskIntoConstraints = false
+        toastPanel.backgroundColor = MissionTheme.text
+        toastPanel.layer.cornerRadius = 10
+        toastPanel.isUserInteractionEnabled = false
+        toastPanel.isHidden = true
+        view.insertSubview(toastPanel, belowSubview: toastLabel)
+        NSLayoutConstraint.activate([
+            toastPanel.leadingAnchor.constraint(equalTo: toastLabel.leadingAnchor, constant: -16),
+            toastPanel.trailingAnchor.constraint(equalTo: toastLabel.trailingAnchor, constant: 16),
+            toastPanel.topAnchor.constraint(equalTo: toastLabel.topAnchor, constant: -10),
+            toastPanel.bottomAnchor.constraint(equalTo: toastLabel.bottomAnchor, constant: 10)
+        ])
 
         newScanButtonLarge.backgroundColor = MissionTheme.text
         newScanButtonLarge.setTitleColor(MissionTheme.ink, for: .normal)
         newScanButtonLarge.tintColor = MissionTheme.ink
-        newScanButtonLarge.titleLabel?.font = UIFont.systemFont(ofSize: 15, weight: .semibold)
-        newScanButtonLarge.setTitle("NEW SESSION  >>", for: .normal)
+        newScanButtonLarge.titleLabel?.font = UIFont.systemFont(ofSize: 16, weight: .semibold)
+        newScanButtonLarge.setTitle("New session", for: .normal)
         newScanButtonLarge.setImage(nil, for: .normal)
-        newScanButtonLarge.contentEdgeInsets = UIEdgeInsets(top: 14, left: 22, bottom: 14, right: 22)
-        newScanButtonLarge.layer.cornerRadius = 0
+        newScanButtonLarge.contentEdgeInsets = UIEdgeInsets(top: 15, left: 28, bottom: 15, right: 28)
+        newScanButtonLarge.layer.cornerRadius = 10
+        newScanButtonLarge.clipsToBounds = true
+        newScanButtonLarge.widthAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
 
-        libraryButton.tintColor = MissionTheme.text
-        menuButton.tintColor = MissionTheme.text
-        viewButton.tintColor = MissionTheme.text
+        styleIconButton(libraryButton, icon: .library)
+        styleIconButton(menuButton, icon: .file)
+        styleIconButton(settingsButton, icon: .settings)
+        styleIconButton(viewButton, icon: .view)
+        settingsButton.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            settingsButton.widthAnchor.constraint(equalToConstant: 60),
+            settingsButton.heightAnchor.constraint(equalToConstant: 60)
+        ])
+        if let stack = libraryButton.superview as? UIStackView {
+            stack.spacing = 10
+            stack.addArrangedSubview(settingsButton)
+        }
+        styleIconButton(stopButton, icon: .stop)
+        styleIconButton(recordButton, icon: .record, tint: UIColor(red: 1, green: 0.30, blue: 0.27, alpha: 1))
+        styleIconButton(addMeasureButton, icon: .addMeasure, tint: MissionTheme.orange)
+        styleIconButton(removeMeasureButton, icon: .removeMeasure)
+        styleIconButton(teleportButton, icon: .teleport, tint: MissionTheme.go)
+        styleIconButton(measuringModeButton, icon: .measure, tint: MissionTheme.orange)
 
-        welcomeKicker.translatesAutoresizingMaskIntoConstraints = false
-        welcomeKicker.textAlignment = .center
-        let kern = NSMutableAttributedString(string: "CMCS")
-        let kernRange = NSRange(location: 0, length: 4)
-        kern.addAttribute(.kern, value: 3.2, range: kernRange)
-        kern.addAttribute(.foregroundColor, value: MissionTheme.forest, range: kernRange)
-        kern.addAttribute(.font, value: UIFont.systemFont(ofSize: 12, weight: .semibold), range: kernRange)
-        welcomeKicker.attributedText = kern
+        styleTextChip(closeVisualizationButton, icon: .close)
+        styleTextChip(stopCameraButton, icon: .close)
+        styleTextChip(stopMeasuringButton, icon: .close)
+        styleTextChip(exportOBJPLYButton, icon: .export)
 
         welcomeTitle.translatesAutoresizingMaskIntoConstraints = false
-        welcomeTitle.text = "Map Fast.\nShare Fast."
+        welcomeTitle.text = "Shared room mapping"
         welcomeTitle.textColor = MissionTheme.text
-        welcomeTitle.font = UIFont.systemFont(ofSize: 36, weight: .bold)
+        welcomeTitle.font = UIFont.systemFont(ofSize: 32, weight: .bold)
         welcomeTitle.textAlignment = .center
         welcomeTitle.numberOfLines = 2
 
         welcomeSub.translatesAutoresizingMaskIntoConstraints = false
-        welcomeSub.text = "Two phones. One room. A shared mesh."
+        welcomeSub.text = "Point every phone at the start tag, then begin."
         welcomeSub.textColor = MissionTheme.muted
-        welcomeSub.font = UIFont.systemFont(ofSize: 14, weight: .regular)
+        welcomeSub.font = UIFont.systemFont(ofSize: 15, weight: .regular)
         welcomeSub.textAlignment = .center
         welcomeSub.numberOfLines = 2
 
-        view.addSubview(welcomeKicker)
+        welcomeBackdrop.translatesAutoresizingMaskIntoConstraints = false
+        welcomeBackdrop.backgroundColor = MissionTheme.ink
+        welcomeBackdrop.isUserInteractionEnabled = false
+        view.insertSubview(welcomeBackdrop, at: 0)
         view.addSubview(welcomeTitle)
         view.addSubview(welcomeSub)
         view.bringSubviewToFront(newScanButtonLarge)
 
         NSLayoutConstraint.activate([
+            welcomeBackdrop.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            welcomeBackdrop.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            welcomeBackdrop.topAnchor.constraint(equalTo: view.topAnchor),
+            welcomeBackdrop.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             welcomeTitle.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             welcomeTitle.bottomAnchor.constraint(equalTo: newScanButtonLarge.topAnchor, constant: -22),
             welcomeTitle.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 28),
             welcomeTitle.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -28),
-            welcomeKicker.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            welcomeKicker.bottomAnchor.constraint(equalTo: welcomeTitle.topAnchor, constant: -10),
             welcomeSub.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             welcomeSub.topAnchor.constraint(equalTo: newScanButtonLarge.bottomAnchor, constant: 16),
             welcomeSub.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 32),
@@ -1681,20 +1707,55 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
         setWelcomeVisible(mState == .STATE_WELCOME)
     }
 
+    private func styleIconButton(_ button: UIButton, icon: MissionIcons.Glyph, tint: UIColor = MissionTheme.text) {
+        button.setBackgroundImage(nil, for: .normal)
+        button.setImage(MissionIcons.image(icon, pointSize: 22), for: .normal)
+        button.imageView?.contentMode = .scaleAspectFit
+        button.tintColor = tint
+        button.backgroundColor = MissionTheme.panel
+        button.layer.cornerRadius = 16
+        button.layer.borderWidth = 1
+        button.layer.borderColor = MissionTheme.line.cgColor
+        button.clipsToBounds = true
+        button.adjustsImageWhenHighlighted = true
+    }
+
+    private func styleTextChip(_ button: UIButton, icon: MissionIcons.Glyph) {
+        button.setImage(MissionIcons.image(icon, pointSize: 14), for: .normal)
+        button.imageEdgeInsets = UIEdgeInsets(top: 0, left: -2, bottom: 0, right: 6)
+        button.backgroundColor = MissionTheme.panel
+        button.setTitleColor(MissionTheme.text, for: .normal)
+        button.tintColor = MissionTheme.text
+        button.titleLabel?.font = UIFont.systemFont(ofSize: 14, weight: .semibold)
+        button.contentEdgeInsets = UIEdgeInsets(top: 10, left: 14, bottom: 10, right: 14)
+        button.layer.cornerRadius = 10
+        button.layer.borderWidth = 1
+        button.layer.borderColor = MissionTheme.line.cgColor
+        button.clipsToBounds = true
+    }
+
+    private func refreshStatusChrome() {
+        let text = statusLabel.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let show = !text.isEmpty && mState != .STATE_WELCOME
+        statusPanel.isHidden = !show
+        statusLabel.isHidden = !show
+    }
+
     private func setWelcomeVisible(_ show: Bool) {
-        welcomeKicker.isHidden = !show
+        welcomeBackdrop.isHidden = !show
         welcomeTitle.isHidden = !show
         welcomeSub.isHidden = !show
+        refreshStatusChrome()
     }
 
     private func setupCalibrationHUD() {
         calibBanner.translatesAutoresizingMaskIntoConstraints = false
-        calibBanner.numberOfLines = 0
+        calibBanner.numberOfLines = 2
         calibBanner.textAlignment = .center
         calibBanner.font = UIFont.systemFont(ofSize: 15, weight: .semibold)
         calibBanner.textColor = MissionTheme.text
         calibBanner.backgroundColor = MissionTheme.panel
-        calibBanner.layer.cornerRadius = 0
+        calibBanner.layer.cornerRadius = 10
         calibBanner.layer.borderWidth = 1
         calibBanner.layer.borderColor = MissionTheme.line.cgColor
         calibBanner.clipsToBounds = true
@@ -1702,11 +1763,12 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
         view.addSubview(calibBanner)
 
         seeTagButton.translatesAutoresizingMaskIntoConstraints = false
-        seeTagButton.setTitle("POINT AT THE TAG  >>", for: .normal)
-        seeTagButton.titleLabel?.font = UIFont.systemFont(ofSize: 13, weight: .semibold)
+        seeTagButton.setTitle("Keep the tag in view", for: .normal)
+        seeTagButton.titleLabel?.font = UIFont.systemFont(ofSize: 15, weight: .semibold)
         seeTagButton.backgroundColor = MissionTheme.text
         seeTagButton.setTitleColor(MissionTheme.ink, for: .normal)
-        seeTagButton.layer.cornerRadius = 0
+        seeTagButton.layer.cornerRadius = 10
+        seeTagButton.clipsToBounds = true
         seeTagButton.isHidden = true
         seeTagButton.addTarget(self, action: #selector(seeTagTapped), for: .touchUpInside)
         view.addSubview(seeTagButton)
@@ -1715,10 +1777,11 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
             calibBanner.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
             calibBanner.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
             calibBanner.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
+            calibBanner.heightAnchor.constraint(greaterThanOrEqualToConstant: 56),
             seeTagButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             seeTagButton.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -28),
-            seeTagButton.widthAnchor.constraint(equalToConstant: 240),
-            seeTagButton.heightAnchor.constraint(equalToConstant: 44)
+            seeTagButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 220),
+            seeTagButton.heightAnchor.constraint(equalToConstant: 48)
         ])
     }
 
@@ -1727,10 +1790,12 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
         calibBanner.isHidden = !show
         seeTagButton.isHidden = !(show && !thisPhoneCalibrated)
         if show {
+            let need = max(lockPhonesRequired, 1)
+            let have = calibratedCount
             if thisPhoneCalibrated {
-                calibBanner.text = "  02 LOCK   Waiting for the other unit  "
+                calibBanner.text = "Waiting for the other phones\n\(have) of \(need) locked"
             } else {
-                calibBanner.text = "  01 ACQUIRE   Point both phones at the start tag  "
+                calibBanner.text = "Point at the start tag\n\(have) of \(need) phones ready"
             }
         }
         if mState == .STATE_CAMERA {
@@ -1739,7 +1804,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
     }
 
     @objc private func seeTagTapped() {
-        showToast(message: "Keep pointing at the tag", seconds: 2)
+        showToast(message: "Hold the start tag in the camera", seconds: 2)
     }
 
     private func maybePostLivePose(_ frame: ARFrame) {
@@ -1767,24 +1832,25 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
             return
         }
         let now = Date()
-        if now.timeIntervalSince(lastDemoPoll) >= 0.5 {
+        if now.timeIntervalSince(lastDemoPoll) >= 0.5 && !demoPollInFlight {
             lastDemoPoll = now
+            demoPollInFlight = true
             DispatchQueue.global(qos: .utility).async {
-                if let demo = self.collabSync.fetchDemo() {
-                    DispatchQueue.main.async {
+                let demo = self.collabSync.fetchDemo()
+                DispatchQueue.main.async {
+                    self.demoPollInFlight = false
+                    if let demo = demo {
                         self.applyDemoStatus(demo)
                     }
                 }
             }
-            DispatchQueue.main.async {
-                self.updateCalibrationHUD()
-            }
+            updateCalibrationHUD()
         }
         if thisPhoneCalibrated {
             return
         }
         if let pose = tagCalibrator.detect(from: frame), pose.detected, pose.tagId == DemoTag.id {
-            if now.timeIntervalSince(lastCalibPost) >= 0.5 {
+            if now.timeIntervalSince(lastCalibPost) >= 0.5 && !calibPostInFlight {
                 lastCalibPost = now
                 NSLog("TagCalibrator: POST /calibrate real hit tag_id=%d", pose.tagId)
                 postCalibration(pose)
@@ -1793,9 +1859,12 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
     }
 
     private func postCalibration(_ pose: TagPose) {
+        calibPostInFlight = true
         DispatchQueue.global(qos: .utility).async {
-            if let demo = self.collabSync.postCalibrate(pose: pose) {
-                DispatchQueue.main.async {
+            let demo = self.collabSync.postCalibrate(pose: pose)
+            DispatchQueue.main.async {
+                self.calibPostInFlight = false
+                if let demo = demo {
                     self.applyDemoStatus(demo)
                 }
             }
@@ -1803,12 +1872,14 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
     }
 
     private func applyDemoStatus(_ demo: CollabSync.DemoStatus) {
+        lockPhonesRequired = max(demo.lockPhonesRequired, 1)
+        calibratedCount = demo.calibratedCount
         thisPhoneCalibrated = demo.thisPhoneLocked || thisPhoneCalibrated
         if demo.locked && !roomLocked {
             roomLocked = true
             waitingForRoomLock = false
             updateCalibrationHUD()
-            showToast(message: "LOCKED  >>  start mapping", seconds: 2)
+            showToast(message: "Room locked. Start mapping.", seconds: 2)
             startMappingAfterLock()
             return
         }
@@ -2060,7 +2131,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
         rtabmap!.setBackgroundColor(gray: bgColor);
         
         DispatchQueue.main.async {
-            self.statusLabel.textColor = bgColor>=0.6 ? UIColor(white: 0.0, alpha: 1) : UIColor(white: 1.0, alpha: 1)
+            self.statusLabel.textColor = MissionTheme.text
         }
     
         rtabmap!.setClusterRatio(value: defaults.float(forKey: "NoiseFilteringRatio"));
@@ -2243,6 +2314,8 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
             waitingForRoomLock = false
             roomLocked = false
             thisPhoneCalibrated = false
+            demoPollInFlight = false
+            calibPostInFlight = false
             updateCalibrationHUD()
             openBlankScanDatabase(dataRecordingMode: dataRecordingMode, tmpDatabase: tmpDatabase, joinExisting: false)
             return
@@ -2281,6 +2354,10 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
                     self.roomLocked = join.locked
                     self.waitingForRoomLock = join.mustWaitForLock && !join.locked
                     self.thisPhoneCalibrated = false
+                    self.demoPollInFlight = false
+                    self.calibPostInFlight = false
+                    self.lockPhonesRequired = max(join.lockPhonesRequired, 1)
+                    self.calibratedCount = join.calibratedCount
                     NSLog("CollabSync: after join locked=%d mustWait=%d waitingForRoomLock=%d",
                           join.locked ? 1 : 0, join.mustWaitForLock ? 1 : 0, self.waitingForRoomLock ? 1 : 0)
                     self.openBlankScanDatabase(dataRecordingMode: dataRecordingMode, tmpDatabase: tmpDatabase, joinExisting: joinExisting)
@@ -2709,6 +2786,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
             {
                 self.updateState(state: State.STATE_WELCOME);
                 self.statusLabel.text = ""
+                self.refreshStatusChrome()
             }
         }
 
@@ -3101,33 +3179,23 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
             return
         }
         
-        let alertController = UIAlertController(title: "LIBRARY", message: nil, preferredStyle: .alert)
-        alertController.overrideUserInterfaceStyle = .dark
-        let customView = VerticalScrollerView()
-        customView.dataSource = self
-        customView.delegate = self
-        customView.reload()
-        alertController.view.addSubview(customView)
-        customView.translatesAutoresizingMaskIntoConstraints = false
-        customView.topAnchor.constraint(equalTo: alertController.view.topAnchor, constant: 60).isActive = true
-        customView.rightAnchor.constraint(equalTo: alertController.view.rightAnchor, constant: -10).isActive = true
-        customView.leftAnchor.constraint(equalTo: alertController.view.leftAnchor, constant: 10).isActive = true
-        customView.bottomAnchor.constraint(equalTo: alertController.view.bottomAnchor, constant: -45).isActive = true
-        
-        alertController.view.translatesAutoresizingMaskIntoConstraints = false
-        alertController.view.heightAnchor.constraint(equalToConstant: 600).isActive = true
-        alertController.view.widthAnchor.constraint(equalToConstant: 400).isActive = true
-
-        customView.backgroundColor = MissionTheme.ink
-
-        let selectAction = UIAlertAction(title: "Select", style: .default) { (action) in
-            self.openDatabase(fileUrl: self.databases[self.currentDatabaseIndex])
+        let sheet = LibraryViewController(databases: databases, selectedIndex: currentDatabaseIndex)
+        sheet.databaseDelegate = self
+        sheet.onOpen = { [weak self] index in
+            guard let self = self else { return }
+            self.currentDatabaseIndex = index
+            self.openDatabase(fileUrl: self.databases[index])
         }
-        
-        let cancelAction = UIAlertAction(title: "Cancel", style: .cancel, handler: nil)
-        alertController.addAction(selectAction)
-        alertController.addAction(cancelAction)
-        self.present(alertController, animated: true, completion: nil)
+        let nav = UINavigationController(rootViewController: sheet)
+        nav.modalPresentationStyle = .pageSheet
+        nav.overrideUserInterfaceStyle = .dark
+        if #available(iOS 15.0, *) {
+            if let presentation = nav.sheetPresentationController {
+                presentation.detents = [.medium(), .large()]
+                presentation.prefersGrabberVisible = true
+            }
+        }
+        present(nav, animated: true)
     }
 
     //MARK: Actions   
@@ -3137,7 +3205,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
 
     @IBAction func recordAction(_ sender: UIButton) {
         if UserDefaults.standard.bool(forKey: "CollabEnabled") && !roomLocked {
-            showToast(message: "Point both phones at the start tag on the computer", seconds: 2)
+            showToast(message: "Point every phone at the start tag on the computer", seconds: 2)
             return
         }
         startMappingAfterLock()

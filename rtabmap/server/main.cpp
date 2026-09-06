@@ -704,6 +704,32 @@ int main(int argc, char * argv[])
 			oss << "{\"ok\":true,\"tag_size_m\":" << map.tagSizeM() << "}";
 			return collab::HttpResponse::json(200, oss.str());
 		}
+		if(req.method == "POST" && req.path == "/lock_phones")
+		{
+			const std::string body = readWholeFile(req.bodyPath);
+			if(!req.bodyPath.empty())
+			{
+				UFile::erase(req.bodyPath);
+			}
+			int count = 0;
+			const size_t k = body.find("lock_phones_required");
+			if(k != std::string::npos)
+			{
+				const size_t colon = body.find(':', k);
+				if(colon != std::string::npos)
+				{
+					count = std::atoi(body.c_str() + colon + 1);
+				}
+			}
+			if(!map.setLockPhonesRequired(count))
+			{
+				return collab::HttpResponse::error(400, "lock_phones_required must be between 1 and 16");
+			}
+			std::ostringstream oss;
+			oss << "{\"ok\":true,\"lock_phones_required\":" << map.lockPhonesRequired()
+				<< ",\"locked\":" << (map.isRoomLocked() ? "true" : "false") << "}";
+			return collab::HttpResponse::json(200, oss.str());
+		}
 		if(req.method == "POST" && req.path == "/reset")
 		{
 			map.resetDemoRoom();

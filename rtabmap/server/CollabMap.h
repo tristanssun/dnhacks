@@ -58,6 +58,8 @@ struct JoinResult
 	bool showTag;
 	bool mustWaitForLock;
 	int tagId;
+	int lockPhonesRequired;
+	int calibratedCount;
 	std::string error;
 
 	JoinResult() :
@@ -68,7 +70,9 @@ struct JoinResult
 		locked(false),
 		showTag(true),
 		mustWaitForLock(true),
-		tagId(0)
+		tagId(0),
+		lockPhonesRequired(1),
+		calibratedCount(0)
 	{}
 };
 
@@ -126,9 +130,8 @@ public:
 	bool init(std::string & error);
 
 	static const long kActiveTimeoutSec = 45;
-	// Temporary: one tagged phone is enough to start mapping. Set back to 2
-	// to wait for a second connection before the room locks.
-	static const int kLockPhonesRequired = 1;
+	static const int kDefaultLockPhonesRequired = 1;
+	static const int kMaxLockPhonesRequired = 16;
 	// Phones sit on the tag screen before /calibrate. Do not wipe a waiting
 	// lock just because mapping heartbeats have not started yet.
 	static const long kCalibWaitTimeoutSec = 180;
@@ -151,6 +154,9 @@ public:
 	// Displayed marker width in meters (black square). Returns false if out of range.
 	bool setTagSizeM(float meters);
 	float tagSizeM() const;
+	// How many phones must post a real tag detect before the room locks.
+	bool setLockPhonesRequired(int count);
+	int lockPhonesRequired() const;
 	void resetDemoRoom();
 	bool isRoomLocked();
 	PullResult exportPull(const std::string & clientId, int sinceGlobalId, const std::string & destDbPath);
@@ -284,7 +290,12 @@ private:
 	bool saveState() const;
 	void syncIdsFromDatabase();
 
+	// Caller holds dbMutex_. mutex_ is taken only around short client-state
+	// reads/writes so /demo /calibrate /pose stay live during Rtabmap::process.
 	bool ingestLocked(const std::string & clientId, int sinceId, const std::string & uploadDbPath, SyncResult & result);
+	// True when a phone is uploading or was seen recently enough that join
+	// must not wipe the room.
+	bool roomIsLiveLocked(long now) const;
 	bool optimizeAndExport(std::string & error);
 	// Adds measured start-tag links between locked sessions that are not yet
 	// connected in the graph. Returns the number of links accepted. The
@@ -420,10 +431,14 @@ private:
 	// Physical width of the black marker square as displayed by the admin page
 	// (meters). Reported to phones in /join, /demo and /calibrate; persisted.
 	float tagSizeM_;
+	// Phones that must detect the start tag before the room locks. Persisted.
+	// Survives POST /reset so the operator does not re-enter it every room.
+	int lockPhonesRequired_;
 	std::map<std::string, ClientState> clients_;
 
 	mutable std::mutex mutex_;
 	std::mutex dbMutex_;
+	std::atomic<bool> ingestBusy_;
 	std::atomic<bool> optimizeRunning_;
 	std::atomic<bool> optimizeAgain_;
 	std::atomic<bool> bakeRunning_;

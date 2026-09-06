@@ -2340,6 +2340,8 @@ CollabMap::CollabMap(const std::string & dataDir) :
 	roomLocked_(false),
 	lockedTagId_(kDemoTagId),
 	tagSizeM_(kDemoTagSizeM),
+	lockPhonesRequired_(kDefaultLockPhonesRequired),
+	ingestBusy_(false),
 	optimizeRunning_(false),
 	optimizeAgain_(false),
 	bakeRunning_(false),
@@ -2509,30 +2511,39 @@ SyncResult CollabMap::ingest(const std::string & clientId, int sinceId, const st
 	bool needOptimize = false;
 	{
 		// dbMutex_ first so optimize and ingest never deadlock with status().
+		// mutex_ is not held across Rtabmap::process: the other phone's
+		// /demo /calibrate /pose /heartbeat must stay live or it looks bricked.
 		std::lock_guard<std::mutex> db(dbMutex_);
-		std::lock_guard<std::mutex> lock(mutex_);
-		result.globalNodes = globalNodes_;
-		result.loopClosures = loopClosures_;
-
-		if(clientId.empty())
+		ingestBusy_.store(true);
+		const long now = static_cast<long>(std::time(0));
 		{
-			result.ok = false;
-			result.error = "missing X-Client-Id";
-			return result;
-		}
+			std::lock_guard<std::mutex> lock(mutex_);
+			result.globalNodes = globalNodes_;
+			result.loopClosures = loopClosures_;
 
-		ClientState & client = clients_[clientId];
-		if(client.mapIdBase < 0)
-		{
-			client.mapIdBase = nextMapIdBase_++;
-		}
-		client.lastSeen = static_cast<long>(std::time(0));
-		result.lastLocalId = client.lastLocalId;
+			if(clientId.empty())
+			{
+				ingestBusy_.store(false);
+				result.ok = false;
+				result.error = "missing X-Client-Id";
+				return result;
+			}
 
-		if(uploadDbPath.empty() || !UFile::exists(uploadDbPath) || UFile::length(uploadDbPath) <= 0)
-		{
-			saveState();
-			return result;
+			ClientState & client = clients_[clientId];
+			if(client.mapIdBase < 0)
+			{
+				client.mapIdBase = nextMapIdBase_++;
+			}
+			client.lastSeen = now;
+			lastIngestAt_ = now;
+			result.lastLocalId = client.lastLocalId;
+
+			if(uploadDbPath.empty() || !UFile::exists(uploadDbPath) || UFile::length(uploadDbPath) <= 0)
+			{
+				saveState();
+				ingestBusy_.store(false);
+				return result;
+			}
 		}
 
 		try
@@ -2544,31 +2555,31 @@ SyncResult CollabMap::ingest(const std::string & clientId, int sinceId, const st
 				{
 					result.error = "ingest failed";
 				}
-				return result;
 			}
-			needOptimize = result.ok && result.accepted > 0;
+			else
+			{
+				needOptimize = result.ok && result.accepted > 0;
+			}
 		}
 		catch(const UException & e)
 		{
 			result.ok = false;
 			result.error = e.what();
 			UERROR("Ingest exception: %s", e.what());
-			return result;
 		}
 		catch(const std::exception & e)
 		{
 			result.ok = false;
 			result.error = e.what();
 			UERROR("Ingest exception: %s", e.what());
-			return result;
 		}
 		catch(...)
 		{
 			result.ok = false;
 			result.error = "ingest failed";
 			UERROR("Ingest unknown exception");
-			return result;
 		}
+		ingestBusy_.store(false);
 	}
 
 	if(needOptimize)
@@ -2891,8 +2902,16 @@ void CollabMap::restoreSessionLockLocked()
 
 void CollabMap::expireStaleLockLocked()
 {
+	if(ingestBusy_.load())
+	{
+		return;
+	}
 	const long now = static_cast<long>(std::time(0));
 	const long timeout = roomLocked_ ? kActiveTimeoutSec : kCalibWaitTimeoutSec;
+	if(lastIngestAt_ > 0 && isActiveSeen(lastIngestAt_, now, timeout))
+	{
+		return;
+	}
 	if(countActiveLocked(now, timeout) > 0)
 	{
 		return;
@@ -2930,9 +2949,21 @@ void CollabMap::touchClientLocked(const std::string & clientId, long now)
 	}
 }
 
+bool CollabMap::roomIsLiveLocked(long now) const
+{
+	if(ingestBusy_.load())
+	{
+		return true;
+	}
+	if(countActiveLocked(now, kActiveTimeoutSec) > 0)
+	{
+		return true;
+	}
+	return lastIngestAt_ > 0 && isActiveSeen(lastIngestAt_, now, kActiveTimeoutSec);
+}
+
 JoinResult CollabMap::join(const std::string & clientId)
 {
-	std::lock_guard<std::mutex> lock(mutex_);
 	JoinResult result;
 	result.ok = true;
 	result.mode = "new";
@@ -2948,34 +2979,58 @@ JoinResult CollabMap::join(const std::string & clientId)
 	}
 
 	const long now = static_cast<long>(std::time(0));
-	expireStaleLockLocked();
-	const int active = countActiveLocked(now, kActiveTimeoutSec);
-	if(active > 0)
+	bool keepRoom = false;
 	{
-		result.mode = "join";
-		// Never ask a joiner to load the room's map.db into its own session.
-		// Each phone's local map is its own scan in its own frame; other users'
-		// nodes arrive through GET /pull with the tag-frame transform, and the
-		// merged map is downloaded at stop/save. Loading another phone's nodes
-		// locally would draw them in the wrong frame and skip them on /pull.
-		result.mustDownload = false;
-		UINFO("Join existing room client=%s active=%d nodes=%d must_download=0",
-			clientId.c_str(), active, globalNodes_);
-	}
-	else
-	{
-		result.mode = "new";
-		resetRoomLocked();
-		result.mustDownload = false;
-		result.globalNodes = 0;
-		UINFO("Start new room client=%s", clientId.c_str());
+		std::lock_guard<std::mutex> lock(mutex_);
+		expireStaleLockLocked();
+		keepRoom = roomIsLiveLocked(now);
+		if(keepRoom)
+		{
+			result.mode = "join";
+			// Never ask a joiner to load the room's map.db into its own session.
+			// Each phone's local map is its own scan in its own frame; other users'
+			// nodes arrive through GET /pull with the tag-frame transform, and the
+			// merged map is downloaded at stop/save. Loading another phone's nodes
+			// locally would draw them in the wrong frame and skip them on /pull.
+			result.mustDownload = false;
+			touchClientLocked(clientId, now);
+			saveState();
+			result.globalNodes = globalNodes_;
+			result.activeClients = countActiveLocked(now, kActiveTimeoutSec);
+			applyLockFieldsLocked(result);
+			UINFO("Join existing room client=%s active=%d nodes=%d ingesting=%d must_download=0",
+				clientId.c_str(), result.activeClients, result.globalNodes, ingestBusy_.load() ? 1 : 0);
+			return result;
+		}
 	}
 
-	touchClientLocked(clientId, now);
+	// Idle room: take db then mutex so we never wipe a live ingest.
+	std::lock_guard<std::mutex> db(dbMutex_);
+	std::lock_guard<std::mutex> lock(mutex_);
+	expireStaleLockLocked();
+	if(roomIsLiveLocked(static_cast<long>(std::time(0))))
+	{
+		result.mode = "join";
+		result.mustDownload = false;
+		touchClientLocked(clientId, static_cast<long>(std::time(0)));
+		saveState();
+		result.globalNodes = globalNodes_;
+		result.activeClients = countActiveLocked(static_cast<long>(std::time(0)), kActiveTimeoutSec);
+		applyLockFieldsLocked(result);
+		UINFO("Join existing room client=%s (became live while waiting) nodes=%d",
+			clientId.c_str(), result.globalNodes);
+		return result;
+	}
+
+	result.mode = "new";
+	resetRoomLocked();
+	result.mustDownload = false;
+	touchClientLocked(clientId, static_cast<long>(std::time(0)));
 	saveState();
 	result.globalNodes = globalNodes_;
-	result.activeClients = countActiveLocked(now, kActiveTimeoutSec);
+	result.activeClients = countActiveLocked(static_cast<long>(std::time(0)), kActiveTimeoutSec);
 	applyLockFieldsLocked(result);
+	UINFO("Start new room client=%s", clientId.c_str());
 	return result;
 }
 
@@ -3022,6 +3077,8 @@ void CollabMap::applyLockFieldsLocked(JoinResult & result) const
 	result.showTag = !roomLocked_;
 	result.mustWaitForLock = !roomLocked_;
 	result.tagId = kDemoTagId;
+	result.lockPhonesRequired = lockPhonesRequired_;
+	result.calibratedCount = countCalibratedLocked();
 }
 
 int CollabMap::countCalibratedLocked() const
@@ -3123,13 +3180,13 @@ void CollabMap::recomputeLockLocked()
 		}
 		++count;
 	}
-	if(count >= kLockPhonesRequired && agree && agreedTag == kDemoTagId)
+	if(count >= lockPhonesRequired_ && agree && agreedTag == kDemoTagId)
 	{
 		roomLocked_ = true;
 		lockedTagId_ = agreedTag;
 		lastIngestAligned_ = true;
 		UINFO("Room locked: %d phones with real tag %d detect (need %d)",
-			count, agreedTag, kLockPhonesRequired);
+			count, agreedTag, lockPhonesRequired_);
 	}
 }
 
@@ -3246,6 +3303,32 @@ float CollabMap::tagSizeM() const
 {
 	std::lock_guard<std::mutex> lock(mutex_);
 	return tagSizeM_;
+}
+
+bool CollabMap::setLockPhonesRequired(int count)
+{
+	if(count < 1 || count > kMaxLockPhonesRequired)
+	{
+		return false;
+	}
+	std::lock_guard<std::mutex> lock(mutex_);
+	if(lockPhonesRequired_ != count)
+	{
+		UINFO("Lock phones required %d -> %d", lockPhonesRequired_, count);
+		lockPhonesRequired_ = count;
+		if(!roomLocked_)
+		{
+			recomputeLockLocked();
+		}
+		saveState();
+	}
+	return true;
+}
+
+int CollabMap::lockPhonesRequired() const
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	return lockPhonesRequired_;
 }
 
 bool CollabMap::isRoomLocked()
@@ -3499,6 +3582,7 @@ std::string CollabMap::calibrateJson(const CalibrateResult & result) const
 		<< ",\"locked\":" << (result.locked ? "true" : "false")
 		<< ",\"show_tag\":" << (result.showTag ? "true" : "false")
 		<< ",\"calibrated_count\":" << result.calibratedCount
+		<< ",\"lock_phones_required\":" << lockPhonesRequired_
 		<< ",\"tag_id\":" << result.tagId
 		<< ",\"tag_size_m\":" << tagSizeM_
 		<< "}";
@@ -3520,6 +3604,7 @@ std::string CollabMap::demoJson(const std::string & clientId)
 		<< ",\"tag_id\":" << kDemoTagId
 		<< ",\"tag_family\":\"" << kDemoTagFamily << "\""
 		<< ",\"tag_size_m\":" << tagSizeM_
+		<< ",\"lock_phones_required\":" << lockPhonesRequired_
 		<< ",\"calibrated_count\":" << countCalibratedLocked()
 		<< ",\"aligned\":" << (lastIngestAligned_ ? "true" : "false")
 		<< ",\"global_nodes\":" << globalNodes_
@@ -4037,6 +4122,7 @@ std::string CollabMap::statusJson() const
 	bool locked = false;
 	bool aligned = false;
 	int calibratedCount = 0;
+	int lockPhonesRequired = kDefaultLockPhonesRequired;
 	int runId = 1;
 	long runStarted = 0;
 	std::string runAddress;
@@ -4046,6 +4132,7 @@ std::string CollabMap::statusJson() const
 		locked = roomLocked_;
 		aligned = lastIngestAligned_;
 		calibratedCount = countCalibratedLocked();
+		lockPhonesRequired = lockPhonesRequired_;
 		runId = runId_;
 		runStarted = runStarted_;
 		runAddress = runAddress_;
@@ -4057,6 +4144,7 @@ std::string CollabMap::statusJson() const
 		<< ",\"locked\":" << (locked ? "true" : "false")
 		<< ",\"aligned\":" << (aligned ? "true" : "false")
 		<< ",\"calibrated_count\":" << calibratedCount
+		<< ",\"lock_phones_required\":" << lockPhonesRequired
 		<< ",\"run_id\":" << runId
 		<< ",\"run_address\":\"" << jsonEscape(runAddress) << "\""
 		<< ",\"run_started\":" << runStarted
@@ -4082,6 +4170,8 @@ std::string CollabMap::joinJson(const JoinResult & result) const
 		<< ",\"must_wait_for_lock\":" << (result.mustWaitForLock ? "true" : "false")
 		<< ",\"tag_id\":" << result.tagId
 		<< ",\"tag_size_m\":" << tagSizeM_
+		<< ",\"lock_phones_required\":" << result.lockPhonesRequired
+		<< ",\"calibrated_count\":" << result.calibratedCount
 		<< "}";
 	return oss.str();
 }
@@ -4136,6 +4226,14 @@ bool CollabMap::loadState()
 		if(m > 0.02f && m < 2.0f)
 		{
 			tagSizeM_ = m;
+		}
+	}
+	if(const JsonValue * v = root.get("lock_phones_required"))
+	{
+		const int n = v->asInt(kDefaultLockPhonesRequired);
+		if(n >= 1 && n <= kMaxLockPhonesRequired)
+		{
+			lockPhonesRequired_ = n;
 		}
 	}
 	if(const JsonValue * v = root.get("run_id"))
@@ -4260,6 +4358,7 @@ bool CollabMap::saveState() const
 	oss << "  \"room_locked\": " << (roomLocked_ ? "true" : "false") << ",\n";
 	oss << "  \"locked_tag_id\": " << lockedTagId_ << ",\n";
 	oss << "  \"tag_size_m\": " << tagSizeM_ << ",\n";
+	oss << "  \"lock_phones_required\": " << lockPhonesRequired_ << ",\n";
 	oss << "  \"run_id\": " << runId_ << ",\n";
 	oss << "  \"run_address\": \"" << jsonEscape(runAddress_) << "\",\n";
 	oss << "  \"run_started\": " << runStarted_ << ",\n";
@@ -4616,9 +4715,27 @@ bool CollabMap::ingestLocked(
 		return false;
 	}
 
-	ClientState & client = clients_[clientId];
-	const int prevLastGlobal = client.localToGlobal.empty() ? 0 : client.localToGlobal.rbegin()->second;
-	const int previousLc = loopClosures_;
+	// Snapshot under mutex_, then process without it so the other phone can
+	// still /demo /calibrate /pose. Only one ingest runs at a time (dbMutex_).
+	std::map<int, int> localToGlobal;
+	int lastLocalId = 0;
+	int sessionMapId = -1;
+	int prevLastGlobal = 0;
+	int previousLc = 0;
+	int nextGlobalId = 1;
+	int globalNodesAtStart = 0;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		ClientState & client = clients_[clientId];
+		localToGlobal = client.localToGlobal;
+		lastLocalId = client.lastLocalId;
+		sessionMapId = client.sessionMapId;
+		prevLastGlobal = localToGlobal.empty() ? 0 : localToGlobal.rbegin()->second;
+		previousLc = loopClosures_;
+		nextGlobalId = nextGlobalId_;
+		globalNodesAtStart = globalNodes_;
+		client.lastSeen = static_cast<long>(std::time(0));
+	}
 	const bool firstAppearance = prevLastGlobal <= 0;
 
 	rtabmap::Rtabmap rtabmap;
@@ -4645,7 +4762,7 @@ bool CollabMap::ingestLocked(
 		lastWmId = mem->getLastWorkingSignature(false)->id();
 	}
 
-	int continueMapId = client.sessionMapId;
+	int continueMapId = sessionMapId;
 	if(continueMapId < 0 && prevLastGlobal > 0)
 	{
 		rtabmap::Transform dummy;
@@ -4657,7 +4774,7 @@ bool CollabMap::ingestLocked(
 		UINFO("Continue client map_id=%d client=%s prev_global=%d last_wm=%d (no triggerNewMap)",
 			continueMapId, clientId.c_str(), prevLastGlobal, lastWmId);
 	}
-	else if(firstAppearance && globalNodes_ > 0)
+	else if(firstAppearance && globalNodesAtStart > 0)
 	{
 		UINFO("First appearance client=%s new map_id=%d last_wm=%d (no triggerNewMap)",
 			clientId.c_str(), rtabmap.getCurrentMapId(), lastWmId);
@@ -4695,11 +4812,11 @@ bool CollabMap::ingestLocked(
 			break;
 		}
 		const int localId = data.id();
-		if(localId <= sinceId && client.localToGlobal.find(localId) != client.localToGlobal.end())
+		if(localId <= sinceId && localToGlobal.find(localId) != localToGlobal.end())
 		{
 			continue;
 		}
-		if(client.localToGlobal.find(localId) != client.localToGlobal.end())
+		if(localToGlobal.find(localId) != localToGlobal.end())
 		{
 			continue;
 		}
@@ -4720,14 +4837,14 @@ bool CollabMap::ingestLocked(
 		{
 			continue;
 		}
-		client.localToGlobal[localId] = globalId;
-		if(localId > client.lastLocalId)
+		localToGlobal[localId] = globalId;
+		if(localId > lastLocalId)
 		{
-			client.lastLocalId = localId;
+			lastLocalId = localId;
 		}
-		if(globalId + 1 > nextGlobalId_)
+		if(globalId + 1 > nextGlobalId)
 		{
-			nextGlobalId_ = globalId + 1;
+			nextGlobalId = globalId + 1;
 		}
 		if(firstNewGlobal == 0)
 		{
@@ -4754,13 +4871,23 @@ bool CollabMap::ingestLocked(
 	// immediate is the start-tag constraint, so the first upload after a lock
 	// already lands in the shared graph.
 	int addedLc = 0;
-	const int tagLinks = addTagConstraintsLocked(rtabmap);
+	int tagLinks = 0;
+	bool roomLocked = false;
+	int calibrated = 0;
+	int lockNeed = kDefaultLockPhonesRequired;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		tagLinks = addTagConstraintsLocked(rtabmap);
+		roomLocked = roomLocked_;
+		calibrated = countCalibratedLocked();
+		lockNeed = lockPhonesRequired_;
+	}
 	if(tagLinks > 0)
 	{
 		UINFO("Ingest added %d start-tag constraint link(s)", tagLinks);
 	}
 
-	if(firstAppearance && firstNewGlobal > 0 && globalNodes_ > 0)
+	if(firstAppearance && firstNewGlobal > 0 && globalNodesAtStart > 0)
 	{
 		UINFO("Skip identity first-appearance snap client=%s (tag frame or real LC only)",
 			clientId.c_str());
@@ -4805,16 +4932,16 @@ bool CollabMap::ingestLocked(
 		int usedMap = -1;
 		if(nodeInfo(rtabmap.getMemory(), firstNewGlobal, dummy, usedMap) && usedMap >= 0)
 		{
-			client.sessionMapId = usedMap;
+			sessionMapId = usedMap;
 		}
 	}
 	else if(continueMapId >= 0)
 	{
-		client.sessionMapId = continueMapId;
+		sessionMapId = continueMapId;
 	}
 
 	const std::string mapIds = mapIdsSummary(rtabmap.getMemory());
-	const bool tagLock = roomLocked_ && countCalibratedLocked() >= kLockPhonesRequired;
+	const bool tagLock = roomLocked && calibrated >= lockNeed;
 	const bool aligned = tagLock || interMapLc > 0;
 
 	rtabmap.close(true);
@@ -4823,41 +4950,52 @@ bool CollabMap::ingestLocked(
 		UWARN("Failed to persist %d optimized poses after ingest", (int)poses.size());
 	}
 
-	client.nodes = static_cast<int>(client.localToGlobal.size());
-	client.lastSeen = static_cast<long>(std::time(0));
-	if(client.hasTagXf && !client.localToGlobal.empty() &&
-	   !shouldSkipGraphPoseLocked(client, static_cast<long>(std::time(0))))
 	{
-		const int gid = client.localToGlobal.rbegin()->second;
-		std::map<int, rtabmap::Transform>::const_iterator pit = poses.find(gid);
-		if(pit != poses.end() && !pit->second.isNull())
+		std::lock_guard<std::mutex> lock(mutex_);
+		ClientState & client = clients_[clientId];
+		client.localToGlobal = localToGlobal;
+		client.lastLocalId = lastLocalId;
+		client.sessionMapId = sessionMapId;
+		client.nodes = static_cast<int>(localToGlobal.size());
+		client.lastSeen = static_cast<long>(std::time(0));
+		if(client.hasTagXf && !localToGlobal.empty() &&
+		   !shouldSkipGraphPoseLocked(client, static_cast<long>(std::time(0))))
 		{
-			Eigen::Quaternionf pq = pit->second.getQuaternionf();
-			applyTagPoseLocked(
-				client,
-				pit->second.x(), pit->second.y(), pit->second.z(),
-				pq.x(), pq.y(), pq.z(), pq.w());
+			const int gid = localToGlobal.rbegin()->second;
+			std::map<int, rtabmap::Transform>::const_iterator pit = poses.find(gid);
+			if(pit != poses.end() && !pit->second.isNull())
+			{
+				Eigen::Quaternionf pq = pit->second.getQuaternionf();
+				applyTagPoseLocked(
+					client,
+					pit->second.x(), pit->second.y(), pit->second.z(),
+					pq.x(), pq.y(), pq.z(), pq.w());
+			}
 		}
+		if(nextGlobalId > nextGlobalId_)
+		{
+			nextGlobalId_ = nextGlobalId;
+		}
+		globalNodes_ += accepted;
+		cloudStale_ = true;
+		lastIngestAt_ = static_cast<long>(std::time(0));
+		if(static_cast<int>(poses.size()) > poses_)
+		{
+			poses_ = static_cast<int>(poses.size());
+		}
+		loopClosures_ = keepLoopClosures(previousLc, memoryLc);
+		lastIngestAligned_ = aligned;
+		interMapLc_ = interMapLc;
+		result.accepted = accepted;
+		result.lastLocalId = client.lastLocalId;
+		result.globalNodes = globalNodes_;
+		result.loopClosures = loopClosures_;
+		saveState();
 	}
-	globalNodes_ += accepted;
-	cloudStale_ = true;
-	lastIngestAt_ = static_cast<long>(std::time(0));
-	if(static_cast<int>(poses.size()) > poses_)
-	{
-		poses_ = static_cast<int>(poses.size());
-	}
-	loopClosures_ = keepLoopClosures(previousLc, memoryLc);
-	lastIngestAligned_ = aligned;
-	interMapLc_ = interMapLc;
-	result.accepted = accepted;
-	result.lastLocalId = client.lastLocalId;
-	result.globalNodes = globalNodes_;
-	result.loopClosures = loopClosures_;
-	saveState();
 
 	UINFO("Ingest official DBReader+process client=%s accepted=%d remap=[%s] last_local=%d global_nodes=%d poses=%d lc=%d inter_map_lc=%d detectMore=%d reconnect=%d aligned=%d tag_lock=%d map_ids={%s}",
-		clientId.c_str(), accepted, remapLog.str().c_str(), client.lastLocalId, globalNodes_,
-		poses_, loopClosures_, interMapLc, addedLc, reconnects, aligned ? 1 : 0, tagLock ? 1 : 0, mapIds.c_str());
+		clientId.c_str(), accepted, remapLog.str().c_str(), lastLocalId, globalNodesAtStart + accepted,
+		(int)poses.size(), keepLoopClosures(previousLc, memoryLc), interMapLc, addedLc, reconnects, aligned ? 1 : 0, tagLock ? 1 : 0, mapIds.c_str());
 	return true;
 }
 
@@ -5486,7 +5624,7 @@ bool CollabMap::optimizeAndExport(std::string & error)
 	std::map<int, rtabmap::Transform> assemblePoses = poses;
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
-		lastIngestAligned_ = (roomLocked_ && countCalibratedLocked() >= kLockPhonesRequired) || interMapLc > 0;
+		lastIngestAligned_ = (roomLocked_ && countCalibratedLocked() >= lockPhonesRequired_) || interMapLc > 0;
 		interMapLc_ = interMapLc;
 		alignPosesToTagFrame(assemblePoses);
 		poses_ = newPoses;

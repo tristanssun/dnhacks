@@ -1078,7 +1078,7 @@ int main(int argc, char * argv[])
 	collab::CalibrateResult fake = map.calibrate(clients[0].id, 0, false, 0.05f, 0.0f, 0.45f, 0.0f, 0.0f, 0.0f, 1.0f);
 	check(!fake.ok && !map.isRoomLocked(), "calibrate without detected flag rejected", fake.error);
 	check(!map.lastIngestAligned(), "still not aligned after rejected calibrate", "");
-	// One real ArUco id-0 detection locks the room (kLockPhonesRequired=1).
+	// Default lock_phones_required is 1, so the first real detect locks.
 	collab::CalibrateResult calA = map.calibrate(clients[0].id, 0, true, 0.04f, 0.0f, 0.42f, 0.0f, 0.0f, 0.0f, 1.0f);
 	check(calA.ok && calA.locked && map.isRoomLocked(), "first real detect locks the room",
 		"ok=" + std::to_string(calA.ok ? 1 : 0) + " locked=" + std::to_string(calA.locked ? 1 : 0));

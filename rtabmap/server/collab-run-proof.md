@@ -18,30 +18,30 @@ Ten real rooms, two iPhones, one Mac host. The numbers below are from last night
 
 Phones: **A** = `85998EDD…`, **B** = `ED4D51E2…`.
 
-Four 2×2 path figures of the same room 28 walk. Same X/Y limits (meters, frame G). Each sheet keeps three standard traces and changes one panel.
+Four 2×2 figures, one type each. Panel D on every sheet is the odd one.
 
-**Figure 1.** Panel A varies: time along the walk (navy early, ice late).
+**Figure 1. Path traces.** D varies: height instead of a single navy stroke.
 
-![Figure 1: time along the walk](collab-run-proof/00-panel-1.png)
+![Figure 1: path traces](collab-run-proof/00-fig-paths.png)
 
-**Figure 2.** Panel B varies: three legs (start, far, return) instead of out/back.
+**Figure 2. Line charts.** D varies: nodes and closures on one axis.
 
-![Figure 2: three legs](collab-run-proof/00-panel-2.png)
+![Figure 2: line charts](collab-run-proof/00-fig-lines.png)
 
-**Figure 3.** Panel C varies: near-tag closures vs far-end closures.
+**Figure 3. Bar charts.** D varies: grouped nodes and closures.
 
-![Figure 3: near vs far closures](collab-run-proof/00-panel-3.png)
+![Figure 3: bar charts](collab-run-proof/00-fig-bars.png)
 
-**Figure 4.** Panel D varies: step length (short navy, long ice) instead of height.
+**Figure 4. Two-phone overlays.** D varies: both phones plus closures.
 
-![Figure 4: step length](collab-run-proof/00-panel-4.png)
+![Figure 4: two-phone overlays](collab-run-proof/00-fig-merge.png)
 
-| Figure | The odd panel |
-|---|---|
-| **1 / A** | Color is walk time, not a single navy stroke. |
-| **2 / B** | Start, far, and return instead of two colors. |
-| **3 / C** | Navy chords near the tag, cyan chords at the far end. |
-| **4 / D** | Color is XY step length, not height. |
+| Figure | Type | The odd panel |
+|---|---|---|
+| **1 / D** | Paths | Color is height (navy low, ice high). |
+| **2 / D** | Lines | Two series (nodes + closures) on one axis. |
+| **3 / D** | Bars | Grouped bars, not a single cycle. |
+| **4 / D** | Overlays | Phone A, phone B, and closures together. |
 
 ---
 
