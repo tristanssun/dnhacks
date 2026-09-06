@@ -16,6 +16,17 @@ extension Array {
     }
 }
 
+private enum MissionTheme {
+    static let ink = UIColor(red: 5/255, green: 7/255, blue: 10/255, alpha: 1)
+    static let text = UIColor(red: 243/255, green: 245/255, blue: 244/255, alpha: 1)
+    static let muted = UIColor(red: 243/255, green: 245/255, blue: 244/255, alpha: 0.58)
+    static let orange = UIColor(red: 227/255, green: 148/255, blue: 42/255, alpha: 1)
+    static let go = UIColor(red: 71/255, green: 255/255, blue: 81/255, alpha: 1)
+    static let forest = UIColor(red: 107/255, green: 138/255, blue: 90/255, alpha: 1)
+    static let panel = UIColor(red: 16/255, green: 19/255, blue: 24/255, alpha: 0.92)
+    static let line = UIColor(red: 243/255, green: 245/255, blue: 244/255, alpha: 0.16)
+}
+
 class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIPickerViewDataSource, UIPickerViewDelegate, CLLocationManagerDelegate {
     
     private let session = ARSession()
@@ -46,6 +57,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
     private var mReviewRequested = false
     
     private var mMaximumMemory: Int = 0
+    private let collabSync = CollabSync()
     
     // UI states
     private enum State {
@@ -132,7 +144,23 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
     
     let RTABMAP_TMP_DB = "rtabmap.tmp.db"
     let RTABMAP_RECOVERY_DB = "rtabmap.tmp.recovery.db"
+    let RTABMAP_COLLAB_GLOBAL_DB = "rtabmap.collab.global.db"
     let RTABMAP_EXPORT_DIR = "Export"
+    private var collabFinalMapApplied = false
+    private var collabLastSync: Date?
+    private let tagCalibrator = TagCalibrator()
+    private var waitingForRoomLock = false
+    private var thisPhoneCalibrated = false
+    private var roomLocked = false
+    private var lastCalibPost = Date.distantPast
+    private var lastDemoPoll = Date.distantPast
+    private var lastLivePosePost = Date.distantPast
+    private var calibWaitStarted = Date.distantPast
+    private let calibBanner = UILabel()
+    private let seeTagButton = UIButton(type: .system)
+    private let welcomeKicker = UILabel()
+    private let welcomeTitle = UILabel()
+    private let welcomeSub = UILabel()
 
     func getDocumentDirectory() -> URL {
         return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -247,6 +275,8 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
         viewButton.showsMenuAsPrimaryAction = true
         statusLabel.numberOfLines = 0
         statusLabel.text = ""
+        setupMissionChrome()
+        setupCalibrationHUD()
         
         updateDatabases()
         
@@ -406,6 +436,9 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
                     self.statusLabel.text! +
                     "Status: \(self.getStateString(state: self.mState))\n" +
                 	"RAM Usage (MB): \(usedMem) / \(self.mMaximumMemory)"
+                if self.collabSync.enabled && (self.mState == .STATE_MAPPING || self.mState == .STATE_CAMERA) {
+                    self.statusLabel.text = self.statusLabel.text! + "\n" + self.collabLiveStatusLine()
+                }
             }
             if self.debugShown {
                 self.statusLabel.text =
@@ -681,6 +714,9 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
         if(mState != state)
         {
             mState = state;
+            if state == .STATE_CAMERA || state == .STATE_MAPPING {
+                startCollabSyncIfEnabled()
+            }
             resetNoTouchTimer(true)
             return
         }
@@ -703,7 +739,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
             menuButton.isHidden = false
             viewButton.isHidden = false
             newScanButtonLarge.isHidden = true // WELCOME button
-            recordButton.isHidden = false
+            recordButton.isHidden = waitingForRoomLock
             stopButton.isHidden = true
             closeVisualizationButton.isHidden = true
             stopCameraButton.isHidden = false
@@ -831,6 +867,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
             actionSettingsEnabled = true
             actionMeasuringEnabled = false
         }
+        setWelcomeVisible(mState == .STATE_WELCOME)
 
         let view = self.view as? GLKView
         if(mState != .STATE_MAPPING && mState != .STATE_CAMERA && mState != .STATE_VISUALIZING_CAMERA && mState != .STATE_VISUALIZING_AND_MEASURING)
@@ -1130,15 +1167,17 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
     
     func exportMesh(isOBJ: Bool)
     {
-        let ac = UIAlertController(title: "Maximum Polygons", message: "\n\n\n\n\n\n\n\n\n\n", preferredStyle: .alert)
-        ac.view.addSubview(maxPolygonsPickerView)
-        maxPolygonsPickerView.selectRow(2, inComponent: 0, animated: false)
-        ac.addAction(UIAlertAction(title: "OK", style: .default, handler: { _ in
-            let pickerValue = self.maxPolygonsPickerData[self.maxPolygonsPickerView.selectedRow(inComponent: 0)]
-            self.export(isOBJ: isOBJ, meshing: true, regenerateCloud: false, optimized: true, optimizedMaxPolygons: pickerValue*100000, previousState: self.mState);
-        }))
-        ac.addAction(UIAlertAction(title: "Cancel", style: .cancel, handler: nil))
-        present(ac, animated: true)
+        applyCollabFinalMap {
+            let ac = UIAlertController(title: "Maximum Polygons", message: "\n\n\n\n\n\n\n\n\n\n", preferredStyle: .alert)
+            ac.view.addSubview(self.maxPolygonsPickerView)
+            self.maxPolygonsPickerView.selectRow(2, inComponent: 0, animated: false)
+            ac.addAction(UIAlertAction(title: "OK", style: .default, handler: { _ in
+                let pickerValue = self.maxPolygonsPickerData[self.maxPolygonsPickerView.selectedRow(inComponent: 0)]
+                self.export(isOBJ: isOBJ, meshing: true, regenerateCloud: false, optimized: true, optimizedMaxPolygons: pickerValue*100000, previousState: self.mState);
+            }))
+            ac.addAction(UIAlertAction(title: "Cancel", style: .cancel, handler: nil))
+            self.present(ac, animated: true)
+        }
     }
     
     func numberOfComponents(in pickerView: UIPickerView) -> Int {
@@ -1202,6 +1241,8 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
         {
             rtabmap?.postOdometryEvent(frame: frame, orientation: rotation, viewport: self.view.frame.size)
         }
+        handleTagCalibrationFrame(frame)
+        maybePostLivePose(frame)
         
         if !status.isEmpty {
             DispatchQueue.main.async {
@@ -1498,6 +1539,318 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
         let appDefaults = [String:AnyObject]()
         UserDefaults.standard.register(defaults: appDefaults)
     }
+
+    private func setupMissionChrome() {
+        statusLabel.font = UIFont.monospacedSystemFont(ofSize: 11, weight: .medium)
+        statusLabel.textColor = MissionTheme.text
+
+        toastLabel.font = UIFont.systemFont(ofSize: 13, weight: .semibold)
+        toastLabel.textColor = MissionTheme.ink
+        toastLabel.backgroundColor = MissionTheme.text
+        toastLabel.layer.cornerRadius = 0
+        toastLabel.clipsToBounds = true
+
+        newScanButtonLarge.backgroundColor = MissionTheme.text
+        newScanButtonLarge.setTitleColor(MissionTheme.ink, for: .normal)
+        newScanButtonLarge.tintColor = MissionTheme.ink
+        newScanButtonLarge.titleLabel?.font = UIFont.systemFont(ofSize: 15, weight: .semibold)
+        newScanButtonLarge.setTitle("NEW SESSION  >>", for: .normal)
+        newScanButtonLarge.setImage(nil, for: .normal)
+        newScanButtonLarge.contentEdgeInsets = UIEdgeInsets(top: 14, left: 22, bottom: 14, right: 22)
+        newScanButtonLarge.layer.cornerRadius = 0
+
+        libraryButton.tintColor = MissionTheme.text
+        menuButton.tintColor = MissionTheme.text
+        viewButton.tintColor = MissionTheme.text
+
+        welcomeKicker.translatesAutoresizingMaskIntoConstraints = false
+        welcomeKicker.textAlignment = .center
+        let kern = NSMutableAttributedString(string: "CMCS")
+        let kernRange = NSRange(location: 0, length: 4)
+        kern.addAttribute(.kern, value: 3.2, range: kernRange)
+        kern.addAttribute(.foregroundColor, value: MissionTheme.forest, range: kernRange)
+        kern.addAttribute(.font, value: UIFont.systemFont(ofSize: 12, weight: .semibold), range: kernRange)
+        welcomeKicker.attributedText = kern
+
+        welcomeTitle.translatesAutoresizingMaskIntoConstraints = false
+        welcomeTitle.text = "Map Fast.\nShare Fast."
+        welcomeTitle.textColor = MissionTheme.text
+        welcomeTitle.font = UIFont.systemFont(ofSize: 36, weight: .bold)
+        welcomeTitle.textAlignment = .center
+        welcomeTitle.numberOfLines = 2
+
+        welcomeSub.translatesAutoresizingMaskIntoConstraints = false
+        welcomeSub.text = "Two phones. One room. A shared mesh."
+        welcomeSub.textColor = MissionTheme.muted
+        welcomeSub.font = UIFont.systemFont(ofSize: 14, weight: .regular)
+        welcomeSub.textAlignment = .center
+        welcomeSub.numberOfLines = 2
+
+        view.addSubview(welcomeKicker)
+        view.addSubview(welcomeTitle)
+        view.addSubview(welcomeSub)
+        view.bringSubviewToFront(newScanButtonLarge)
+
+        NSLayoutConstraint.activate([
+            welcomeTitle.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            welcomeTitle.bottomAnchor.constraint(equalTo: newScanButtonLarge.topAnchor, constant: -22),
+            welcomeTitle.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 28),
+            welcomeTitle.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -28),
+            welcomeKicker.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            welcomeKicker.bottomAnchor.constraint(equalTo: welcomeTitle.topAnchor, constant: -10),
+            welcomeSub.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            welcomeSub.topAnchor.constraint(equalTo: newScanButtonLarge.bottomAnchor, constant: 16),
+            welcomeSub.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 32),
+            welcomeSub.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -32)
+        ])
+        setWelcomeVisible(mState == .STATE_WELCOME)
+    }
+
+    private func setWelcomeVisible(_ show: Bool) {
+        welcomeKicker.isHidden = !show
+        welcomeTitle.isHidden = !show
+        welcomeSub.isHidden = !show
+    }
+
+    private func setupCalibrationHUD() {
+        calibBanner.translatesAutoresizingMaskIntoConstraints = false
+        calibBanner.numberOfLines = 0
+        calibBanner.textAlignment = .center
+        calibBanner.font = UIFont.systemFont(ofSize: 15, weight: .semibold)
+        calibBanner.textColor = MissionTheme.text
+        calibBanner.backgroundColor = MissionTheme.panel
+        calibBanner.layer.cornerRadius = 0
+        calibBanner.layer.borderWidth = 1
+        calibBanner.layer.borderColor = MissionTheme.line.cgColor
+        calibBanner.clipsToBounds = true
+        calibBanner.isHidden = true
+        view.addSubview(calibBanner)
+
+        seeTagButton.translatesAutoresizingMaskIntoConstraints = false
+        seeTagButton.setTitle("POINT AT THE TAG  >>", for: .normal)
+        seeTagButton.titleLabel?.font = UIFont.systemFont(ofSize: 13, weight: .semibold)
+        seeTagButton.backgroundColor = MissionTheme.text
+        seeTagButton.setTitleColor(MissionTheme.ink, for: .normal)
+        seeTagButton.layer.cornerRadius = 0
+        seeTagButton.isHidden = true
+        seeTagButton.addTarget(self, action: #selector(seeTagTapped), for: .touchUpInside)
+        view.addSubview(seeTagButton)
+
+        NSLayoutConstraint.activate([
+            calibBanner.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+            calibBanner.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+            calibBanner.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
+            seeTagButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            seeTagButton.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -28),
+            seeTagButton.widthAnchor.constraint(equalToConstant: 240),
+            seeTagButton.heightAnchor.constraint(equalToConstant: 44)
+        ])
+    }
+
+    private func updateCalibrationHUD() {
+        let show = waitingForRoomLock && !roomLocked && UserDefaults.standard.bool(forKey: "CollabEnabled")
+        calibBanner.isHidden = !show
+        seeTagButton.isHidden = !(show && !thisPhoneCalibrated)
+        if show {
+            if thisPhoneCalibrated {
+                calibBanner.text = "  02 LOCK   Waiting for the other soldier  "
+            } else {
+                calibBanner.text = "  01 ACQUIRE   Point both phones at the start tag  "
+            }
+        }
+        if mState == .STATE_CAMERA {
+            recordButton.isHidden = waitingForRoomLock
+        }
+    }
+
+    @objc private func seeTagTapped() {
+        showToast(message: "Keep pointing at the tag", seconds: 2)
+    }
+
+    private func maybePostLivePose(_ frame: ARFrame) {
+        guard UserDefaults.standard.bool(forKey: "CollabEnabled") else { return }
+        guard thisPhoneCalibrated else { return }
+        guard mState == .STATE_MAPPING || roomLocked else { return }
+        let now = Date()
+        if now.timeIntervalSince(lastLivePosePost) < 0.3 {
+            return
+        }
+        lastLivePosePost = now
+        let pose = frame.camera.transform
+        let rotation = GLKMatrix3(
+            m: (pose[0,0], pose[0,1], pose[0,2],
+                pose[1,0], pose[1,1], pose[1,2],
+                pose[2,0], pose[2,1], pose[2,2]))
+        let quat = GLKQuaternionMakeWithMatrix3(rotation)
+        collabSync.postLivePose(
+            tx: pose[3,0], ty: pose[3,1], tz: pose[3,2],
+            qx: quat.x, qy: quat.y, qz: quat.z, qw: quat.w)
+    }
+
+    private func handleTagCalibrationFrame(_ frame: ARFrame) {
+        guard waitingForRoomLock, !roomLocked, UserDefaults.standard.bool(forKey: "CollabEnabled") else {
+            return
+        }
+        let now = Date()
+        if now.timeIntervalSince(lastDemoPoll) >= 0.5 {
+            lastDemoPoll = now
+            DispatchQueue.global(qos: .utility).async {
+                if let demo = self.collabSync.fetchDemo() {
+                    DispatchQueue.main.async {
+                        self.applyDemoStatus(demo)
+                    }
+                }
+            }
+            DispatchQueue.main.async {
+                self.updateCalibrationHUD()
+            }
+        }
+        if thisPhoneCalibrated {
+            return
+        }
+        if let pose = tagCalibrator.detect(from: frame), pose.detected, pose.tagId == DemoTag.id {
+            if now.timeIntervalSince(lastCalibPost) >= 0.5 {
+                lastCalibPost = now
+                NSLog("TagCalibrator: POST /calibrate real hit tag_id=%d", pose.tagId)
+                postCalibration(pose)
+            }
+        }
+    }
+
+    private func postCalibration(_ pose: TagPose) {
+        DispatchQueue.global(qos: .utility).async {
+            if let demo = self.collabSync.postCalibrate(pose: pose) {
+                DispatchQueue.main.async {
+                    self.applyDemoStatus(demo)
+                }
+            }
+        }
+    }
+
+    private func applyDemoStatus(_ demo: CollabSync.DemoStatus) {
+        thisPhoneCalibrated = demo.thisPhoneLocked || thisPhoneCalibrated
+        if demo.locked && !roomLocked {
+            roomLocked = true
+            waitingForRoomLock = false
+            updateCalibrationHUD()
+            showToast(message: "LOCKED  >>  start mapping", seconds: 2)
+            startMappingAfterLock()
+            return
+        }
+        roomLocked = demo.locked
+        waitingForRoomLock = !demo.locked
+        updateCalibrationHUD()
+    }
+
+    private func startMappingAfterLock() {
+        if UserDefaults.standard.bool(forKey: "CollabEnabled") && !roomLocked {
+            return
+        }
+        waitingForRoomLock = false
+        updateCalibrationHUD()
+        rtabmap?.setPausedMapping(paused: false)
+        lowMemoryWarningShown = false
+        updateState(state: .STATE_MAPPING)
+        startCollabSyncIfEnabled()
+    }
+
+    private func collabLiveStatusLine() -> String {
+        guard let last = collabLastSync else {
+            return "Live, waiting"
+        }
+        let secs = max(0, Int(Date().timeIntervalSince(last)))
+        return "Live · \(secs)s ago"
+    }
+
+    private func currentCollabDatabasePath() -> String {
+        if let opened = openedDatabasePath, !opened.path.isEmpty {
+            return opened.path
+        }
+        return getDocumentDirectory().appendingPathComponent(RTABMAP_TMP_DB).path
+    }
+
+    private func startCollabSyncIfEnabled(databasePath: String? = nil) {
+        let defaults = UserDefaults.standard
+        let enabled = defaults.bool(forKey: "CollabEnabled")
+        var serverURL = defaults.string(forKey: "CollabServerURL") ?? CollabSync.defaultServerURL
+        if serverURL != CollabSync.defaultServerURL {
+            serverURL = CollabSync.defaultServerURL
+            defaults.set(serverURL, forKey: "CollabServerURL")
+        }
+        let path = databasePath ?? currentCollabDatabasePath()
+        NSLog("CollabSync: startIfEnabled enabled=%d url=%@ db=%@ state=%@", enabled ? 1 : 0, serverURL, path, getStateString(state: mState))
+        collabSync.onImportRemote = { [weak self] pullPath, transform, aligned in
+            let imported = self?.rtabmap?.importRemoteDeltaDb(path: pullPath, clientToGlobal: transform, aligned: aligned) ?? 0
+            DispatchQueue.main.async {
+                self?.rtabmap?.setMapCloudShown(shown: true)
+                self?.view.setNeedsDisplay()
+            }
+            NSLog("CollabSync: onImportRemote imported=%d aligned=%d xf=%d path=%@", imported, aligned ? 1 : 0, transform.count, pullPath)
+            return imported
+        }
+        collabSync.onClearRemote = { [weak self] in
+            self?.rtabmap?.clearRemoteMap()
+        }
+        collabSync.onSyncNotice = { [weak self] message in
+            DispatchQueue.main.async {
+                self?.showToast(message: message, seconds: 1.5)
+            }
+        }
+        collabSync.onSyncTick = { [weak self] in
+            DispatchQueue.main.async {
+                self?.collabLastSync = Date()
+            }
+        }
+        collabSync.configure(enabled: enabled, serverURL: serverURL, databasePath: path)
+        if enabled {
+            collabSync.start()
+        } else {
+            collabSync.stop(flush: false)
+        }
+    }
+
+    private func applyCollabFinalMap(completion: @escaping () -> Void) {
+        guard collabSync.enabled else {
+            collabSync.stop(flush: false)
+            completion()
+            return
+        }
+        if collabFinalMapApplied {
+            completion()
+            return
+        }
+
+        let merging = UIAlertController(title: "Shared Map", message: "Downloading the merged room map...", preferredStyle: .alert)
+        present(merging, animated: true) {
+            DispatchQueue.global(qos: .userInitiated).async {
+                let globalURL = self.getDocumentDirectory().appendingPathComponent(self.RTABMAP_COLLAB_GLOBAL_DB)
+                let bytes = self.collabSync.stopAndDownloadGlobalMap(to: globalURL.path)
+                let globalNodes = lastNodeId(databasePath: globalURL.path)
+                NSLog("CollabSync: final map.db bytes=%d nodes=%d", bytes, globalNodes)
+                if bytes >= 100_000 && globalNodes > 0 {
+                    let status = self.rtabmap!.openDatabase(
+                        databasePath: globalURL.path,
+                        databaseInMemory: false,
+                        optimize: false,
+                        clearDatabase: false)
+                    NSLog("CollabSync: opened global.db status=%d for export/save", status)
+                    if status >= 0 {
+                        DispatchQueue.main.sync {
+                            self.openedDatabasePath = globalURL
+                        }
+                    }
+                } else {
+                    NSLog("CollabSync: global.db empty/small, keep local scan")
+                }
+                DispatchQueue.main.async {
+                    self.collabFinalMapApplied = true
+                    merging.dismiss(animated: true) {
+                        completion()
+                    }
+                }
+            }
+        }
+    }
     
     func updateDisplayFromDefaults()
     {
@@ -1618,6 +1971,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
         
         setGLCamera(type: 0);
         startCamera();
+        startCollabSyncIfEnabled()
     }
     
     func newScan(dataRecordingMode: Bool = false)
@@ -1743,32 +2097,116 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
         }
         else
         {
-            let inMemory = UserDefaults.standard.bool(forKey: "DatabaseInMemory") && !dataRecordingMode
-            mDataRecording = dataRecordingMode
-            self.rtabmap!.setDataRecorderMode(enabled: dataRecordingMode)
-            self.optimizedGraphShown = true // Always reset to true when opening a database
-            self.rtabmap!.openDatabase(databasePath: tmpDatabase.path, databaseInMemory: inMemory, optimize: false, clearDatabase: true)
-            
-            if(!(self.mState == State.STATE_CAMERA || self.mState == State.STATE_MAPPING))
-            {
-                if(mDataRecording) {
-                    let alertController = UIAlertController(title: "Data Recording Mode", message: "This mode should be only used if you want to record raw ARKit data as long as possible without any feedback: loop closure detection and map rendering are disabled. The database size in Debug display shows how much data has been recorded so far.", preferredStyle: .alert)
-                    
-                    let okAction = UIAlertAction(title: "OK", style: .default) { (action) in
+            beginNewScanAfterJoin(dataRecordingMode: dataRecordingMode, tmpDatabase: tmpDatabase)
+        }
+    }
+
+    private func beginNewScanAfterJoin(dataRecordingMode: Bool, tmpDatabase: URL) {
+        let collabEnabled = UserDefaults.standard.bool(forKey: "CollabEnabled")
+        if !collabEnabled {
+            waitingForRoomLock = false
+            roomLocked = false
+            thisPhoneCalibrated = false
+            updateCalibrationHUD()
+            openBlankScanDatabase(dataRecordingMode: dataRecordingMode, tmpDatabase: tmpDatabase, joinExisting: false)
+            return
+        }
+
+        let joining = UIAlertController(title: "Collaborative Mapping", message: "Joining the room session...", preferredStyle: .alert)
+        present(joining, animated: true)
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard let join = self.collabSync.joinSession(), join.ok else {
+                DispatchQueue.main.async {
+                    joining.dismiss(animated: true) {
+                        self.showToast(message: "Cannot reach collab server", seconds: 4)
                     }
-                    alertController.addAction(okAction)
-                    
-                    present(alertController, animated: true)
-                    self.debugShown = true
                 }
-                
-                self.setGLCamera(type: 0);
-                self.startCamera();
+                return
             }
+
+            var joinExisting = false
+            if join.mode == "join" && join.mustDownload {
+                if !self.collabSync.downloadMapDb(to: tmpDatabase.path) {
+                    DispatchQueue.main.async {
+                        joining.dismiss(animated: true) {
+                            self.showToast(message: "Cannot reach collab server", seconds: 4)
+                        }
+                    }
+                    return
+                }
+                joinExisting = true
+            }
+
+            DispatchQueue.main.async {
+                joining.dismiss(animated: true) {
+                    self.roomLocked = join.locked
+                    self.waitingForRoomLock = join.mustWaitForLock && !join.locked
+                    self.thisPhoneCalibrated = false
+                    NSLog("CollabSync: after join locked=%d mustWait=%d waitingForRoomLock=%d",
+                          join.locked ? 1 : 0, join.mustWaitForLock ? 1 : 0, self.waitingForRoomLock ? 1 : 0)
+                    self.openBlankScanDatabase(dataRecordingMode: dataRecordingMode, tmpDatabase: tmpDatabase, joinExisting: joinExisting)
+                    if self.waitingForRoomLock {
+                        self.calibWaitStarted = Date()
+                        self.updateCalibrationHUD()
+                    } else if join.locked {
+                        self.startMappingAfterLock()
+                    }
+                }
+            }
+        }
+    }
+
+    private func openBlankScanDatabase(dataRecordingMode: Bool, tmpDatabase: URL, joinExisting: Bool) {
+        let collabEnabled = UserDefaults.standard.bool(forKey: "CollabEnabled")
+        let inMemory = UserDefaults.standard.bool(forKey: "DatabaseInMemory") && !dataRecordingMode && !collabEnabled
+        NSLog("CollabSync: newScan collabEnabled=%d inMemory=%d joinExisting=%d db=%@", collabEnabled ? 1 : 0, inMemory ? 1 : 0, joinExisting ? 1 : 0, tmpDatabase.path)
+        mDataRecording = dataRecordingMode
+        self.rtabmap!.setDataRecorderMode(enabled: dataRecordingMode)
+        self.optimizedGraphShown = true
+        self.rtabmap!.openDatabase(databasePath: tmpDatabase.path, databaseInMemory: inMemory, optimize: false, clearDatabase: !joinExisting)
+        if collabEnabled {
+            collabFinalMapApplied = false
+            collabLastSync = nil
+            if joinExisting {
+                let last = lastNodeId(databasePath: tmpDatabase.path)
+                self.collabSync.setLastSyncedId(last)
+                self.collabSync.setLastPulledGlobalId(last)
+                NSLog("CollabSync: late joiner lastSyncedId=%d lastPulledGlobalId=%d", last, last)
+            } else {
+                self.collabSync.resetForNewScan()
+            }
+            self.startCollabSyncIfEnabled(databasePath: tmpDatabase.path)
+        } else {
+            self.collabSync.stop(flush: false)
+        }
+
+        if(!(self.mState == State.STATE_CAMERA || self.mState == State.STATE_MAPPING))
+        {
+            if(mDataRecording) {
+                let alertController = UIAlertController(title: "Data Recording Mode", message: "This mode should be only used if you want to record raw ARKit data as long as possible without any feedback: loop closure detection and map rendering are disabled. The database size in Debug display shows how much data has been recorded so far.", preferredStyle: .alert)
+
+                let okAction = UIAlertAction(title: "OK", style: .default) { (action) in
+                }
+                alertController.addAction(okAction)
+
+                present(alertController, animated: true)
+                self.debugShown = true
+            }
+
+            self.setGLCamera(type: 0);
+            self.startCamera();
         }
     }
     
     func save()
+    {
+        applyCollabFinalMap {
+            self.presentSaveScanAlert()
+        }
+    }
+
+    private func presentSaveScanAlert()
     {
         //Step : 1
         let alert = UIAlertController(title: "Save Scan", message: "RTAB-Map Database Name (*.db):", preferredStyle: .alert )
@@ -2089,6 +2527,9 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
     
     func stopMapping(ignoreSaving: Bool, offerPostProcessing: Bool = true)
     {
+        waitingForRoomLock = false
+        updateCalibrationHUD()
+        let wasMapping = mState == .STATE_MAPPING
         session.pause()
         locationManager?.stopUpdatingLocation()
         rtabmap?.setPausedMapping(paused: true)
@@ -2103,50 +2544,67 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
             self.rtabmap?.setLocalizationMode(enabled: false)
         }
         updateState(state: mState == .STATE_VISUALIZING_CAMERA || mState == .STATE_VISUALIZING_AND_MEASURING ? .STATE_VISUALIZING : .STATE_IDLE);
-        
-        if !ignoreSaving
-        {
-            if(mDataRecording || !offerPostProcessing)
+
+        let afterStop = {
+            if !ignoreSaving
             {
-                // Go directly to save
-                self.save()
+                if(self.mDataRecording || !offerPostProcessing)
+                {
+                    self.save()
+                }
+                else
+                {
+                    self.presentStopMappingSaveOptions()
+                }
             }
-            else
+            else if(self.mMapNodes == 0)
             {
-                dismiss(animated: true, completion: {
-                    var msg = "Do you want to do standard graph optimization and make a nice assembled mesh now? This can be also done later using \"Optimize\" and \"Assemble\" menus."
-                    let depthUsed = self.depthSupported && UserDefaults.standard.bool(forKey: "LidarMode")
-                    if !depthUsed
-                    {
-                        msg = "Do you want to do standard graph optimization now? This can be also done later using \"Optimize\" menu."
-                    }
-                    let alert = UIAlertController(title: "Mapping Stopped! Optimize Now?", message: msg, preferredStyle: .alert)
-                    if depthUsed {
-                        let alertActionOnlyGraph = UIAlertAction(title: "Only Optimize", style: .default)
-                        {
-                            (UIAlertAction) -> Void in
-                            self.optimization(withStandardMeshExport: false, approach: -1)
-                        }
-                        alert.addAction(alertActionOnlyGraph)
-                    }
-                    let alertActionNo = UIAlertAction(title: "Save First", style: .cancel) {
-                        (UIAlertAction) -> Void in
-                        self.save()
-                    }
-                    alert.addAction(alertActionNo)
-                    let alertActionYes = UIAlertAction(title: "Yes", style: .default) {
-                        (UIAlertAction) -> Void in
-                        self.optimization(withStandardMeshExport: depthUsed, approach: -1)
-                    }
-                    alert.addAction(alertActionYes)
-                    self.present(alert, animated: true, completion: nil)
-                })
+                self.updateState(state: State.STATE_WELCOME);
+                self.statusLabel.text = ""
             }
         }
-        else if(mMapNodes == 0)
-        {
-            updateState(state: State.STATE_WELCOME);
-            statusLabel.text = ""
+
+        if wasMapping && !ignoreSaving && collabSync.enabled {
+            applyCollabFinalMap(completion: afterStop)
+        } else {
+            collabSync.stop(flush: wasMapping && !ignoreSaving)
+            afterStop()
+        }
+    }
+
+    private func presentStopMappingSaveOptions() {
+        let show: () -> Void = {
+            var msg = "Do you want to do standard graph optimization and make a nice assembled mesh now? This can be also done later using \"Optimize\" and \"Assemble\" menus."
+            let depthUsed = self.depthSupported && UserDefaults.standard.bool(forKey: "LidarMode")
+            if !depthUsed
+            {
+                msg = "Do you want to do standard graph optimization now? This can be also done later using \"Optimize\" menu."
+            }
+            let alert = UIAlertController(title: "Mapping Stopped! Optimize Now?", message: msg, preferredStyle: .alert)
+            if depthUsed {
+                let alertActionOnlyGraph = UIAlertAction(title: "Only Optimize", style: .default)
+                {
+                    (UIAlertAction) -> Void in
+                    self.optimization(withStandardMeshExport: false, approach: -1)
+                }
+                alert.addAction(alertActionOnlyGraph)
+            }
+            let alertActionNo = UIAlertAction(title: "Save First", style: .cancel) {
+                (UIAlertAction) -> Void in
+                self.save()
+            }
+            alert.addAction(alertActionNo)
+            let alertActionYes = UIAlertAction(title: "Yes", style: .default) {
+                (UIAlertAction) -> Void in
+                self.optimization(withStandardMeshExport: depthUsed, approach: -1)
+            }
+            alert.addAction(alertActionYes)
+            self.present(alert, animated: true, completion: nil)
+        }
+        if presentedViewController != nil {
+            dismiss(animated: true, completion: show)
+        } else {
+            show()
         }
     }
     func shareFile(_ fileUrl: URL) {
@@ -2189,7 +2647,11 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
         var status = 0
         DispatchQueue.background(background: {
             self.optimizedGraphShown = true // Always reset to true when opening a database
-            status = self.rtabmap!.openDatabase(databasePath: self.openedDatabasePath!.path, databaseInMemory: true, optimize: false, clearDatabase: false)
+            let collabEnabled = UserDefaults.standard.bool(forKey: "CollabEnabled")
+            // Collab lastNodeId/export read the file on disk. In-memory mapping never appears there.
+            let inMemory = !collabEnabled
+            NSLog("CollabSync: openDatabase collabEnabled=%d inMemory=%d db=%@", collabEnabled ? 1 : 0, inMemory ? 1 : 0, self.openedDatabasePath!.path)
+            status = self.rtabmap!.openDatabase(databasePath: self.openedDatabasePath!.path, databaseInMemory: inMemory, optimize: false, clearDatabase: false)
         }, completion:{
             // main thread
             if(status == -1) {
@@ -2475,7 +2937,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
                     }
                     .sorted(by: { $0.1 > $1.1 }) // sort descending modification dates
                     .map { $0.0 } // extract file names
-            databases = data.filter{ $0.pathExtension == "db" && $0.lastPathComponent != RTABMAP_TMP_DB && $0.lastPathComponent != RTABMAP_RECOVERY_DB }
+            databases = data.filter{ $0.pathExtension == "db" && $0.lastPathComponent != RTABMAP_TMP_DB && $0.lastPathComponent != RTABMAP_RECOVERY_DB && $0.lastPathComponent != RTABMAP_COLLAB_GLOBAL_DB }
             
         } catch {
             print("Error while enumerating files : \(error.localizedDescription)")
@@ -2491,7 +2953,8 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
             return
         }
         
-        let alertController = UIAlertController(title: "Library", message: nil, preferredStyle: .alert)
+        let alertController = UIAlertController(title: "LIBRARY", message: nil, preferredStyle: .alert)
+        alertController.overrideUserInterfaceStyle = .dark
         let customView = VerticalScrollerView()
         customView.dataSource = self
         customView.delegate = self
@@ -2507,7 +2970,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
         alertController.view.heightAnchor.constraint(equalToConstant: 600).isActive = true
         alertController.view.widthAnchor.constraint(equalToConstant: 400).isActive = true
 
-        customView.backgroundColor = .darkGray
+        customView.backgroundColor = MissionTheme.ink
 
         let selectAction = UIAlertAction(title: "Select", style: .default) { (action) in
             self.openDatabase(fileUrl: self.databases[self.currentDatabaseIndex])
@@ -2525,9 +2988,11 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
     }
 
     @IBAction func recordAction(_ sender: UIButton) {
-        rtabmap?.setPausedMapping(paused: false);
-        lowMemoryWarningShown = false
-        updateState(state: .STATE_MAPPING)
+        if UserDefaults.standard.bool(forKey: "CollabEnabled") && !roomLocked {
+            showToast(message: "Point both phones at the start tag on the computer", seconds: 2)
+            return
+        }
+        startMappingAfterLock()
     }
     
     @IBAction func newScanAction(_ sender: UIButton) {

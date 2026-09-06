@@ -48,6 +48,10 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         defaults.removeObject(forKey: "Version")
         
         setDefaultsFromSettingsBundle()
+        // Auto collab: register(defaults:) does not overwrite a stored false from an earlier launch.
+        defaults.set(true, forKey: "CollabEnabled")
+        defaults.set(CollabServerConfig.defaultURL, forKey: "CollabServerURL")
+        NSLog("CollabSync: launch CollabEnabled=1 server=%@", CollabServerConfig.defaultURL)
         
         // Override point for customization after application launch.
         if !ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {

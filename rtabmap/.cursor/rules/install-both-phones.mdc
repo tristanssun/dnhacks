@@ -1,0 +1,31 @@
+---
+description: After iOS/client changes, install RTABMapApp onto Ian's and Weston's iPhones. Do not ask.
+globs: app/ios/**/*,app/android/jni/**/*
+alwaysApply: true
+---
+
+# Install onto both iPhones
+
+After any change under `app/ios/` (including NativeWrapper, CollabSync, ViewController, Settings.bundle) or `app/android/jni/` (shared with iOS), install to both phones. Do not ask. Do it.
+
+```bash
+./app/ios/scripts/install-both-phones.sh
+```
+
+Run from the rtabmap repo root. Script: `app/ios/scripts/install-both-phones.sh`. Phones: `app/ios/scripts/devices.txt`.
+
+- Scheme `RTABMapApp`, team `F38B8K483F`, bundle `com.dnhacks.rtabmap`. Never change the signing team unless asked.
+- If a phone is unplugged or unpaired, install to the one that is present and tell the user which phone was skipped.
+- If both are missing, stop and say so. Do not pretend the install happened.
+- Dry-run destinations only: `./app/ios/scripts/install-both-phones.sh --dry-run`
+- Set `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` if `xcrun` cannot find `xctrace` / `devicectl` (CLT-only `xcode-select`).
+- If a UDID in `devices.txt` is `REPLACE_ME`, fill it from the next successful `xcrun xctrace list devices` (use the `0000...` hardware UDID, not the CoreDevice UUID).
+
+## Not Xcode
+
+Server-only C++ under `server/` does not need Xcode. Rebuild `rtabmap-collab-server` and kickstart the LaunchAgent:
+
+```bash
+cmake --build build --target rtabmap-collab-server
+launchctl kickstart -k "gui/$(id -u)/com.dnhacks.rtabmap-collab-server"
+```

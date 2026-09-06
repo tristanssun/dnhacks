@@ -204,6 +204,24 @@ public:
 	 * @return The new map id (auto-incremented).
 	 */
 	int incrementMapId(std::map<int, int> * reducedIds = 0);
+	/** @return Map id assigned to the next created signature. */
+	int getCurrentMapId() const {return _idMapCount;}
+	/**
+	 * @brief Sets the map id used for subsequently created signatures.
+	 *
+	 * Use this to continue an existing session after reopening a database
+	 * (Memory increments the map id on load). Pass a value >= 0.
+	 */
+	void setCurrentMapId(int mapId);
+	/**
+	 * @brief Adds a neighbor (odometry-chain) link without loop-closure checks.
+	 *
+	 * Unlike @ref addLink(), this accepts @ref Link::kNeighbor and does not
+	 * transfer rehearsal weights or run graph-error rejection.
+	 *
+	 * @return True if the link was added or already existed.
+	 */
+	bool addNeighborLink(const Link & link);
 	/**
 	 * @brief Refreshes the age of @p signatureId in working memory, marking it as recent.
 	 *
@@ -915,6 +933,12 @@ private:
 	GlobalDescriptorExtractor * _globalDescriptorExtractor;
 
 	bool _dummyDictionary;
+
+	// Wall-clock seconds (UTimer::now) when the database connection was opened.
+	// close() only sleeps the remainder needed so consecutive database rows
+	// keep distinct time_enter seconds, instead of a fixed 1.5 s. Kept last so
+	// existing member offsets (prebuilt iOS library) are unchanged.
+	double _dbConnectedAt;
 };
 
 } // namespace rtabmap

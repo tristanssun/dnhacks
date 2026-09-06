@@ -523,6 +523,32 @@ class RTABMap {
     {
         setGridRotationNative(native_rtabmap, value)
     }
+    func lastNodeId(databasePath: String) -> Int {
+        return databasePath.utf8CString.withUnsafeBufferPointer { buffer in
+            Int(lastNodeIdFromDatabaseNative(buffer.baseAddress))
+        }
+    }
+    func exportDeltaDb(src: String, dst: String, sinceId: Int) -> Int {
+        return src.utf8CString.withUnsafeBufferPointer { srcBuf in
+            dst.utf8CString.withUnsafeBufferPointer { dstBuf in
+                Int(exportDeltaDbNative(srcBuf.baseAddress, dstBuf.baseAddress, Int32(sinceId)))
+            }
+        }
+    }
+    func importRemoteDeltaDb(path: String, clientToGlobal: [Float], aligned: Bool) -> Int {
+        return path.utf8CString.withUnsafeBufferPointer { pathBuf in
+            if clientToGlobal.count >= 7 {
+                var xf = clientToGlobal
+                return Int(xf.withUnsafeBufferPointer { xfBuf in
+                    importRemoteDeltaDbNative(native_rtabmap, pathBuf.baseAddress, xfBuf.baseAddress, aligned ? 1 : 0)
+                })
+            }
+            return Int(importRemoteDeltaDbNative(native_rtabmap, pathBuf.baseAddress, nil, aligned ? 1 : 0))
+        }
+    }
+    func clearRemoteMap() {
+        clearRemoteMapNative(native_rtabmap)
+    }
 }
 
 func getPreviewImage(databasePath: String) -> UIImage?
@@ -543,6 +569,20 @@ func getPreviewImage(databasePath: String) -> UIImage?
         return UIImage(named: "RTAB-Map1024")
     }
     return imageOut
+}
+
+func lastNodeId(databasePath: String) -> Int {
+    return databasePath.utf8CString.withUnsafeBufferPointer { buffer in
+        Int(lastNodeIdFromDatabaseNative(buffer.baseAddress))
+    }
+}
+
+func exportDeltaDb(src: String, dst: String, sinceId: Int) -> Int {
+    return src.utf8CString.withUnsafeBufferPointer { srcBuf in
+        dst.utf8CString.withUnsafeBufferPointer { dstBuf in
+            Int(exportDeltaDbNative(srcBuf.baseAddress, dstBuf.baseAddress, Int32(sinceId)))
+        }
+    }
 }
 
 protocol RTABMapObserver: class {

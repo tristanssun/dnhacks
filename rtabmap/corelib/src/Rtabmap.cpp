@@ -969,6 +969,29 @@ int Rtabmap::triggerNewMap()
 	return mapId;
 }
 
+int Rtabmap::getCurrentMapId() const
+{
+	return _memory ? _memory->getCurrentMapId() : -1;
+}
+
+void Rtabmap::setCurrentMapId(int mapId)
+{
+	if(_memory)
+	{
+		_memory->setCurrentMapId(mapId);
+	}
+}
+
+bool Rtabmap::addNeighborLink(const Link & link)
+{
+	if(!_memory)
+	{
+		UERROR("Memory is not initialized.");
+		return false;
+	}
+	return _memory->addNeighborLink(link);
+}
+
 bool Rtabmap::labelLocation(int id, const std::string & label)
 {
 	if(_memory)

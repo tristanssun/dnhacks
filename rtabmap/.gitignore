@@ -16,3 +16,8 @@ xcuserdata/
 *.dSYM
 *.dSYM.zip
 app/ios/RTABMapApp/Libraries/
+app/ios/RTABMapApp/Generated/CollabServerConfig.swift
+
+# Collab server runtime data (global.db, uploads, logs, meshes)
+collab-data/
+

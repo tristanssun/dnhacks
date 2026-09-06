@@ -24,3 +24,9 @@ Open `app/ios/RTABMapApp.xcodeproj` in Xcode.
 3. Open `app/ios/RTABMapApp.xcodeproj`, select a LiDAR device, and run.
 
 The App Store listing is [RTAB-Map 3D LiDAR Scanner](https://apps.apple.com/ca/app/rtab-map-3d-lidar-scanner/id1564774365).
+
+## Collaborative mapping
+
+A headless C++ server (`rtabmap-collab-server`) can ingest node deltas from multiple iOS clients into one global rtabmap database, run inter-session loop closure, and export `map.db` / `map.ply`. The phones keep their local maps; the server does not push the merged map back.
+
+See [server/README.md](server/README.md) for build, run, and LAN setup. Each Xcode build writes this Mac's LAN IPv4 into `CollabServerConfig.defaultURL` (fallback `http://192.168.1.159:8080`).

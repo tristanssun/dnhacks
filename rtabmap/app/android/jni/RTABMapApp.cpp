@@ -62,8 +62,14 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <rtabmap/core/Optimizer.h>
 #include <rtabmap/core/VWDictionary.h>
 #include <rtabmap/core/Memory.h>
+#include <rtabmap/core/GPS.h>
+#include <rtabmap/core/EnvSensor.h>
+#include <set>
 #include <rtabmap/core/GainCompensator.h>
 #include <rtabmap/core/DBDriver.h>
+#include <rtabmap/core/Signature.h>
+#include <rtabmap/core/SensorData.h>
+#include <rtabmap/core/LaserScan.h>
 #include <rtabmap/core/Recovery.h>
 #include <rtabmap/core/lidar/LidarVLP16.h>
 #include <pcl/common/common.h>
@@ -288,7 +294,13 @@ RTABMapApp::RTABMapApp() :
 		targetPoint_(new pcl::PointCloud<pcl::PointXYZRGB>),
         quadSample_(new pcl::PointCloud<pcl::PointXYZ>),
         quadSamplePolygons_(2),
-		mapToOdom_(rtabmap::Transform::getIdentity())
+		mapToOdom_(rtabmap::Transform::getIdentity()),
+		remoteLocalFromGlobal_(rtabmap::Transform::getIdentity()),
+		remoteRebaseT_(rtabmap::Transform::getIdentity()),
+		remoteRebaseValid_(false),
+		remoteAligned_(false),
+		remoteDirty_(false),
+		remoteClearPending_(false)
 
 {
     pcl::PointXYZRGB ptWhite;
@@ -400,6 +412,7 @@ void RTABMapApp::setScreenRotation(int displayRotation, int cameraRotation)
 int RTABMapApp::openDatabase(const std::string & databasePath, bool databaseInMemory, bool optimize, bool clearDatabase)
 {
 	LOGW("Opening database %s (inMemory=%d, optimize=%d, clearDatabase=%d)", databasePath.c_str(), databaseInMemory?1:0, optimize?1:0, clearDatabase?1:0);
+	clearRemoteMap();
 	this->unregisterFromEventsManager(); // to ignore published init events when closing rtabmap
 	status_.first = rtabmap::RtabmapEventInit::kInitializing;
 	rtabmapMutex_.lock();
@@ -532,6 +545,11 @@ int RTABMapApp::openDatabase(const std::string & databasePath, bool databaseInMe
 	rtabmap::ParametersMap parameters = getRtabmapParameters();
 
     parameters.insert(rtabmap::ParametersPair(rtabmap::Parameters::kDbSqlite3InMemory(), uBool2Str(databaseInMemory && !dataRecorderMode_)));
+	if(!clearDatabase && !databasePath.empty() && UFile::exists(databasePath))
+	{
+		parameters.insert(rtabmap::ParametersPair(rtabmap::Parameters::kMemInitWMWithAllNodes(), "true"));
+		parameters.insert(rtabmap::ParametersPair(rtabmap::Parameters::kRGBDOptimizeFromGraphEnd(), "false"));
+	}
 	LOGI("Initializing database...");
 	rtabmap_->init(parameters, databasePath);
 	rtabmapThread_ = new rtabmap::RtabmapThread(rtabmap_);
@@ -556,6 +574,53 @@ int RTABMapApp::openDatabase(const std::string & databasePath, bool databaseInMe
 			true,
 			true,
 			true);
+
+	if(rtabmap_->getMemory())
+	{
+		std::set<int> allIds = rtabmap_->getMemory()->getAllSignatureIds(false);
+		if(allIds.size() > poses.size())
+		{
+			std::map<int, rtabmap::Transform> gPoses;
+			std::multimap<int, rtabmap::Link> gLinks;
+			std::map<int, rtabmap::Signature> gSigs;
+			rtabmap_->getGraph(gPoses, gLinks, true, true, &gSigs, true, true, true, true);
+			for(std::map<int, rtabmap::Transform>::const_iterator it = gPoses.begin(); it != gPoses.end(); ++it)
+			{
+				poses[it->first] = it->second;
+			}
+			links.insert(gLinks.begin(), gLinks.end());
+			signatures.insert(gSigs.begin(), gSigs.end());
+		}
+		allIds = rtabmap_->getMemory()->getAllSignatureIds(false);
+		for(std::set<int>::const_iterator it = allIds.begin(); it != allIds.end(); ++it)
+		{
+			if(poses.find(*it) != poses.end() && signatures.find(*it) != signatures.end())
+			{
+				continue;
+			}
+			rtabmap::Transform odom;
+			int mapId = 0;
+			int weight = 0;
+			std::string label;
+			double stamp = 0;
+			rtabmap::Transform gt;
+			std::vector<float> vel;
+			rtabmap::GPS gps;
+			rtabmap::EnvSensors sensors;
+			if(rtabmap_->getMemory()->getNodeInfo(*it, odom, mapId, weight, label, stamp, gt, vel, gps, sensors, true) && !odom.isNull())
+			{
+				if(poses.find(*it) == poses.end())
+				{
+					poses[*it] = odom;
+				}
+				if(signatures.find(*it) == signatures.end())
+				{
+					signatures.insert(std::make_pair(*it, rtabmap_->getSignatureCopy(*it, true, true, true, true, true, true)));
+				}
+			}
+		}
+		LOGI("Open: loaded %d/%d poses across all map sessions", (int)poses.size(), (int)allIds.size());
+	}
 
 	if(signatures.size() && poses.empty())
 	{
@@ -1835,6 +1900,8 @@ int RTABMapApp::Render()
 
 				main_scene_.clear();
 				clearSceneOnNextRender_ = false;
+				remoteDirty_ = true;
+				remoteClearPending_ = false;
 				if(!openingDatabase_)
 				{
 					boost::mutex::scoped_lock  lock(meshesMutex_);
@@ -1860,13 +1927,21 @@ int RTABMapApp::Render()
 			// Did we lose OpenGL context? If so, recreate the context;
 			std::set<int> added = main_scene_.getAddedClouds();
 			added.erase(-1);
+			int localAdded = 0;
+			for(std::set<int>::const_iterator ait = added.begin(); ait != added.end(); ++ait)
+			{
+				if(*ait > 0)
+				{
+					++localAdded;
+				}
+			}
 			if(!openingDatabase_)
 			{
 				boost::mutex::scoped_lock  lock(meshesMutex_);
 				unsigned int meshes = (unsigned int)createdMeshes_.size();
-				if(added.size() != meshes)
+				if(localAdded != (int)meshes)
 				{
-					LOGI("added (%d) != meshes (%d)", (int)added.size(), meshes);
+					LOGI("added (%d) != meshes (%d)", localAdded, meshes);
 					boost::mutex::scoped_lock  lockRtabmap(rtabmapMutex_);
 					UASSERT(rtabmap_!=0);
 					for(std::map<int, rtabmap::Mesh>::iterator iter=createdMeshes_.begin(); iter!=createdMeshes_.end(); ++iter)
@@ -2018,7 +2093,10 @@ int RTABMapApp::Render()
 				if(poses.size())
 				{
 					//update graph
+					lastLocalGraphPoses_ = poses;
+					lastLocalGraphLinks_ = links;
 					main_scene_.updateGraph(poses, links);
+					remoteDirty_ = true;
 
 #ifdef DEBUG_RENDERING_PERFORMANCE
 					LOGW("Update graph: %fs", time.ticks());
@@ -2379,6 +2457,7 @@ int RTABMapApp::Render()
 				notifyDataLoaded = true;
 			}
 
+            flushRemoteOverlay();
             main_scene_.setFrustumVisible(camera_!=0);
 			lastDrawnCloudsCount_ = main_scene_.Render(uvsTransformed, arViewMatrix, arProjectionMatrix, occlusionMesh, true);
             double fpsTime = fpsTime_.ticks();
@@ -5098,5 +5177,389 @@ bool RTABMapApp::handleEvent(UEvent * event)
 		renderingTime_ = 0.0f;
 	}
 	return false;
+}
+
+namespace {
+// High positive ids so remotes are drawn in the same map-cloud pass as local
+// nodes (Scene skips id>0 only when map rendering is off). Avoid negative ids:
+// those are reserved for the live odom cloud (-1) and assembled mesh (-100).
+const int kRemoteIdBase = 2000000;
+}
+
+int RTABMapApp::remoteSceneId(int globalId)
+{
+	return kRemoteIdBase + globalId;
+}
+
+bool RTABMapApp::isRemoteSceneId(int id)
+{
+	return id >= kRemoteIdBase;
+}
+
+bool RTABMapApp::createRemoteMeshFromData(rtabmap::SensorData & data, rtabmap::Mesh & mesh)
+{
+	cv::Mat tmpA, tmpB, tmpC;
+	data.uncompressData(&tmpA, &tmpB, 0, 0, 0, 0, 0, depthConfidence_>0?&tmpC:0);
+	if((data.imageRaw().empty() || data.depthRaw().empty()) &&
+	   data.laserScanRaw().isEmpty() &&
+	   !data.laserScanCompressed().isEmpty())
+	{
+		rtabmap::LaserScan scan;
+		data.uncompressData(0, 0, &scan);
+	}
+
+	pcl::IndicesPtr indices(new std::vector<int>);
+	pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud;
+	if(!data.imageRaw().empty() && !data.depthRaw().empty())
+	{
+		int decimation = updateMeshDecimation(data.depthRaw().cols, data.depthRaw().rows);
+		cloud = rtabmap::util3d::cloudRGBFromSensorData(
+			data,
+			decimation,
+			maxCloudDepth_,
+			minCloudDepth_,
+			indices.get(),
+			rtabmap::ParametersMap(),
+			std::vector<float>(),
+			depthConfidence_);
+	}
+	else if(!data.laserScanRaw().isEmpty() || !data.laserScanCompressed().isEmpty())
+	{
+		rtabmap::LaserScan scan = data.laserScanRaw();
+		if(scan.isEmpty())
+		{
+			data.uncompressData(0, 0, &scan);
+		}
+		if(!scan.isEmpty())
+		{
+			cloud = rtabmap::util3d::laserScanToPointCloudRGB(
+				rtabmap::util3d::commonFiltering(scan, 1, minCloudDepth_, maxCloudDepth_),
+				scan.localTransform(),
+				255, 255, 255);
+			if(cloud.get())
+			{
+				indices->resize(cloud->size());
+				for(unsigned int i = 0; i < cloud->size(); ++i)
+				{
+					indices->at(i) = static_cast<int>(i);
+				}
+			}
+		}
+	}
+	if(!cloud.get() || cloud->empty() || !indices.get() || indices->empty())
+	{
+		LOGI("createRemoteMeshFromData: empty cloud id=%d rgb=%dx%d depth=%dx%d scan=%d",
+			data.id(),
+			data.imageRaw().cols, data.imageRaw().rows,
+			data.depthRaw().cols, data.depthRaw().rows,
+			data.laserScanRaw().isEmpty()?0:data.laserScanRaw().size());
+		return false;
+	}
+	mesh.cloud = cloud;
+	mesh.indices = indices;
+	mesh.visible = true;
+	mesh.gains[0] = mesh.gains[1] = mesh.gains[2] = 1.0;
+	if(!data.cameraModels().empty())
+	{
+		mesh.cameraModel = data.cameraModels()[0];
+	}
+	if(cloud->isOrganized())
+	{
+		mesh.polygons = rtabmap::util3d::organizedFastMesh(cloud, meshAngleToleranceDeg_*M_PI/180.0, false, meshTrianglePix_);
+		if(main_scene_.isMeshTexturing() && !data.imageRaw().empty())
+		{
+			if(renderingTextureDecimation_ > 1)
+			{
+				cv::Size reducedSize(data.imageRaw().cols/renderingTextureDecimation_, data.imageRaw().rows/renderingTextureDecimation_);
+				cv::resize(data.imageRaw(), mesh.texture, reducedSize, 0, 0, cv::INTER_LINEAR);
+			}
+			else
+			{
+				mesh.texture = data.imageRaw();
+			}
+		}
+	}
+	return true;
+}
+
+int RTABMapApp::importRemoteDeltaDb(const std::string & path, const rtabmap::Transform & localFromGlobal, bool aligned)
+{
+	if(path.empty() || !UFile::exists(path) || UFile::length(path) <= 0)
+	{
+		LOGE("importRemoteDeltaDb: missing file %s", path.c_str());
+		return 0;
+	}
+
+	rtabmap::DBDriver * src = rtabmap::DBDriver::create();
+	if(!src->openConnection(path, false, true))
+	{
+		LOGE("importRemoteDeltaDb: cannot open %s", path.c_str());
+		delete src;
+		return 0;
+	}
+
+	std::set<int> ids;
+	src->getAllNodeIds(ids, false, false, false);
+	std::map<int, rtabmap::Transform> optPoses = src->loadOptimizedPoses();
+	std::list<rtabmap::Signature *> signatures;
+	if(!ids.empty())
+	{
+		std::list<int> idList(ids.begin(), ids.end());
+		src->loadSignatures(idList, signatures);
+		if(!signatures.empty())
+		{
+			src->loadNodeData(signatures, true, true, true, true);
+		}
+	}
+	src->closeConnection(false);
+	delete src;
+
+	LOGI("importRemoteDeltaDb: path=%s ids=%d optPoses=%d aligned=%d haveXf=%d",
+		path.c_str(), (int)ids.size(), (int)optPoses.size(), aligned ? 1 : 0, localFromGlobal.isNull() ? 0 : 1);
+
+	rtabmap::Transform T = rtabmap::Transform::getIdentity();
+	if(!localFromGlobal.isNull())
+	{
+		T = localFromGlobal;
+		remoteRebaseValid_ = false;
+	}
+	else
+	{
+		T = rtabmap::Transform::getIdentity();
+		remoteRebaseValid_ = false;
+		LOGI("importRemoteDeltaDb: no server T, using identity (shared global frame)");
+	}
+
+	int added = 0;
+	int skippedEmpty = 0;
+	int firstSid = 0;
+	{
+		boost::mutex::scoped_lock lock(meshesMutex_);
+		remoteLocalFromGlobal_ = T;
+		remoteAligned_ = aligned;
+		main_scene_.setMapRendering(true);
+
+		if(!optPoses.empty())
+		{
+			for(std::map<int, rtabmap::Transform>::const_iterator it = optPoses.begin(); it != optPoses.end(); ++it)
+			{
+				if(it->first <= 0 || it->second.isNull())
+				{
+					continue;
+				}
+				int sid = remoteSceneId(it->first);
+				rtabmap::Transform pose = T * it->second;
+				remotePoses_[sid] = pose;
+				std::map<int, rtabmap::Mesh>::iterator mit = remoteMeshes_.find(sid);
+				if(mit != remoteMeshes_.end())
+				{
+					mit->second.pose = pose;
+				}
+			}
+		}
+
+		for(std::list<rtabmap::Signature *>::iterator it = signatures.begin(); it != signatures.end(); ++it)
+		{
+			rtabmap::Signature * sig = *it;
+			if(!sig)
+			{
+				continue;
+			}
+			int gid = sig->id();
+			int sid = remoteSceneId(gid);
+			rtabmap::Transform pose;
+			std::map<int, rtabmap::Transform>::const_iterator pit = optPoses.find(gid);
+			if(pit != optPoses.end() && !pit->second.isNull())
+			{
+				pose = T * pit->second;
+			}
+			else if(!sig->getPose().isNull())
+			{
+				pose = T * sig->getPose();
+			}
+			if(pose.isNull())
+			{
+				delete sig;
+				continue;
+			}
+			remotePoses_[sid] = pose;
+			if(firstSid == 0)
+			{
+				firstSid = sid;
+			}
+
+			const std::multimap<int, rtabmap::Link> & links = sig->getLinks();
+			for(std::multimap<int, rtabmap::Link>::const_iterator lt = links.begin(); lt != links.end(); ++lt)
+			{
+				rtabmap::Link link = lt->second;
+				if(link.from() <= 0 || link.to() <= 0)
+				{
+					continue;
+				}
+				link.setFrom(remoteSceneId(link.from()));
+				link.setTo(remoteSceneId(link.to()));
+				remoteLinks_.insert(std::make_pair(link.from(), link));
+			}
+
+			if(remoteMeshes_.find(sid) == remoteMeshes_.end())
+			{
+				rtabmap::SensorData data = sig->sensorData();
+				rtabmap::Mesh mesh;
+				if(createRemoteMeshFromData(data, mesh))
+				{
+					mesh.pose = pose;
+					remoteMeshes_.insert(std::make_pair(sid, mesh));
+					++added;
+				}
+				else
+				{
+					++skippedEmpty;
+				}
+			}
+			else
+			{
+				remoteMeshes_[sid].pose = pose;
+				++added;
+			}
+			delete sig;
+		}
+
+		remoteDirty_ = true;
+	}
+
+	LOGI("importRemoteDeltaDb: added=%d empty=%d remotes=%d aligned=%d firstSid=%d",
+		added, skippedEmpty, (int)remoteMeshes_.size(), aligned ? 1 : 0, firstSid);
+	return added;
+}
+
+void RTABMapApp::clearRemoteMap()
+{
+	boost::mutex::scoped_lock lock(meshesMutex_);
+	remoteMeshes_.clear();
+	remotePoses_.clear();
+	remoteLinks_.clear();
+	remoteLocalFromGlobal_ = rtabmap::Transform::getIdentity();
+	remoteRebaseT_ = rtabmap::Transform::getIdentity();
+	remoteRebaseValid_ = false;
+	remoteAligned_ = false;
+	remoteDirty_ = true;
+	remoteClearPending_ = true;
+	LOGI("clearRemoteMap");
+}
+
+void RTABMapApp::flushRemoteOverlay()
+{
+	boost::mutex::scoped_lock lock(meshesMutex_);
+	if(remoteClearPending_)
+	{
+		std::set<int> added = main_scene_.getAddedClouds();
+		for(std::set<int>::const_iterator it = added.begin(); it != added.end(); ++it)
+		{
+			if(isRemoteSceneId(*it))
+			{
+				main_scene_.removeCloudOrMesh(*it);
+			}
+		}
+		remoteClearPending_ = false;
+	}
+	if(!remoteMeshes_.empty())
+	{
+		main_scene_.setMapRendering(true);
+	}
+	bool addedAny = false;
+	int shown = 0;
+	for(std::map<int, rtabmap::Mesh>::iterator it = remoteMeshes_.begin(); it != remoteMeshes_.end(); )
+	{
+		if(it->second.pose.isNull())
+		{
+			++it;
+			continue;
+		}
+		rtabmap::Transform glPose = rtabmap::opengl_world_T_rtabmap_world * it->second.pose;
+		if(main_scene_.hasCloud(it->first) || main_scene_.hasMesh(it->first))
+		{
+			if(remoteDirty_)
+			{
+				main_scene_.setCloudPose(it->first, glPose);
+				main_scene_.setCloudVisible(it->first, true);
+			}
+			++shown;
+			++it;
+		}
+		else
+		{
+			// A single bad remote node must not throw on every frame (that is
+			// what keeps the "Rendering Error!" toast on screen). Log and drop it.
+			bool ok = true;
+			std::string error;
+			try
+			{
+				if(!it->second.cloud.get() || it->second.cloud->empty() ||
+				   !it->second.indices.get() || it->second.indices->empty())
+				{
+					ok = false;
+					error = "empty cloud or indices";
+				}
+				else if(!it->second.polygons.empty())
+				{
+					main_scene_.addMesh(it->first, it->second, glPose, true);
+				}
+				else
+				{
+					main_scene_.addCloud(it->first, it->second.cloud, it->second.indices, glPose);
+				}
+			}
+			catch(const UException & e)
+			{
+				ok = false;
+				error = e.what();
+			}
+			catch(const cv::Exception & e)
+			{
+				ok = false;
+				error = e.what();
+			}
+			catch(const std::exception & e)
+			{
+				ok = false;
+				error = e.what();
+			}
+			if(!ok)
+			{
+				UERROR("Remote overlay id=%d dropped: %s", it->first, error.c_str());
+				main_scene_.removeCloudOrMesh(it->first);
+				remotePoses_.erase(it->first);
+				it = remoteMeshes_.erase(it);
+				continue;
+			}
+			main_scene_.setCloudVisible(it->first, true);
+			it->second.texture = cv::Mat();
+			addedAny = true;
+			++shown;
+			LOGI("Remote overlay cloud id=%d points=%d visible=1", it->first, it->second.cloud.get()?(int)it->second.cloud->size():0);
+			++it;
+		}
+	}
+	if(!remoteDirty_ && !addedAny)
+	{
+		return;
+	}
+
+	std::map<int, rtabmap::Transform> merged = lastLocalGraphPoses_;
+	for(std::map<int, rtabmap::Transform>::const_iterator it = remotePoses_.begin(); it != remotePoses_.end(); ++it)
+	{
+		if(!it->second.isNull())
+		{
+			merged[it->first] = rtabmap::opengl_world_T_rtabmap_world * it->second;
+		}
+	}
+	if(!merged.empty())
+	{
+		std::multimap<int, rtabmap::Link> mergedLinks = lastLocalGraphLinks_;
+		mergedLinks.insert(remoteLinks_.begin(), remoteLinks_.end());
+		main_scene_.updateGraph(merged, mergedLinks);
+	}
+	LOGI("flushRemoteOverlay: shown=%d added=%d remotes=%d", shown, addedAny ? 1 : 0, (int)remoteMeshes_.size());
+	remoteDirty_ = false;
 }
 

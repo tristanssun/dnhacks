@@ -492,6 +492,10 @@ int Scene::Render(const float * uvsTransformed, glm::mat4 arViewMatrix, glm::mat
             positiveCloudIds++;
         }
         
+		// Map clouds are id>0 (local nodes and remote overlay at 2000000+).
+		// Negative ids are odom (-1) and assembled mesh (-100). When map
+		// rendering is off, skip the rest of the sorted map after the first
+		// positive id so remotes stay hidden with the local map.
 		if(!mapRendering_ && iter->first > 0)
 		{
 			break;

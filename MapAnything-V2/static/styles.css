@@ -176,8 +176,8 @@ aside {
 }
 
 .sources-panel {
-  flex: 1;
-  min-height: 0;
+  flex: 1 1 auto;
+  min-height: 14rem;
   display: flex;
   flex-direction: column;
   border: 1px solid var(--line);
@@ -210,18 +210,39 @@ aside {
   margin: 0;
   padding: 0.45rem;
   overflow: auto;
+  flex: 1;
+  min-height: 10rem;
 }
 
 .source {
   display: grid;
-  grid-template-columns: 64px 1fr;
+  grid-template-columns: 64px minmax(0, 1fr) auto;
   gap: 0.7rem;
   padding: 0.55rem;
   border-radius: 0.75rem;
   cursor: pointer;
+  align-items: start;
 }
 
 .source:hover, .source.active { background: #1d242e; }
+
+.source.empty-source {
+  grid-template-columns: 64px 1fr;
+  cursor: default;
+  opacity: 0.88;
+}
+
+.source.empty-source:hover { background: transparent; }
+
+.source-delete {
+  margin-top: 0.1rem;
+  padding: 0.28rem 0.55rem;
+  font-size: 0.7rem;
+  letter-spacing: 0.02em;
+  color: var(--rose);
+  border-color: rgba(224, 122, 106, 0.4);
+  background: #1a1414;
+}
 
 .source img, .source .ph {
   width: 64px;
@@ -292,6 +313,18 @@ aside {
 }
 
 .settings input[type="range"] { grid-column: 1 / -1; }
+
+.setting-note {
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+#rebuild-settings {
+  width: 100%;
+  margin-top: 0.85rem;
+}
 
 .check {
   display: flex !important;

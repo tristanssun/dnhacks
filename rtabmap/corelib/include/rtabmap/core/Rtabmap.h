@@ -458,6 +458,15 @@ public:
 	 * @return The new map id (mapping mode), or -1 (localization mode).
 	 */
 	int triggerNewMap();
+	/** @return Map id assigned to the next created signature, or -1 if memory is unset. */
+	int getCurrentMapId() const;
+	/** @brief Continues @p mapId for subsequently processed nodes (see @ref Memory::setCurrentMapId()). */
+	void setCurrentMapId(int mapId);
+	/**
+	 * @brief Adds a neighbor chain link without OptimizeMaxError rejection.
+	 * @return True if the link was added or already existed.
+	 */
+	bool addNeighborLink(const Link & link);
 	/**
 	 * @brief Assigns or clears a label on signature @p id.
 	 * @return True if the label was applied.

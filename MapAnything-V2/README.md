@@ -42,15 +42,16 @@ generated GLBs remain on cluster storage afterward.
 2. MapAnything reconstructs the new views, estimates each source's location, and
    writes those cameras into the world. The 3D viewer updates in place.
 3. Add more viewpoints whenever you want: another phone clip, a photo of a
-   missed corner, or a second camera's recording. Only the new media is
-   reconstructed. It is aligned onto the existing twin with similarity ICP, so
-   the mesh grows instead of starting over.
+   missed corner, or a second camera's recording. If a twin already exists, the
+   next update rebuilds it from every remaining view in one inference, then
+   replaces the live GLB. Incremental ICP is only a fallback when a joint
+   rebuild runs out of GPU memory, and a bad alignment keeps the previous twin.
 
 You never enter poses or pick a "starter" camera. The model assigns location.
 Inference can take longer than the upload, so updates are serialized. This is
-incremental clip and photo ingestion, not continuous webcam streaming. ICP needs
-substantial visual overlap and can drift over many additions; begin with 20–40
-frames per clip.
+clip and photo ingestion, not continuous webcam streaming. A full rebuild is
+slower than appending a clip and uses more VRAM; begin with 20–40 frames per
+clip.
 
 On a CUDA workstation, run `./scripts/run.sh` and open <http://localhost:7860>.
 

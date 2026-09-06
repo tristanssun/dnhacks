@@ -68,4 +68,5 @@ arbitrary Volume files automatically.
 - The first reconstruction downloads and caches the MapAnything checkpoint.
 - Modal web executions are capped at 24 hours, but a deployed endpoint can start
   a replacement container. Persistent data survives container replacement.
-- Incremental clips require substantial scene overlap for ICP registration.
+- Adding a viewpoint rebuilds the twin from all remaining views. Incremental ICP
+  is only used if that joint rebuild runs out of GPU memory.

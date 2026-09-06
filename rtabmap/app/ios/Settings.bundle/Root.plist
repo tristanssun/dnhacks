@@ -486,6 +486,40 @@
 		</dict>
 		<dict>
 			<key>FooterText</key>
+			<string>When enabled, new map nodes are uploaded to a LAN server about every 10 seconds while mapping. In-memory database is disabled. Default server is this Mac's LAN IP, written at Xcode build time.</string>
+			<key>Title</key>
+			<string>Collaborative Mapping</string>
+			<key>Type</key>
+			<string>PSGroupSpecifier</string>
+		</dict>
+		<dict>
+			<key>DefaultValue</key>
+			<false/>
+			<key>Key</key>
+			<string>CollabEnabled</string>
+			<key>Title</key>
+			<string>Enable Collaborative Sync</string>
+			<key>Type</key>
+			<string>PSToggleSwitchSpecifier</string>
+		</dict>
+		<dict>
+			<key>AutocapitalizationType</key>
+			<string>None</string>
+			<key>AutocorrectionType</key>
+			<string>No</string>
+			<key>DefaultValue</key>
+			<string>http://192.168.1.159:8080</string>
+			<key>Key</key>
+			<string>CollabServerURL</string>
+			<key>KeyboardType</key>
+			<string>URL</string>
+			<key>Title</key>
+			<string>Server URL</string>
+			<key>Type</key>
+			<string>PSTextFieldSpecifier</string>
+		</dict>
+		<dict>
+			<key>FooterText</key>
 			<string>Copyright (c) 2010-2024, Mathieu Labbe - IntRoLab - Université de Sherbrooke. All rights reserved.</string>
 			<key>Title</key>
 			<string>About</string>

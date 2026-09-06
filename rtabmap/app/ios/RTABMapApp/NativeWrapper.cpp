@@ -8,7 +8,26 @@
 
 #include "NativeWrapper.hpp"
 #include "RTABMapApp.h"
+#include <rtabmap/core/CameraModel.h>
 #include <rtabmap/core/DBDriverSqlite3.h>
+#include <rtabmap/core/MarkerDetector.h>
+#include <rtabmap/core/Parameters.h>
+#include <rtabmap/core/Signature.h>
+#include <rtabmap/core/Transform.h>
+#include <rtabmap/utilite/UConversion.h>
+#include <rtabmap/utilite/UFile.h>
+#include <rtabmap/utilite/ULogger.h>
+#include <opencv2/core.hpp>
+#include <opencv2/imgproc.hpp>>
+#include <sqlite3.h>
+#include <cmath>
+#include <cstring>
+#include <fstream>
+#include <list>
+#include <set>
+#include <sstream>
+#include <string>
+#include <unistd.h>
 
 inline RTABMapApp *native(const void *object) {
   return (RTABMapApp *)object;
@@ -356,6 +375,247 @@ void releasePreviewImageNative(ImageNative image)
     }
 }
 
+static int queryLastNodeId(sqlite3 * db)
+{
+    int lastId = 0;
+    sqlite3_stmt * stmt = 0;
+    int rc = sqlite3_prepare_v2(db, "SELECT MAX(id) FROM Node;", -1, &stmt, 0);
+    if(rc == SQLITE_OK)
+    {
+        rc = sqlite3_step(stmt);
+        if(rc == SQLITE_ROW && sqlite3_column_type(stmt, 0) != SQLITE_NULL)
+        {
+            lastId = sqlite3_column_int(stmt, 0);
+        }
+        else if(rc != SQLITE_DONE && rc != SQLITE_ROW)
+        {
+            UERROR("lastNodeIdFromDatabaseNative: query failed (%s)", sqlite3_errmsg(db));
+        }
+    }
+    else
+    {
+        UERROR("lastNodeIdFromDatabaseNative: prepare failed (%s)", sqlite3_errmsg(db));
+    }
+    if(stmt)
+    {
+        sqlite3_finalize(stmt);
+    }
+    return lastId;
+}
+
+static bool copyFileBinary(const std::string & from, const std::string & to)
+{
+    std::ifstream src(from.c_str(), std::ios::binary);
+    if(!src)
+    {
+        return false;
+    }
+    std::ofstream dst(to.c_str(), std::ios::binary | std::ios::trunc);
+    if(!dst)
+    {
+        return false;
+    }
+    dst << src.rdbuf();
+    dst.flush();
+    return !src.bad() && dst.good();
+}
+
+static void eraseDbSidecars(const std::string & path)
+{
+    UFile::erase(path);
+    UFile::erase(path + "-wal");
+    UFile::erase(path + "-shm");
+}
+
+// File-copy the db and WAL/SHM sidecars. Never sqlite3_open the live mapping file
+// while Rtabmap is writing (that races and can FATAL with disk I/O error).
+static bool snapshotDbFiles(const std::string & srcPath, const std::string & dstPath)
+{
+    if(srcPath.empty() || dstPath.empty() || !UFile::exists(srcPath))
+    {
+        return false;
+    }
+    eraseDbSidecars(dstPath);
+    if(!copyFileBinary(srcPath, dstPath))
+    {
+        UERROR("snapshotDbFiles: copy failed %s -> %s", srcPath.c_str(), dstPath.c_str());
+        eraseDbSidecars(dstPath);
+        return false;
+    }
+    const std::string srcWal = srcPath + "-wal";
+    if(UFile::exists(srcWal) && !copyFileBinary(srcWal, dstPath + "-wal"))
+    {
+        UERROR("snapshotDbFiles: wal copy failed %s", srcWal.c_str());
+        eraseDbSidecars(dstPath);
+        return false;
+    }
+    const std::string srcShm = srcPath + "-shm";
+    if(UFile::exists(srcShm))
+    {
+        copyFileBinary(srcShm, dstPath + "-shm");
+    }
+    return true;
+}
+
+static std::string makeSnapshotPath(const char * srcPath)
+{
+    static int seq = 0;
+    ++seq;
+    std::ostringstream oss;
+    oss << srcPath << ".collab-snap." << static_cast<long>(getpid()) << "." << seq;
+    return oss.str();
+}
+
+int lastNodeIdFromDatabaseNative(const char * databasePath)
+{
+    if(!databasePath || databasePath[0] == '\0')
+    {
+        return 0;
+    }
+
+    const std::string snapshotPath = makeSnapshotPath(databasePath);
+    if(!snapshotDbFiles(databasePath, snapshotPath))
+    {
+        UERROR("lastNodeIdFromDatabaseNative: snapshot failed, not opening live db %s", databasePath);
+        return 0;
+    }
+
+    sqlite3 * db = 0;
+    int rc = sqlite3_open_v2(snapshotPath.c_str(), &db, SQLITE_OPEN_READONLY, 0);
+    if(rc != SQLITE_OK)
+    {
+        UERROR("lastNodeIdFromDatabaseNative: failed to open snapshot %s (%s)", snapshotPath.c_str(), db ? sqlite3_errmsg(db) : "");
+        if(db)
+        {
+            sqlite3_close(db);
+        }
+        eraseDbSidecars(snapshotPath);
+        return 0;
+    }
+    sqlite3_busy_timeout(db, 2000);
+    int lastId = queryLastNodeId(db);
+    sqlite3_close(db);
+    eraseDbSidecars(snapshotPath);
+    UINFO("lastNodeIdFromDatabaseNative: %s lastId=%d (via snapshot)", databasePath, lastId);
+    return lastId;
+}
+
+int exportDeltaDbNative(const char * srcDbPath, const char * dstDbPath, int sinceId)
+{
+    if(!srcDbPath || !dstDbPath || srcDbPath[0] == '\0' || dstDbPath[0] == '\0')
+    {
+        return 0;
+    }
+
+    const std::string snapshotPath = makeSnapshotPath(srcDbPath);
+    if(!snapshotDbFiles(srcDbPath, snapshotPath))
+    {
+        UERROR("exportDeltaDbNative: snapshot failed, not opening live db %s", srcDbPath);
+        return 0;
+    }
+
+    rtabmap::DBDriverSqlite3 src;
+    if(!src.openConnection(snapshotPath, false, true))
+    {
+        UERROR("exportDeltaDbNative: failed to open snapshot %s", snapshotPath.c_str());
+        eraseDbSidecars(snapshotPath);
+        return 0;
+    }
+
+    std::set<int> allIds;
+    src.getAllNodeIds(allIds);
+
+    std::list<int> ids;
+    for(std::set<int>::const_iterator it = allIds.begin(); it != allIds.end(); ++it)
+    {
+        if(*it > sinceId)
+        {
+            ids.push_back(*it);
+        }
+    }
+
+    if(ids.empty())
+    {
+        UERROR("exportDeltaDbNative: no nodes with id > %d (total=%d) in snapshot of %s", sinceId, (int)allIds.size(), srcDbPath);
+        src.closeConnection(false);
+        eraseDbSidecars(snapshotPath);
+        return 0;
+    }
+
+    std::list<rtabmap::Signature *> signatures;
+    src.loadSignatures(ids, signatures);
+    if(!signatures.empty())
+    {
+        src.loadNodeData(signatures);
+    }
+    src.closeConnection(false);
+    eraseDbSidecars(snapshotPath);
+
+    if(signatures.empty())
+    {
+        UERROR("exportDeltaDbNative: loadSignatures returned empty for %d ids", (int)ids.size());
+        return 0;
+    }
+
+    rtabmap::DBDriverSqlite3 dst;
+    if(!dst.openConnection(dstDbPath, true))
+    {
+        UERROR("exportDeltaDbNative: failed to open dest %s", dstDbPath);
+        for(std::list<rtabmap::Signature *>::iterator it = signatures.begin(); it != signatures.end(); ++it)
+        {
+            delete *it;
+        }
+        return 0;
+    }
+
+    int count = 0;
+    for(std::list<rtabmap::Signature *>::iterator it = signatures.begin(); it != signatures.end(); ++it)
+    {
+        // Dest is a new file; loaded signatures are marked saved from the source DB.
+        (*it)->setSaved(false);
+        // Neighbor/intra links are already on the signature from loadSignatures.
+        dst.asyncSave(*it);
+        ++count;
+    }
+    dst.emptyTrashes(false);
+    dst.closeConnection(true);
+    UINFO("exportDeltaDbNative: exported %d nodes since %d", count, sinceId);
+    return count;
+}
+
+int importRemoteDeltaDbNative(const void *object, const char * path, const float * clientToGlobal7, int aligned)
+{
+    if(!object)
+    {
+        UERROR("importRemoteDeltaDbNative: object is null");
+        return 0;
+    }
+    if(!path || path[0] == '\0')
+    {
+        return 0;
+    }
+    rtabmap::Transform T = rtabmap::Transform::getIdentity();
+    if(clientToGlobal7)
+    {
+        T = rtabmap::Transform(
+            clientToGlobal7[0], clientToGlobal7[1], clientToGlobal7[2],
+            clientToGlobal7[3], clientToGlobal7[4], clientToGlobal7[5], clientToGlobal7[6]);
+    }
+    return native(object)->importRemoteDeltaDb(path, T, aligned != 0);
+}
+
+void clearRemoteMapNative(const void *object)
+{
+    if(object)
+    {
+        native(object)->clearRemoteMap();
+    }
+    else
+    {
+        UERROR("object is null!");
+    }
+}
+
 
 // Parameters
 void setOnlineBlendingNative(const void *object, bool enabled)
@@ -686,4 +946,142 @@ void clearMeasuresNative(const void *object)
         return native(object)->clearMeasures();
     else
         UERROR("object is null!");
+}
+
+StartTagDetect detectStartTagNative(
+    const void * yPlane,
+    int width,
+    int height,
+    int bytesPerRow,
+    float fx,
+    float fy,
+    float cx,
+    float cy,
+    float markerLength)
+{
+    StartTagDetect out;
+    std::memset(&out, 0, sizeof(out));
+    out.qw = 1.0f;
+    out.seen_id = -1;
+    out.error = 2;
+    if(!yPlane || width < 16 || height < 16 || bytesPerRow < width)
+    {
+        out.error = 1;
+        return out;
+    }
+    cv::Mat grayFull(height, width, CV_8UC1);
+    const unsigned char * src = static_cast<const unsigned char *>(yPlane);
+    for(int y = 0; y < height; ++y)
+    {
+        std::memcpy(grayFull.ptr(y), src + y * bytesPerRow, static_cast<size_t>(width));
+    }
+
+    float sfx = fx;
+    float sfy = fy;
+    float scx = cx;
+    float scy = cy;
+    cv::Mat gray = grayFull;
+    const int maxWidth = 960;
+    if(gray.cols > maxWidth)
+    {
+        const double scale = double(maxWidth) / double(gray.cols);
+        cv::Mat small;
+        cv::resize(gray, small, cv::Size(), scale, scale, cv::INTER_AREA);
+        gray = small;
+        sfx *= float(scale);
+        sfy *= float(scale);
+        scx *= float(scale);
+        scy *= float(scale);
+    }
+
+    static rtabmap::MarkerDetector * detector = 0;
+    static float lastLength = -1.0f;
+    const float length = markerLength > 0.01f ? markerLength : 0.20f;
+    if(!detector || std::fabs(lastLength - length) > 1e-4f)
+    {
+        delete detector;
+        rtabmap::ParametersMap params;
+        params.insert(rtabmap::ParametersPair(rtabmap::Parameters::kMarkerDictionary(), "0"));
+        params.insert(rtabmap::ParametersPair(rtabmap::Parameters::kMarkerLength(), uNumber2Str(length)));
+        params.insert(rtabmap::ParametersPair(rtabmap::Parameters::kMarkerStrategy(), "0"));
+        detector = new rtabmap::MarkerDetector(params);
+        lastLength = length;
+    }
+
+    // imageWidth must match the gray image or MarkerDetector::detect returns empty
+    // (it treats size mismatch as multi-camera and bails).
+    rtabmap::CameraModel model(
+        sfx, sfy, scx, scy,
+        rtabmap::CameraModel::opticalRotation(),
+        0.0,
+        cv::Size(gray.cols, gray.rows));
+
+    auto firstId = [](const std::map<int, rtabmap::MarkerInfo> & found) -> int {
+        if(found.empty())
+        {
+            return -1;
+        }
+        return found.begin()->first;
+    };
+
+    // Raw first. Always-on CLAHE washed out the high-contrast screen marker.
+    std::map<int, rtabmap::MarkerInfo> found = detector->detect(gray, model);
+    out.seen_id = firstId(found);
+    if(found.find(0) == found.end())
+    {
+        cv::Mat blurred;
+        cv::GaussianBlur(gray, blurred, cv::Size(3, 3), 0);
+        found = detector->detect(blurred, model);
+        if(out.seen_id < 0)
+        {
+            out.seen_id = firstId(found);
+        }
+    }
+    if(found.find(0) == found.end())
+    {
+        cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(3.0, cv::Size(8, 8));
+        cv::Mat enhanced;
+        clahe->apply(gray, enhanced);
+        found = detector->detect(enhanced, model);
+        if(out.seen_id < 0)
+        {
+            out.seen_id = firstId(found);
+        }
+        if(found.find(0) == found.end())
+        {
+            cv::Mat inverted;
+            cv::bitwise_not(gray, inverted);
+            found = detector->detect(inverted, model);
+            if(out.seen_id < 0)
+            {
+                out.seen_id = firstId(found);
+            }
+        }
+    }
+    std::map<int, rtabmap::MarkerInfo>::const_iterator it = found.find(0);
+    if(it == found.end())
+    {
+        UINFO("detectStartTagNative: no id=0 in %dx%d seen=%d", gray.cols, gray.rows, out.seen_id);
+        out.error = 2;
+        return out;
+    }
+    UINFO("detectStartTagNative: found id=0");
+    const rtabmap::Transform & pose = it->second.pose();
+    if(pose.isNull())
+    {
+        out.error = 3;
+        return out;
+    }
+    out.error = 0;
+    Eigen::Quaternionf q = pose.getQuaternionf();
+    out.found = 1;
+    out.tag_id = it->first;
+    out.tx = pose.x();
+    out.ty = pose.y();
+    out.tz = pose.z();
+    out.qx = q.x();
+    out.qy = q.y();
+    out.qz = q.z();
+    out.qw = q.w();
+    return out;
 }

@@ -73,11 +73,13 @@ class DatabaseView: UIView {
 
   private func commonInit(databasePath: String) {
     
-    // Setup the background
-    backgroundColor = .black
-    // Create the cover image view
+    backgroundColor = UIColor(red: 5/255, green: 7/255, blue: 10/255, alpha: 1)
+    layer.borderWidth = 1
+    layer.borderColor = UIColor(red: 243/255, green: 245/255, blue: 244/255, alpha: 0.14).cgColor
     coverImageView = UIImageView()
     coverImageView.translatesAutoresizingMaskIntoConstraints = false
+    coverImageView.contentMode = .scaleAspectFill
+    coverImageView.clipsToBounds = true
     
     valueObservation = coverImageView.observe(\.image, options: [.new]) { [unowned self] observed, change in
       if change.newValue is UIImage {
@@ -92,7 +94,8 @@ class DatabaseView: UIView {
         URL(fileURLWithPath: databasePath).lastPathComponent + "\n" +
         URL(fileURLWithPath: databasePath).fileSizeString + "\n" +
         (try! URL(fileURLWithPath: databasePath).resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate!.getFormattedDate(format: "yyyy-MM-dd HH:mm:ss"))
-    textLabel.textColor = .white
+    textLabel.textColor = UIColor(red: 243/255, green: 245/255, blue: 244/255, alpha: 1)
+    textLabel.font = UIFont.monospacedSystemFont(ofSize: 11, weight: .medium)
     textLabel.textAlignment = .left
 
     //Stack View
@@ -132,11 +135,13 @@ class DatabaseView: UIView {
     
     func highlightDatabase(_ didHighlightView: Bool) {
       if didHighlightView == true {
-        backgroundColor = .white
-        textLabel.textColor = .black
+        backgroundColor = UIColor(red: 227/255, green: 148/255, blue: 42/255, alpha: 0.18)
+        layer.borderColor = UIColor(red: 227/255, green: 148/255, blue: 42/255, alpha: 1).cgColor
+        textLabel.textColor = UIColor(red: 243/255, green: 245/255, blue: 244/255, alpha: 1)
       } else {
-        backgroundColor = .black
-        textLabel.textColor = .white
+        backgroundColor = UIColor(red: 5/255, green: 7/255, blue: 10/255, alpha: 1)
+        layer.borderColor = UIColor(red: 243/255, green: 245/255, blue: 244/255, alpha: 0.14).cgColor
+        textLabel.textColor = UIColor(red: 243/255, green: 245/255, blue: 244/255, alpha: 1)
       }
     }
 }

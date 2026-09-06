@@ -139,8 +139,38 @@ typedef struct ImageNative
 ImageNative getPreviewImageNative(const char * databasePath);
 void releasePreviewImageNative(ImageNative image);
 
+int lastNodeIdFromDatabaseNative(const char * databasePath);
+int exportDeltaDbNative(const char * srcDbPath, const char * dstDbPath, int sinceId);
+int importRemoteDeltaDbNative(const void *object, const char * path, const float * clientToGlobal7, int aligned);
+void clearRemoteMapNative(const void *object);
+
 void setGPSNative(const void *object, double stamp, double longitude, double latitude, double altitude, double accuracy, double bearing);
 void addEnvSensorNative(const void *object, int type, float value);
+
+typedef struct StartTagDetect {
+    int found;
+    int tag_id;
+    int seen_id;
+    int error;
+    float tx;
+    float ty;
+    float tz;
+    float qx;
+    float qy;
+    float qz;
+    float qw;
+} StartTagDetect;
+
+StartTagDetect detectStartTagNative(
+    const void * yPlane,
+    int width,
+    int height,
+    int bytesPerRow,
+    float fx,
+    float fy,
+    float cx,
+    float cy,
+    float markerLength);
 
 #ifdef __cplusplus
 }

@@ -15,23 +15,55 @@ const worldIdEl = document.querySelector("#world-id");
 const runtimePill = document.querySelector("#runtime-pill");
 const showCameras = document.querySelector("#show-cameras");
 
+const INGEST_RESOLUTIONS = [518, 770, 1036];
+
 const fields = {
   interval: document.querySelector("#interval"),
   maxFrames: document.querySelector("#max-frames"),
   confidence: document.querySelector("#confidence"),
+  resolution: document.querySelector("#resolution"),
   asMesh: document.querySelector("#as-mesh"),
 };
 const outputs = {
   interval: document.querySelector("#interval-out"),
   maxFrames: document.querySelector("#max-frames-out"),
   confidence: document.querySelector("#confidence-out"),
+  resolution: document.querySelector("#resolution-out"),
 };
+
+function resolutionFromSlider(value) {
+  const index = Math.min(
+    INGEST_RESOLUTIONS.length - 1,
+    Math.max(0, Number(value) || 0)
+  );
+  return INGEST_RESOLUTIONS[index];
+}
+
+function sliderFromResolution(value) {
+  const resolved = Number(value);
+  let best = 0;
+  let bestDist = Infinity;
+  INGEST_RESOLUTIONS.forEach((item, index) => {
+    const dist = Math.abs(item - resolved);
+    if (dist < bestDist) {
+      best = index;
+      bestDist = dist;
+    }
+  });
+  return String(best);
+}
 
 let worldId = localStorage.getItem(STORAGE_KEY);
 let pollTimer = null;
 let lastModelUrl = null;
+let modelLoading = false;
 let lastSourceSignature = "";
 let selectedSourceId = null;
+let flipCameras = false;
+let lastWorld = null;
+let settingsHydrated = false;
+let settingsDirty = false;
+let persistSeq = 0;
 
 const renderer = new THREE.WebGLRenderer({
   canvas: document.querySelector("#view"),
@@ -67,6 +99,9 @@ function settings() {
     max_frames: fields.maxFrames.value,
     confidence_percentile: fields.confidence.value,
     as_mesh: fields.asMesh.checked ? "true" : "false",
+    ingest_resolution: fields.resolution
+      ? resolutionFromSlider(fields.resolution.value)
+      : 518,
   };
 }
 
@@ -83,9 +118,34 @@ function bindSliders() {
     [fields.confidence, outputs.confidence],
   ];
   for (const [input, output] of pairs) {
+    if (!input || !output) continue;
     const sync = () => { output.textContent = input.value; };
     input.addEventListener("input", sync);
     sync();
+  }
+  if (fields.resolution && outputs.resolution) {
+    const syncResolution = () => {
+      outputs.resolution.textContent = String(resolutionFromSlider(fields.resolution.value));
+    };
+    fields.resolution.addEventListener("input", syncResolution);
+    syncResolution();
+  }
+}
+
+function hydrateSettingsFromWorld(world) {
+  if (!world.settings) return;
+  fields.interval.value = world.settings.seconds_between_frames;
+  fields.maxFrames.value = world.settings.max_frames;
+  fields.confidence.value = world.settings.confidence_percentile;
+  fields.asMesh.checked = Boolean(world.settings.as_mesh);
+  if (fields.resolution) {
+    fields.resolution.value = sliderFromResolution(world.settings.ingest_resolution);
+  }
+  outputs.interval.textContent = fields.interval.value;
+  outputs.maxFrames.textContent = fields.maxFrames.value;
+  outputs.confidence.textContent = fields.confidence.value;
+  if (outputs.resolution && fields.resolution) {
+    outputs.resolution.textContent = String(resolutionFromSlider(fields.resolution.value));
   }
 }
 
@@ -107,19 +167,65 @@ function animate() {
   requestAnimationFrame(animate);
 }
 
-function fitScene() {
-  const box = new THREE.Box3().setFromObject(worldGroup);
-  if (box.isEmpty()) {
-    box.setFromObject(cameraGroup);
+function worldToView(values) {
+  const vector = new THREE.Vector3().fromArray(values);
+  if (flipCameras) {
+    vector.y *= -1;
+    vector.z *= -1;
   }
+  return vector;
+}
+
+function sceneBox() {
+  const box = new THREE.Box3();
+  const roots = [worldGroup, cameraGroup];
+  for (const root of roots) {
+    root.updateWorldMatrix(true, true);
+    root.traverse((node) => {
+      const pos = node.geometry?.attributes?.position;
+      if (!pos || !pos.count) return;
+      const local = new THREE.Box3().setFromBufferAttribute(pos);
+      if (local.isEmpty()) return;
+      local.applyMatrix4(node.matrixWorld);
+      box.union(local);
+    });
+  }
+  return box;
+}
+
+function fitScene() {
+  const box = sceneBox();
   if (box.isEmpty()) return;
-  const size = box.getSize(new THREE.Vector3()).length();
+  const size = Math.max(box.getSize(new THREE.Vector3()).length(), 0.4);
   const center = box.getCenter(new THREE.Vector3());
   controls.target.copy(center);
-  camera.position.copy(center).add(new THREE.Vector3(size * 0.45, size * 0.32, size * 0.5));
-  camera.near = Math.max(size / 200, 0.02);
-  camera.far = size * 20;
+  camera.position.copy(center).add(new THREE.Vector3(size * 0.35, size * 0.22, size * 0.4));
+  camera.near = Math.max(size / 400, 0.02);
+  camera.far = Math.max(size * 40, 50);
   camera.updateProjectionMatrix();
+}
+
+function setEmptyVisible(show) {
+  emptyEl.classList.toggle("hidden", !show);
+}
+
+function styleWorld(root) {
+  root.traverse((node) => {
+    if (node.isPoints) {
+      const hasColors = Boolean(node.geometry?.attributes?.color);
+      node.material = new THREE.PointsMaterial({
+        size: 3,
+        sizeAttenuation: false,
+        vertexColors: hasColors,
+        color: 0xffffff,
+      });
+      node.frustumCulled = false;
+      return;
+    }
+    if (node.isMesh && node.material && node.geometry?.attributes?.color) {
+      node.material.vertexColors = true;
+    }
+  });
 }
 
 function clearGroup(group) {
@@ -136,27 +242,44 @@ function clearGroup(group) {
 }
 
 function loadModel(url) {
-  if (!url || url === lastModelUrl) return;
+  if (!url) return;
+  if (url === lastModelUrl && (worldGroup.children.length || modelLoading)) {
+    if (worldGroup.children.length) setEmptyVisible(false);
+    return;
+  }
   lastModelUrl = url;
-  loader.load(url, (gltf) => {
-    clearGroup(worldGroup);
-    gltf.scene.traverse((node) => {
-      if (node.isPoints) {
-        node.material = new THREE.PointsMaterial({
-          size: 0.018,
-          vertexColors: true,
-          sizeAttenuation: true,
-        });
-      }
-    });
-    worldGroup.add(gltf.scene);
-    if (!selectedSourceId) fitScene();
-    emptyEl.classList.add("hidden");
-  });
+  modelLoading = true;
+  loader.load(
+    url,
+    (gltf) => {
+      modelLoading = false;
+      clearGroup(worldGroup);
+      styleWorld(gltf.scene);
+      worldGroup.add(gltf.scene);
+      if (lastWorld) drawCameras(lastWorld.sources);
+      fitScene();
+      setEmptyVisible(false);
+      if (lastWorld?.message) statusEl.textContent = lastWorld.message;
+    },
+    undefined,
+    (error) => {
+      modelLoading = false;
+      lastModelUrl = null;
+      const detail = error?.message || String(error);
+      statusEl.textContent = `Twin is ready, but the 3D view could not load: ${detail}`;
+    }
+  );
+}
+
+function frustumScale() {
+  if (!worldGroup.children.length) return 1;
+  const span = sceneBox().getSize(new THREE.Vector3()).length();
+  return Math.min(Math.max(span / 70, 1), 16);
 }
 
 function makeFrustum(color) {
   const group = new THREE.Group();
+  const scale = frustumScale();
   const body = new THREE.Mesh(
     new THREE.ConeGeometry(0.07, 0.16, 5),
     new THREE.MeshStandardMaterial({ color, roughness: 0.45, metalness: 0.1 })
@@ -168,6 +291,7 @@ function makeFrustum(color) {
     new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.25 })
   );
   group.add(body, core);
+  group.scale.setScalar(scale);
   return group;
 }
 
@@ -183,8 +307,8 @@ function drawCameras(sources) {
         : [];
     cameras.forEach((cam) => {
       const marker = makeFrustum(selectedSourceId === source.id ? 0xffffff : color);
-      const position = new THREE.Vector3().fromArray(cam.position);
-      const forward = new THREE.Vector3().fromArray(cam.forward || [0, 0, 1]).normalize();
+      const position = worldToView(cam.position);
+      const forward = worldToView(cam.forward || [0, 0, 1]).normalize();
       marker.position.copy(position);
       const aim = position.clone().add(forward);
       marker.lookAt(aim);
@@ -215,7 +339,7 @@ function renderSources(world) {
   lastSourceSignature = signature;
   sourcesEl.innerHTML = "";
   if (!world.sources.length) {
-    sourcesEl.innerHTML = `<li class="source"><div class="ph">--</div><div><h4>No sources yet</h4><div class="meta">Upload a clip or still from any room.</div></div></li>`;
+    sourcesEl.innerHTML = `<li class="source empty-source"><div class="ph">--</div><div><h4>No sources yet</h4><div class="meta">Upload a clip or still from any room.</div></div></li>`;
     return;
   }
   for (const source of world.sources) {
@@ -232,36 +356,53 @@ function renderSources(world) {
         </div>
       </div>
     `;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "source-delete";
+    remove.title = "Remove this viewpoint";
+    remove.setAttribute("aria-label", `Remove ${source.filename}`);
+    remove.textContent = "Remove";
+    remove.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const label = source.filename || "this viewpoint";
+      if (!window.confirm(`Remove "${label}" from this world? The twin will rebuild from remaining viewpoints.`)) {
+        return;
+      }
+      deleteSource(source.id);
+    });
+    item.appendChild(remove);
     item.addEventListener("click", () => {
       selectedSourceId = source.id;
       lastSourceSignature = "";
       renderSources(world);
       drawCameras(world.sources);
       if (source.position) {
-        const target = new THREE.Vector3().fromArray(source.position);
+        const target = worldToView(source.position);
+        const span = Math.max(sceneBox().getSize(new THREE.Vector3()).length(), 2);
         controls.target.copy(target);
-        camera.position.copy(target).add(new THREE.Vector3(0.9, 0.7, 0.9));
+        camera.position.copy(target).add(new THREE.Vector3(span * 0.08, span * 0.06, span * 0.08));
       }
     });
     sourcesEl.appendChild(item);
   }
 }
 
-function applyWorld(world) {
+function applyWorld(world, options = {}) {
+  lastWorld = world;
   worldId = world.id;
   localStorage.setItem(STORAGE_KEY, worldId);
   worldIdEl.textContent = worldId;
-  statusEl.textContent = world.message || "Ready.";
-  if (world.settings) {
-    fields.interval.value = world.settings.seconds_between_frames;
-    fields.maxFrames.value = world.settings.max_frames;
-    fields.confidence.value = world.settings.confidence_percentile;
-    fields.asMesh.checked = Boolean(world.settings.as_mesh);
-    outputs.interval.textContent = fields.interval.value;
-    outputs.maxFrames.textContent = fields.maxFrames.value;
-    outputs.confidence.textContent = fields.confidence.value;
+  if (!modelLoading) {
+    statusEl.textContent = world.message || "Ready.";
+  }
+  if (world.settings && (options.hydrateSettings || !settingsHydrated)) {
+    hydrateSettingsFromWorld(world);
+    settingsHydrated = true;
+    settingsDirty = false;
   }
   const runtime = world.runtime || {};
+  flipCameras = Boolean(runtime.cuda) && !runtime.mock;
   if (runtime.mock) {
     runtimePill.textContent = "Preview mode";
     runtimePill.className = "pill mock";
@@ -274,13 +415,46 @@ function applyWorld(world) {
   }
   renderSources(world);
   drawCameras(world.sources);
+  const hasContent = Boolean(
+    world.has_model || world.stats?.localized || worldGroup.children.length || cameraGroup.children.length
+  );
   if (world.has_model && world.model_url) {
-    downloadEl.href = world.model_url;
+    downloadEl.href = world.download_url || world.model_url;
     downloadEl.classList.remove("hidden");
+    setEmptyVisible(false);
+    if (!modelLoading && !worldGroup.children.length) {
+      statusEl.textContent = world.message
+        ? `${world.message} Loading the 3D twin.`
+        : "Loading the 3D twin.";
+    }
     loadModel(world.model_url);
   } else {
     downloadEl.classList.add("hidden");
-    emptyEl.classList.remove("hidden");
+    setEmptyVisible(!hasContent);
+    if (lastModelUrl || worldGroup.children.length) {
+      lastModelUrl = null;
+      modelLoading = false;
+      clearGroup(worldGroup);
+    }
+  }
+}
+
+async function deleteSource(sourceId) {
+  if (!worldId) return;
+  statusEl.textContent = "Removing viewpoint.";
+  try {
+    const world = await api(`/api/worlds/${worldId}/sources/${sourceId}`, { method: "DELETE" });
+    lastSourceSignature = "";
+    if (selectedSourceId === sourceId) selectedSourceId = null;
+    if (!world.has_model) {
+      lastModelUrl = null;
+      modelLoading = false;
+      clearGroup(worldGroup);
+    }
+    applyWorld(world);
+    schedulePoll(world);
+  } catch (error) {
+    statusEl.textContent = error.message;
   }
 }
 
@@ -380,10 +554,17 @@ document.querySelector("#new-world").addEventListener("click", async () => {
   lastModelUrl = null;
   lastSourceSignature = "";
   selectedSourceId = null;
+  lastWorld = null;
+  modelLoading = false;
+  settingsHydrated = false;
+  settingsDirty = false;
   clearGroup(worldGroup);
   clearGroup(cameraGroup);
-  emptyEl.classList.remove("hidden");
-  applyWorld(await api("/api/worlds", { method: "POST", body: fillForm(settings()) }));
+  setEmptyVisible(true);
+  applyWorld(
+    await api("/api/worlds", { method: "POST", body: fillForm(settings()) }),
+    { hydrateSettings: true }
+  );
 });
 
 document.querySelector("#fit").addEventListener("click", fitScene);
@@ -391,16 +572,50 @@ showCameras.addEventListener("change", () => refresh());
 
 async function persistSettings() {
   if (!worldId) return;
+  const seq = ++persistSeq;
+  settingsDirty = true;
   try {
-    applyWorld(await api(`/api/worlds/${worldId}`, { method: "PATCH", body: fillForm(settings()) }));
+    const world = await api(`/api/worlds/${worldId}`, {
+      method: "PATCH",
+      body: fillForm(settings()),
+    });
+    if (seq !== persistSeq) return;
+    applyWorld(world);
+    settingsDirty = false;
   } catch (error) {
     statusEl.textContent = error.message;
   }
 }
 
-["change"].forEach((eventName) => {
-  Object.values(fields).forEach((field) => field.addEventListener(eventName, persistSettings));
+async function rebuildWithSettings() {
+  if (!worldId) await ensureWorld();
+  await persistSettings();
+  statusEl.textContent = "Rebuilding with current settings.";
+  try {
+    const world = await api(`/api/worlds/${worldId}/rebuild`, { method: "POST" });
+    lastSourceSignature = "";
+    lastModelUrl = null;
+    modelLoading = false;
+    clearGroup(worldGroup);
+    applyWorld(world);
+    schedulePoll(world);
+  } catch (error) {
+    statusEl.textContent = error.message;
+  }
+}
+
+Object.values(fields).forEach((field) => {
+  if (!field) return;
+  field.addEventListener("input", () => {
+    settingsDirty = true;
+  });
+  field.addEventListener("change", persistSettings);
 });
+
+const rebuildButton = document.querySelector("#rebuild-settings");
+if (rebuildButton) {
+  rebuildButton.addEventListener("click", rebuildWithSettings);
+}
 
 bindSliders();
 wireUploads();

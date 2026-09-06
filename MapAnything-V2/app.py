@@ -26,6 +26,10 @@ class ReconstructionError(Exception):
     """User-facing reconstruction or ingest failure."""
 
 
+class BusyError(ReconstructionError):
+    """Raised when a mutation cannot run because reconstruction is in progress."""
+
+
 class _GradioShim:
     Error = ReconstructionError
 
@@ -50,17 +54,27 @@ IMAGE_LOAD_SUFFIXES = {".jpg", ".jpeg", ".png"}
 SKIP_SUFFIXES = {".aae", ".db", ".ini", ".json", ".txt", ".xml"}
 SKIP_NAMES = {".ds_store", "desktop.ini", "thumbs.db"}
 _HEIC_BRANDS = {b"heic", b"heif", b"heim", b"heix", b"mif1", b"msf1"}
-OVERLAP_FRAMES = 8
+OVERLAP_FRAMES = 16
+ICP_SCALE_MIN = 0.5
+ICP_SCALE_MAX = 2.0
+ICP_COST_MAX = 0.15
+VIEWER_MAX_POINTS = 400_000
+INGEST_RESOLUTIONS = (518, 770, 1036)
+DEFAULT_INGEST_RESOLUTION = 518
 DEFAULT_SETTINGS = {
-    "seconds_between_frames": 1.5,
+    "seconds_between_frames": 0.5,
     "max_frames": 40,
     "confidence_percentile": 10,
     "as_mesh": False,
+    "ingest_resolution": DEFAULT_INGEST_RESOLUTION,
 }
 MODEL = None
 MODEL_LOCK = threading.Lock()
+PREVIEW_LOCK = threading.Lock()
 WORKERS: dict[str, threading.Thread] = {}
 WORKER_GUARD = threading.Lock()
+SESSION_LOCKS: dict[str, threading.Lock] = {}
+SESSION_LOCKS_GUARD = threading.Lock()
 
 
 def _iso_now() -> str:
@@ -109,12 +123,66 @@ def _empty_world(session_id: str) -> dict:
     }
 
 
+def _as_bool(value, default: bool = False) -> bool:
+    """Parse form or JSON booleans. The string 'false' must not become True."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off", ""}:
+            return False
+    return default
+
+
+def _normalize_ingest_resolution(value) -> int:
+    if value is None or value == "":
+        return DEFAULT_INGEST_RESOLUTION
+    try:
+        resolution = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_INGEST_RESOLUTION
+    return min(INGEST_RESOLUTIONS, key=lambda item: abs(item - resolution))
+
+
+def load_images_kwargs(ingest_resolution: int = DEFAULT_INGEST_RESOLUTION) -> dict:
+    """Kwargs for load_images. 518 keeps the vendor default fixed_mapping path."""
+    resolution = _normalize_ingest_resolution(ingest_resolution)
+    if resolution == DEFAULT_INGEST_RESOLUTION:
+        return {}
+    return {
+        "resize_mode": "longest_side",
+        "size": resolution,
+        "patch_size": 14,
+    }
+
+
+def _merged_settings(settings=None) -> dict:
+    merged = dict(DEFAULT_SETTINGS)
+    if not settings:
+        return merged
+    incoming = dict(settings)
+    if incoming.get("ingest_resolution") is not None:
+        incoming["ingest_resolution"] = _normalize_ingest_resolution(
+            incoming["ingest_resolution"]
+        )
+    if "as_mesh" in incoming:
+        incoming["as_mesh"] = _as_bool(incoming.get("as_mesh"), False)
+    merged.update(incoming)
+    return merged
+
+
 def _load_world(session: Path) -> dict:
     path = _world_path(session)
     if not path.exists():
         return _empty_world(session.name)
     world = json.loads(path.read_text())
-    world.setdefault("settings", dict(DEFAULT_SETTINGS))
+    world["settings"] = _merged_settings(world.get("settings"))
     world.setdefault("sources", [])
     return world
 
@@ -261,7 +329,7 @@ def _source_id_for_file(world: dict, path: Path) -> str | None:
 
 def _update_settings(session: Path, settings: dict) -> dict:
     world = _ensure_world(session)
-    merged = dict(world.get("settings") or DEFAULT_SETTINGS)
+    merged = _merged_settings(world.get("settings"))
     if "seconds_between_frames" in settings and settings["seconds_between_frames"] is not None:
         merged["seconds_between_frames"] = float(settings["seconds_between_frames"])
     if "max_frames" in settings and settings["max_frames"] is not None:
@@ -269,7 +337,9 @@ def _update_settings(session: Path, settings: dict) -> dict:
     if "confidence_percentile" in settings and settings["confidence_percentile"] is not None:
         merged["confidence_percentile"] = float(settings["confidence_percentile"])
     if "as_mesh" in settings and settings["as_mesh"] is not None:
-        merged["as_mesh"] = bool(settings["as_mesh"])
+        merged["as_mesh"] = _as_bool(settings["as_mesh"], False)
+    if "ingest_resolution" in settings and settings["ingest_resolution"] is not None:
+        merged["ingest_resolution"] = _normalize_ingest_resolution(settings["ingest_resolution"])
     world["settings"] = merged
     _save_world(session, world)
     return merged
@@ -400,7 +470,7 @@ def _mock_reconstruct(frame_dir: str, as_mesh: bool):
     cloud = trimesh.points.PointCloud(points, colors=colors)
     OUTPUTS.mkdir(parents=True, exist_ok=True)
     output = OUTPUTS / f"reconstruction-{image_dir.parent.name}.glb"
-    temporary = output.with_suffix(".tmp.glb")
+    temporary = output.with_name(f"{output.stem}-{uuid.uuid4().hex[:8]}.tmp.glb")
     cloud.export(temporary)
     temporary.replace(output)
     poses = []
@@ -428,7 +498,12 @@ def _mock_reconstruct(frame_dir: str, as_mesh: bool):
     return str(output), str(output), f"Complete: {len(names)} views reconstructed."
 
 
-def reconstruct(frame_dir: str, confidence_percentile: float, as_mesh: bool):
+def reconstruct(
+    frame_dir: str,
+    confidence_percentile: float,
+    as_mesh: bool,
+    ingest_resolution: int = DEFAULT_INGEST_RESOLUTION,
+):
     global MODEL
     if not frame_dir or not Path(frame_dir).is_dir():
         raise gr.Error("Extract frames first.")
@@ -445,7 +520,7 @@ def reconstruct(frame_dir: str, confidence_percentile: float, as_mesh: bool):
     with MODEL_LOCK, torch.inference_mode():
         if MODEL is None:
             MODEL = MapAnything.from_pretrained(MODEL_ID).to(device).eval()
-        views = load_images(frame_dir)
+        views = load_images(frame_dir, **load_images_kwargs(ingest_resolution))
         outputs = MODEL.infer(
             views,
             memory_efficient_inference=True,
@@ -484,7 +559,7 @@ def reconstruct(frame_dir: str, confidence_percentile: float, as_mesh: bool):
     )
     OUTPUTS.mkdir(parents=True, exist_ok=True)
     output = OUTPUTS / f"reconstruction-{Path(frame_dir).parent.name}.glb"
-    temporary = output.with_suffix(".tmp.glb")
+    temporary = output.with_name(f"{output.stem}-{uuid.uuid4().hex[:8]}.tmp.glb")
     scene.export(temporary)
     temporary.replace(output)
     _write_poses(Path(frame_dir), poses)
@@ -537,19 +612,29 @@ def _session_media(session: Path):
 
 
 def _seed_overlap_frames(session: Path, dest_dir: Path) -> list[Path]:
-    """Copy a few already-reconstructed views so new stills can register."""
+    """Copy already-reconstructed views so a new increment can register."""
     dest_dir.mkdir(parents=True, exist_ok=True)
-    increments = sorted(
-        (path for path in session.glob("increment-*/images") if path.is_dir()),
-        key=lambda path: path.stat().st_mtime,
-    )
-    if not increments:
+    folders = []
+    for pattern in ("rebuild-*/images", "increment-*/images"):
+        folders.extend(path for path in session.glob(pattern) if path.is_dir())
+    folders.sort(key=lambda path: path.stat().st_mtime)
+    if not folders:
         return []
-    candidates = [
-        path
-        for path in sorted(increments[-1].iterdir())
-        if path.is_file() and not path.name.startswith("overlap_")
-    ] or [path for path in sorted(increments[-1].iterdir()) if path.is_file()]
+    newest = folders[-1]
+    pool = folders[-2:] if newest.parent.name.startswith("increment-") else [newest]
+    candidates = []
+    seen: set[str] = set()
+    for folder in pool:
+        files = [
+            path
+            for path in sorted(folder.iterdir())
+            if path.is_file() and not path.name.startswith("overlap_")
+        ] or [path for path in sorted(folder.iterdir()) if path.is_file()]
+        for path in files:
+            if path.name in seen:
+                continue
+            seen.add(path.name)
+            candidates.append(path)
     if not candidates:
         return []
     if len(candidates) <= OVERLAP_FRAMES:
@@ -621,6 +706,153 @@ def ingest_paths(session_id: str, items: list[tuple[Path, str]], settings=None) 
     return session_id
 
 
+def _session_update_lock(session_id: str) -> threading.Lock:
+    with SESSION_LOCKS_GUARD:
+        lock = SESSION_LOCKS.get(session_id)
+        if lock is None:
+            lock = threading.Lock()
+            SESSION_LOCKS[session_id] = lock
+        return lock
+
+
+def _glb_path(session_id: str) -> Path:
+    return OUTPUTS / f"live-{_safe_id(session_id)}.glb"
+
+
+def _prev_glb_path(session_id: str) -> Path:
+    return OUTPUTS / f"live-{_safe_id(session_id)}.prev.glb"
+
+
+def _unique_tmp(path: Path) -> Path:
+    return path.with_name(f"{path.stem}-{uuid.uuid4().hex[:8]}.tmp{path.suffix}")
+
+
+def _is_cuda_oom(exc: BaseException) -> bool:
+    if torch is not None:
+        oom_type = getattr(torch.cuda, "OutOfMemoryError", None)
+        if oom_type is not None and isinstance(exc, oom_type):
+            return True
+    text = str(exc).lower()
+    name = type(exc).__name__.lower().replace("_", "")
+    return "out of memory" in text or "outofmemory" in name or "cuda oom" in text
+
+
+def _clear_cuda_cache() -> None:
+    if torch is not None and getattr(torch, "cuda", None) is not None:
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+
+def _similarity_scale(matrix: np.ndarray) -> float:
+    return float(np.cbrt(abs(np.linalg.det(np.asarray(matrix, dtype=float)[:3, :3]))))
+
+
+def _alignment_rejected(cost: float, scale: float, extent: float) -> str | None:
+    """Return a user-facing reason when incremental ICP is unsafe to apply."""
+    if not np.isfinite(cost) or not np.isfinite(scale) or scale <= 0:
+        return (
+            "Could not align the new viewpoint without damaging the existing twin. "
+            "The previous reconstruction was kept."
+        )
+    if scale < ICP_SCALE_MIN or scale > ICP_SCALE_MAX:
+        return (
+            f"Could not align the new viewpoint without damaging the existing twin "
+            f"(ICP scale {scale:.3g} is too far from 1). "
+            "The previous reconstruction was kept."
+        )
+    limit = min(ICP_COST_MAX, max(0.04, 0.08 * max(float(extent), 1e-6)))
+    if float(cost) > limit:
+        return (
+            f"Could not align the new viewpoint without damaging the existing twin "
+            f"(ICP cost {cost:.5g}, scale {scale:.3g}). "
+            "The previous reconstruction was kept."
+        )
+    return None
+
+
+def _install_glb(destination: Path, source: Path) -> None:
+    """Atomically replace the live GLB after copying the last good file aside."""
+    OUTPUTS.mkdir(parents=True, exist_ok=True)
+    if source.resolve() == destination.resolve():
+        return
+    staged = _unique_tmp(destination)
+    shutil.copy2(source, staged)
+    if destination.is_file():
+        prev = destination.with_name(f"{destination.stem}.prev.glb")
+        prev_tmp = _unique_tmp(prev)
+        shutil.copy2(destination, prev_tmp)
+        prev_tmp.replace(prev)
+    staged.replace(destination)
+
+
+def _list_view_paths(image_dir: Path) -> list[Path]:
+    if not image_dir.is_dir():
+        return []
+    return [
+        path
+        for path in image_dir.iterdir()
+        if path.is_file() and path.suffix.lower() in IMAGE_LOAD_SUFFIXES
+    ]
+
+
+def _fill_image_dir(
+    session: Path,
+    image_dir: Path,
+    videos: list[Path],
+    photos: list[Path],
+    world: dict,
+    seconds_between_frames,
+    max_frames,
+    seed_overlap: bool,
+) -> list[Path]:
+    if videos:
+        prefixes = [_source_id_for_file(world, video) for video in videos]
+        _extract_to_directory(
+            videos, image_dir, seconds_between_frames, max_frames,
+            min_frames=0, prefixes=prefixes,
+        )
+    else:
+        image_dir.mkdir(parents=True, exist_ok=True)
+        if seed_overlap:
+            _seed_overlap_frames(session, image_dir)
+    for index, photo in enumerate(photos):
+        source_id = _source_id_for_file(world, photo)
+        prefix = f"{source_id}_still" if source_id else f"gap_{index:04d}"
+        _normalize_photo(photo, image_dir, prefix)
+    return _list_view_paths(image_dir)
+
+
+def _added_phrase(new_videos: list[Path], new_photos: list[Path]) -> str:
+    return " and ".join(
+        part for part in (
+            f"{len(new_videos)} new clip(s)" if new_videos else "",
+            f"{len(new_photos)} gap photo(s)" if new_photos else "",
+        ) if part
+    )
+
+
+def _read_poses(work_dir: Path) -> list[dict]:
+    path = work_dir / "poses.json"
+    return json.loads(path.read_text()) if path.exists() else []
+
+
+def _prune_view_dirs(session: Path, keep: int = 2) -> None:
+    groups: dict[str, list[Path]] = {"increment-": [], "rebuild-": []}
+    for path in session.iterdir():
+        if not path.is_dir():
+            continue
+        for prefix in groups:
+            if path.name.startswith(prefix):
+                groups[prefix].append(path)
+    for dirs in groups.values():
+        dirs.sort(key=lambda item: item.stat().st_mtime)
+        for old in dirs[:-keep]:
+            shutil.rmtree(old, ignore_errors=True)
+
+
 def _scene_points(path: Path):
     scene = trimesh.load(path, force="scene")
     vertices, colors = [], []
@@ -636,14 +868,19 @@ def _scene_points(path: Path):
 
 
 def _merge_increment(existing: Path, addition: Path, destination: Path):
-    """Similarity-ICP align an overlapping increment, then append its points."""
+    """Similarity-ICP align an overlapping increment, then append its points.
+
+    Writes the merge to a temp file and only replaces destination when the
+    similarity transform looks sane. The previous live GLB is preserved as
+    ``.prev.glb`` before a successful replace.
+    """
     old_points, old_colors = _scene_points(existing)
     new_points, new_colors = _scene_points(addition)
     rng = np.random.default_rng(0)
     old_sample = old_points[rng.choice(len(old_points), min(20_000, len(old_points)), replace=False)]
     new_sample = new_points[rng.choice(len(new_points), min(20_000, len(new_points)), replace=False)]
-    old_extent = np.linalg.norm(np.ptp(old_sample, axis=0))
-    new_extent = np.linalg.norm(np.ptp(new_sample, axis=0))
+    old_extent = float(np.linalg.norm(np.ptp(old_sample, axis=0)))
+    new_extent = float(np.linalg.norm(np.ptp(new_sample, axis=0)))
     scale = old_extent / new_extent if new_extent > 1e-8 else 1.0
     initial = np.eye(4)
     initial[:3, :3] *= scale
@@ -651,13 +888,19 @@ def _merge_increment(existing: Path, addition: Path, destination: Path):
     matrix, _, cost = trimesh.registration.icp(
         new_sample, old_sample, initial=initial, max_iterations=30,
         scale=True, reflection=False)
+    matrix = np.asarray(matrix, dtype=float)
+    fitted_scale = _similarity_scale(matrix)
+    rejected = _alignment_rejected(float(cost), fitted_scale, old_extent)
+    if rejected:
+        return float(cost), fitted_scale, matrix, rejected
     aligned = trimesh.transform_points(new_points, matrix)
     merged = trimesh.points.PointCloud(
         np.concatenate([old_points, aligned]), colors=np.concatenate([old_colors, new_colors]))
-    temporary = destination.with_suffix(".tmp.glb")
-    merged.export(temporary)
-    temporary.replace(destination)
-    return float(cost), np.asarray(matrix, dtype=float)
+    staged = _unique_tmp(destination)
+    merged.export(staged)
+    _install_glb(destination, staged)
+    staged.unlink(missing_ok=True)
+    return float(cost), fitted_scale, matrix, None
 
 
 def _transform_poses(poses: list[dict], matrix: np.ndarray) -> list[dict]:
@@ -712,11 +955,46 @@ def _mark_sources(session: Path, files: list[Path], status: str, error: str | No
     _save_world(session, world)
 
 
+def _mark_processed(session: Path, processed_videos: set[str], processed_photos: set[str],
+                    new_videos: list[Path], new_photos: list[Path]) -> None:
+    processed_videos.update(video.name for video in new_videos)
+    processed_photos.update(photo.name for photo in new_photos)
+    _write_json(session / "processed_videos.json", processed_videos)
+    _write_json(session / "processed_photos.json", processed_photos)
+
+
+def _complete_twin(session: Path, session_id: str, destination: Path, files: list[Path],
+                   poses: list[dict], matrix, new_videos: list[Path], new_photos: list[Path],
+                   processed_videos: set[str], processed_photos: set[str], status: str):
+    _ensure_preview(session_id)
+    _mark_processed(session, processed_videos, processed_photos, new_videos, new_photos)
+    _assign_localizations(session, files, poses, matrix)
+    world = _load_world(session)
+    world["status"] = "idle"
+    world["message"] = status
+    _save_world(session, world)
+    _prune_view_dirs(session)
+    return str(destination), str(destination), status
+
+
 def update_live_twin(session_id, seconds_between_frames, max_frames,
-                     confidence_percentile, as_mesh):
-    """Rebuild only when the session has received new clips or gap photos."""
+                     confidence_percentile, as_mesh,
+                     ingest_resolution=DEFAULT_INGEST_RESOLUTION):
+    """Rebuild the twin when the session has received new clips or gap photos."""
     if not session_id:
         return gr.skip(), gr.skip(), "Upload photos or videos to begin."
+    session_id = _safe_id(session_id)
+    with _session_update_lock(session_id):
+        return _update_live_twin_locked(
+            session_id, seconds_between_frames, max_frames,
+            confidence_percentile, as_mesh, ingest_resolution,
+        )
+
+
+def _update_live_twin_locked(
+    session_id, seconds_between_frames, max_frames,
+    confidence_percentile, as_mesh, ingest_resolution,
+):
     session = _session_dir(session_id)
     videos, photos = _session_media(session)
     processed_videos = _read_json_set(session / "processed_videos.json")
@@ -731,6 +1009,18 @@ def update_live_twin(session_id, seconds_between_frames, max_frames,
             f"Checking every {UPDATE_SECONDS:g}s."
         )
     world = _ensure_world(session)
+    saved = _merged_settings(world.get("settings"))
+    seconds_between_frames = float(
+        saved.get("seconds_between_frames", seconds_between_frames)
+    )
+    max_frames = int(saved.get("max_frames", max_frames))
+    confidence_percentile = float(
+        saved.get("confidence_percentile", confidence_percentile)
+    )
+    as_mesh = _as_bool(saved.get("as_mesh"), as_mesh)
+    ingest_resolution = _normalize_ingest_resolution(
+        saved.get("ingest_resolution", ingest_resolution)
+    )
     _mark_sources(
         session,
         new_videos + new_photos,
@@ -740,65 +1030,106 @@ def update_live_twin(session_id, seconds_between_frames, max_frames,
     world = _load_world(session)
     world["status"] = "processing"
     _save_world(session, world)
-    increment = session / f"increment-{uuid.uuid4().hex[:8]}"
-    image_dir = increment / "images"
-    destination = OUTPUTS / f"live-{session_id}.glb"
+    destination = _glb_path(session_id)
+    has_existing = destination.is_file()
+    ingest_resolution = _normalize_ingest_resolution(ingest_resolution)
+    added = _added_phrase(new_videos, new_photos)
+    work = session / f"{'rebuild' if has_existing else 'increment'}-{uuid.uuid4().hex[:8]}"
+    image_dir = work / "images"
+
+    def infer(image_dir: Path):
+        return reconstruct(
+            str(image_dir),
+            confidence_percentile,
+            as_mesh,
+            ingest_resolution=ingest_resolution,
+        )
+
+    def keep_previous(message: str):
+        _mark_processed(session, processed_videos, processed_photos, new_videos, new_photos)
+        _mark_sources(
+            session,
+            new_videos + new_photos,
+            "failed",
+            error=message,
+            message=message,
+        )
+        return str(destination), str(destination), message
+
     try:
-        if new_videos:
-            prefixes = [_source_id_for_file(world, video) for video in new_videos]
-            _extract_to_directory(
-                new_videos, image_dir, seconds_between_frames, max_frames,
-                min_frames=0, prefixes=prefixes,
+        if has_existing:
+            view_paths = _fill_image_dir(
+                session, image_dir, videos, photos, world,
+                seconds_between_frames, max_frames, seed_overlap=False,
             )
-        else:
-            image_dir.mkdir(parents=True, exist_ok=True)
-            if destination.exists():
-                _seed_overlap_frames(session, image_dir)
-        for index, photo in enumerate(new_photos):
-            source_id = _source_id_for_file(world, photo)
-            prefix = f"{source_id}_still" if source_id else f"gap_{index:04d}"
-            _normalize_photo(photo, image_dir, prefix)
-        view_paths = [
-            path
-            for path in image_dir.iterdir()
-            if path.is_file() and path.suffix.lower() in IMAGE_LOAD_SUFFIXES
-        ] if image_dir.is_dir() else []
+            if not view_paths:
+                shutil.rmtree(work, ignore_errors=True)
+                raise gr.Error(
+                    "Could not extract any views. Upload a photo or a longer video."
+                )
+            try:
+                addition, _, result = infer(image_dir)
+                poses = _read_poses(work)
+                _install_glb(destination, Path(addition))
+                status = (
+                    f"{result} Added {added}. "
+                    f"Rebuilt the twin from {len(view_paths)} views."
+                )
+                return _complete_twin(
+                    session, session_id, destination, videos + photos, poses, None,
+                    new_videos, new_photos, processed_videos, processed_photos, status,
+                )
+            except Exception as exc:
+                if not _is_cuda_oom(exc):
+                    raise
+                _clear_cuda_cache()
+                shutil.rmtree(work, ignore_errors=True)
+                work = session / f"increment-{uuid.uuid4().hex[:8]}"
+                image_dir = work / "images"
+
+        view_paths = _fill_image_dir(
+            session, image_dir, new_videos, new_photos, world,
+            seconds_between_frames, max_frames,
+            seed_overlap=has_existing and not new_videos,
+        )
         if not view_paths:
-            shutil.rmtree(increment, ignore_errors=True)
+            shutil.rmtree(work, ignore_errors=True)
             raise gr.Error(
                 "Could not extract any views. Upload a photo or a longer video."
             )
-        addition, _, result = reconstruct(str(image_dir), confidence_percentile, as_mesh)
-        poses_path = increment / "poses.json"
-        poses = json.loads(poses_path.read_text()) if poses_path.exists() else []
+        try:
+            addition, _, result = infer(image_dir)
+        except Exception as exc:
+            if has_existing and _is_cuda_oom(exc):
+                _clear_cuda_cache()
+                return keep_previous(
+                    "GPU ran out of memory while adding this viewpoint. "
+                    "The previous reconstruction was kept."
+                )
+            raise
+        poses = _read_poses(work)
         matrix = None
-        OUTPUTS.mkdir(parents=True, exist_ok=True)
-        if destination.exists():
-            cost, matrix = _merge_increment(destination, Path(addition), destination)
-            alignment = f" ICP alignment cost: {cost:.5g}."
+        if has_existing:
+            cost, scale, matrix, rejected = _merge_increment(
+                destination, Path(addition), destination
+            )
+            if rejected:
+                return keep_previous(rejected)
+            alignment = (
+                f" GPU ran out of memory for a full rebuild, so this update used "
+                f"incremental alignment. ICP alignment cost: {cost:.5g} "
+                f"(scale {scale:.3g})."
+            )
         else:
-            shutil.copy2(addition, destination)
+            _install_glb(destination, Path(addition))
             alignment = " Initialized the twin."
-        processed_videos.update(video.name for video in new_videos)
-        processed_photos.update(photo.name for photo in new_photos)
-        _write_json(session / "processed_videos.json", processed_videos)
-        _write_json(session / "processed_photos.json", processed_photos)
-        _assign_localizations(session, new_videos + new_photos, poses, matrix)
-        added = " and ".join(
-            part for part in (
-                f"{len(new_videos)} new clip(s)" if new_videos else "",
-                f"{len(new_photos)} gap photo(s)" if new_photos else "",
-            ) if part
-        )
         status = (
-            f"{result} Added {added} / {len(view_paths)} frames without "
-            f"reprocessing earlier clips.{alignment}"
+            f"{result} Added {added} / {len(view_paths)} frames.{alignment}"
         )
-        world = _load_world(session)
-        world["status"] = "idle"
-        world["message"] = status
-        _save_world(session, world)
-        return str(destination), str(destination), status
+        return _complete_twin(
+            session, session_id, destination, new_videos + new_photos, poses, matrix,
+            new_videos, new_photos, processed_videos, processed_photos, status,
+        )
     except Exception as exc:
         _mark_sources(
             session,
@@ -811,7 +1142,8 @@ def update_live_twin(session_id, seconds_between_frames, max_frames,
 
 
 def build_starter_twin(session_id, videos, photos, seconds_between_frames, max_frames,
-                       confidence_percentile, as_mesh):
+                       confidence_percentile, as_mesh,
+                       ingest_resolution=DEFAULT_INGEST_RESOLUTION):
     sources = _paths(videos)
     extras = _paths(photos)
     if not sources:
@@ -825,14 +1157,26 @@ def build_starter_twin(session_id, videos, photos, seconds_between_frames, max_f
         _register_sources(
             session, [(dest, src.name, "photo") for dest, src in zip(queued_photos, extras)]
         )
+    _update_settings(
+        session,
+        {
+            "seconds_between_frames": seconds_between_frames,
+            "max_frames": max_frames,
+            "confidence_percentile": confidence_percentile,
+            "as_mesh": as_mesh,
+            "ingest_resolution": ingest_resolution,
+        },
+    )
     viewer, download, status = update_live_twin(
-        session_id, seconds_between_frames, max_frames, confidence_percentile, as_mesh
+        session_id, seconds_between_frames, max_frames, confidence_percentile, as_mesh,
+        ingest_resolution,
     )
     return session_id, None, None, viewer, download, status
 
 
 def add_gap_photos(session_id, photos, seconds_between_frames, max_frames,
-                   confidence_percentile, as_mesh):
+                   confidence_percentile, as_mesh,
+                   ingest_resolution=DEFAULT_INGEST_RESOLUTION):
     extras = _paths(photos)
     if not session_id:
         raise gr.Error("Build a twin from a starter video first.")
@@ -841,14 +1185,184 @@ def add_gap_photos(session_id, photos, seconds_between_frames, max_frames,
     session = _session_dir(session_id)
     queued = _queue_photos(session, extras)
     _register_sources(session, [(dest, src.name, "photo") for dest, src in zip(queued, extras)])
+    _update_settings(
+        session,
+        {
+            "seconds_between_frames": seconds_between_frames,
+            "max_frames": max_frames,
+            "confidence_percentile": confidence_percentile,
+            "as_mesh": as_mesh,
+            "ingest_resolution": ingest_resolution,
+        },
+    )
     viewer, download, status = update_live_twin(
-        session_id, seconds_between_frames, max_frames, confidence_percentile, as_mesh
+        session_id, seconds_between_frames, max_frames, confidence_percentile, as_mesh,
+        ingest_resolution,
     )
     return None, viewer, download, status
 
 
-def _glb_path(session_id: str) -> Path:
-    return OUTPUTS / f"live-{_safe_id(session_id)}.glb"
+def _preview_path(session_id: str) -> Path:
+    return OUTPUTS / f"live-{_safe_id(session_id)}-preview.glb"
+
+
+def _ensure_preview(session_id: str) -> Path | None:
+    """Write a downsampled, transform-baked GLB the browser can load quickly."""
+    source = _glb_path(session_id)
+    if not source.is_file():
+        return None
+    destination = _preview_path(session_id)
+    if destination.is_file() and destination.stat().st_mtime >= source.stat().st_mtime:
+        return destination
+    with PREVIEW_LOCK:
+        if destination.is_file() and destination.stat().st_mtime >= source.stat().st_mtime:
+            return destination
+        return _write_preview(source, destination)
+
+
+def _write_preview(source: Path, destination: Path) -> Path | None:
+    scene = trimesh.load(source, force="scene")
+    vertices, colors = [], []
+    names = list(getattr(scene.graph, "nodes_geometry", None) or scene.geometry.keys())
+    for name in names:
+        try:
+            matrix, geom_name = scene.graph.get(name)
+            geometry = scene.geometry[geom_name]
+            points = trimesh.transform_points(np.asarray(geometry.vertices), matrix)
+        except Exception:
+            geometry = scene.geometry[name]
+            points = np.asarray(geometry.vertices)
+        vertex_colors = getattr(geometry.visual, "vertex_colors", None)
+        if vertex_colors is None or len(vertex_colors) != len(points):
+            vertex_colors = np.full((len(points), 4), 255, dtype=np.uint8)
+        vertices.append(points)
+        colors.append(np.asarray(vertex_colors, dtype=np.uint8))
+    if not vertices:
+        return None
+    points = np.concatenate(vertices)
+    vertex_colors = np.concatenate(colors)
+    if len(points) > VIEWER_MAX_POINTS:
+        pick = np.random.default_rng(0).choice(len(points), VIEWER_MAX_POINTS, replace=False)
+        points, vertex_colors = points[pick], vertex_colors[pick]
+    OUTPUTS.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f"{destination.stem}-{uuid.uuid4().hex[:8]}.tmp.glb")
+    trimesh.points.PointCloud(points, colors=vertex_colors).export(temporary)
+    temporary.replace(destination)
+    return destination
+
+
+def _reconstruction_busy(session_id: str) -> bool:
+    session = _session_dir(session_id)
+    world = _load_world(session)
+    if world.get("status") == "processing":
+        return True
+    if any(source.get("status") == "processing" for source in world.get("sources", [])):
+        return True
+    with WORKER_GUARD:
+        thread = WORKERS.get(session_id)
+        return bool(thread and thread.is_alive())
+
+
+def _reset_source_localization(source: dict) -> None:
+    source["status"] = "queued"
+    source["error"] = None
+    source["localized_at"] = None
+    source["view_count"] = 0
+    source["position"] = None
+    source["forward"] = None
+    source["cameras"] = []
+
+
+def delete_source(session_id: str, source_id: str) -> dict:
+    """Remove a viewpoint and rebuild the twin from whatever sources remain."""
+    session_id = _safe_id(session_id)
+    source_id = Path(source_id or "").name
+    if not source_id:
+        raise gr.Error("Viewpoint not found.")
+    session = _session_dir(session_id)
+    with _session_update_lock(session_id):
+        return _delete_source_locked(session_id, source_id, session)
+
+
+def _delete_source_locked(session_id: str, source_id: str, session: Path) -> dict:
+    if _reconstruction_busy(session_id):
+        raise BusyError(
+            "Cannot delete a viewpoint while reconstruction is in progress. "
+            "Wait for the current update to finish."
+        )
+    world = _ensure_world(session)
+    source = next((item for item in world["sources"] if item.get("id") == source_id), None)
+    if source is None:
+        raise gr.Error("Viewpoint not found.")
+    stored = source.get("stored_as")
+    kind = source.get("kind")
+    if stored:
+        if kind == "video":
+            (session / "videos" / stored).unlink(missing_ok=True)
+        else:
+            (session / "photos" / stored).unlink(missing_ok=True)
+    thumb_name = Path(source.get("thumbnail") or f"thumbs/{source_id}.jpg").name
+    (session / "thumbs" / thumb_name).unlink(missing_ok=True)
+    world["sources"] = [item for item in world["sources"] if item.get("id") != source_id]
+    glb = _glb_path(session_id)
+    glb.unlink(missing_ok=True)
+    _prev_glb_path(session_id).unlink(missing_ok=True)
+    _preview_path(session_id).unlink(missing_ok=True)
+    remaining = world["sources"]
+    if not remaining:
+        _write_json(session / "processed_videos.json", set())
+        _write_json(session / "processed_photos.json", set())
+        world["status"] = "idle"
+        world["message"] = "All viewpoints removed. Upload photos or videos to rebuild the world."
+        world["updates"] = int(world.get("updates") or 0) + 1
+        _save_world(session, world)
+        return public_world(session_id)
+    # Drop the live GLB and reprocess remaining media so deleted geometry cannot linger.
+    _write_json(session / "processed_videos.json", set())
+    _write_json(session / "processed_photos.json", set())
+    for item in remaining:
+        _reset_source_localization(item)
+    world["status"] = "idle"
+    world["message"] = "Viewpoint removed. Rebuilding the world from remaining sources."
+    world["updates"] = int(world.get("updates") or 0) + 1
+    _save_world(session, world)
+    _kick_worker(session_id)
+    return public_world(session_id)
+
+
+def rebuild_world(session_id: str) -> dict:
+    """Clear processed markers and re-run every source with the saved settings."""
+    session_id = _safe_id(session_id)
+    session = _session_dir(session_id)
+    with _session_update_lock(session_id):
+        return _rebuild_world_locked(session_id, session)
+
+
+def _rebuild_world_locked(session_id: str, session: Path) -> dict:
+    if _reconstruction_busy(session_id):
+        raise BusyError(
+            "Cannot rebuild while reconstruction is in progress. "
+            "Wait for the current update to finish."
+        )
+    world = _ensure_world(session)
+    if not world.get("sources"):
+        world["message"] = "No sources to rebuild. Upload photos or videos first."
+        _save_world(session, world)
+        return public_world(session_id)
+    _write_json(session / "processed_videos.json", set())
+    _write_json(session / "processed_photos.json", set())
+    for item in world["sources"]:
+        _reset_source_localization(item)
+    glb = _glb_path(session_id)
+    glb.unlink(missing_ok=True)
+    _prev_glb_path(session_id).unlink(missing_ok=True)
+    _preview_path(session_id).unlink(missing_ok=True)
+    world["status"] = "idle"
+    world["message"] = "Rebuilding the world with current reconstruction settings."
+    world["updates"] = int(world.get("updates") or 0) + 1
+    _save_world(session, world)
+    _kick_worker(session_id)
+    return public_world(session_id)
 
 
 def _public_source(session_id: str, source: dict) -> dict:
@@ -875,7 +1389,14 @@ def public_world(session_id: str) -> dict:
         "updates": int(world.get("updates") or 0),
         "settings": world.get("settings") or dict(DEFAULT_SETTINGS),
         "has_model": glb.is_file(),
-        "model_url": f"/api/worlds/{session_id}/model.glb?t={int(glb.stat().st_mtime)}" if glb.is_file() else None,
+        "model_url": (
+            f"/api/worlds/{session_id}/model.glb?preview=1&t={int(glb.stat().st_mtime)}"
+            if glb.is_file() else None
+        ),
+        "download_url": (
+            f"/api/worlds/{session_id}/model.glb?t={int(glb.stat().st_mtime)}"
+            if glb.is_file() else None
+        ),
         "model_bytes": glb.stat().st_size if glb.is_file() else 0,
         "sources": [_public_source(session_id, source) for source in world["sources"]],
         "stats": {
@@ -913,12 +1434,14 @@ def _run_worker(session_id: str) -> None:
             _save_world(session, world)
             return
         try:
+            saved = _merged_settings(settings)
             update_live_twin(
                 session_id,
-                settings.get("seconds_between_frames", 1.5),
-                settings.get("max_frames", 40),
-                settings.get("confidence_percentile", 10),
-                settings.get("as_mesh", False),
+                saved["seconds_between_frames"],
+                saved["max_frames"],
+                saved["confidence_percentile"],
+                saved["as_mesh"],
+                saved["ingest_resolution"],
             )
         except Exception:
             return
@@ -950,7 +1473,7 @@ try:
     import secrets
 
     import uvicorn
-    from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+    from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
     from fastapi.responses import FileResponse
     from fastapi.staticfiles import StaticFiles
     from starlette.middleware.base import BaseHTTPMiddleware
@@ -987,7 +1510,10 @@ try:
 
     @web.get("/")
     def _index():
-        return FileResponse(STATIC / "index.html")
+        return FileResponse(
+            STATIC / "index.html",
+            headers={"Cache-Control": "no-store"},
+        )
 
     @web.get("/favicon.ico")
     def _favicon():
@@ -1003,10 +1529,11 @@ try:
 
     @web.post("/api/worlds")
     def _create_world_route(
-        seconds_between_frames: float = Form(1.5),
+        seconds_between_frames: float = Form(0.5),
         max_frames: int = Form(40),
         confidence_percentile: float = Form(10),
         as_mesh: bool = Form(False),
+        ingest_resolution: int = Form(DEFAULT_INGEST_RESOLUTION),
     ):
         return create_world(
             {
@@ -1014,6 +1541,7 @@ try:
                 "max_frames": max_frames,
                 "confidence_percentile": confidence_percentile,
                 "as_mesh": as_mesh,
+                "ingest_resolution": ingest_resolution,
             }
         )
 
@@ -1031,6 +1559,7 @@ try:
         max_frames: int | None = Form(None),
         confidence_percentile: float | None = Form(None),
         as_mesh: bool | None = Form(None),
+        ingest_resolution: int | None = Form(None),
     ):
         try:
             session = _session_dir(world_id)
@@ -1043,6 +1572,7 @@ try:
                 "max_frames": max_frames,
                 "confidence_percentile": confidence_percentile,
                 "as_mesh": as_mesh,
+                "ingest_resolution": ingest_resolution,
             },
         )
         return public_world(world_id)
@@ -1051,10 +1581,11 @@ try:
     async def _upload_sources(
         world_id: str,
         files: list[UploadFile] = File(...),
-        seconds_between_frames: float = Form(1.5),
+        seconds_between_frames: float = Form(0.5),
         max_frames: int = Form(40),
         confidence_percentile: float = Form(10),
         as_mesh: bool = Form(False),
+        ingest_resolution: int = Form(DEFAULT_INGEST_RESOLUTION),
     ):
         if not files:
             raise HTTPException(400, "Upload at least one photo or video.")
@@ -1087,6 +1618,7 @@ try:
                     "max_frames": max_frames,
                     "confidence_percentile": confidence_percentile,
                     "as_mesh": as_mesh,
+                    "ingest_resolution": ingest_resolution,
                 },
             )
         except gr.Error as exc:
@@ -1098,11 +1630,35 @@ try:
         _kick_worker(session_id)
         return public_world(session_id)
 
+    @web.post("/api/worlds/{world_id}/rebuild")
+    def _rebuild_world(world_id: str):
+        try:
+            return rebuild_world(world_id)
+        except BusyError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except gr.Error as exc:
+            message = str(exc)
+            status = 404 if "not found" in message.lower() else 400
+            raise HTTPException(status, message) from exc
+
+    @web.delete("/api/worlds/{world_id}/sources/{source_id}")
+    def _delete_source(world_id: str, source_id: str):
+        try:
+            return delete_source(world_id, source_id)
+        except BusyError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except gr.Error as exc:
+            message = str(exc)
+            status = 404 if "not found" in message.lower() else 400
+            raise HTTPException(status, message) from exc
+
     @web.get("/api/worlds/{world_id}/model.glb")
-    def _model(world_id: str):
+    def _model(world_id: str, preview: bool = Query(False)):
         path = _glb_path(world_id)
         if not path.is_file():
             raise HTTPException(404, "This world has no mesh yet.")
+        if preview:
+            path = _ensure_preview(world_id) or path
         return FileResponse(
             path,
             media_type="model/gltf-binary",

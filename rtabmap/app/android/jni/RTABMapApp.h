@@ -43,6 +43,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <rtabmap/core/SensorCaptureThread.h>
 #include <rtabmap/core/RtabmapThread.h>
 #include <rtabmap/core/SensorEvent.h>
+#include <rtabmap/core/SensorData.h>
+#include <rtabmap/core/Link.h>
 #include <rtabmap/utilite/UEventsHandler.h>
 #include <boost/thread/mutex.hpp>
 #include <pcl/pcl_base.h>
@@ -160,6 +162,11 @@ class RTABMapApp : public UEventsHandler {
   void setGPS(const rtabmap::GPS & gps);
   void addEnvSensor(int type, float value);
 
+  // Import other clients' nodes into the OpenGL overlay only.
+  // Does not call Rtabmap::process or change local odometry/SLAM.
+  int importRemoteDeltaDb(const std::string & path, const rtabmap::Transform & localFromGlobal, bool aligned);
+  void clearRemoteMap();
+
   void save(const std::string & databasePath);
   bool recover(const std::string & from, const std::string & to);
   void cancelProcessing();
@@ -217,6 +224,10 @@ class RTABMapApp : public UEventsHandler {
   rtabmap::ParametersMap getRtabmapParameters();
   void updateMeasuringState();
   bool smoothMesh(int id, rtabmap::Mesh & mesh);
+  void flushRemoteOverlay();
+  static int remoteSceneId(int globalId);
+  static bool isRemoteSceneId(int id);
+  bool createRemoteMeshFromData(rtabmap::SensorData & data, rtabmap::Mesh & mesh);
   void gainCompensation(bool full = false);
   std::vector<pcl::Vertices> filterOrganizedPolygons(const std::vector<pcl::Vertices> & polygons, int cloudSize) const;
   std::vector<pcl::Vertices> filterPolygons(const std::vector<pcl::Vertices> & polygons, int cloudSize) const;
@@ -321,6 +332,18 @@ class RTABMapApp : public UEventsHandler {
 
 	std::map<int, rtabmap::Mesh> createdMeshes_;
 	std::map<int, rtabmap::Transform> rawPoses_;
+
+	std::map<int, rtabmap::Mesh> remoteMeshes_;
+	std::map<int, rtabmap::Transform> remotePoses_;
+	std::multimap<int, rtabmap::Link> remoteLinks_;
+	std::map<int, rtabmap::Transform> lastLocalGraphPoses_;
+	std::multimap<int, rtabmap::Link> lastLocalGraphLinks_;
+	rtabmap::Transform remoteLocalFromGlobal_;
+	rtabmap::Transform remoteRebaseT_;
+	bool remoteRebaseValid_;
+	bool remoteAligned_;
+	bool remoteDirty_;
+	bool remoteClearPending_;
 
 	std::pair<rtabmap::RtabmapEventInit::Status, std::string> status_;
 

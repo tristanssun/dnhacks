@@ -1,0 +1,7 @@
+# RTABMapApp physical phones. One slot per line: Name<TAB>UDID
+# Hardware UDIDs from: DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun xctrace list devices
+# If a UDID is REPLACE_ME, fill it from the next successful list-devices (connected or offline).
+# Do not use CoreDevice identifiers from `devicectl list devices`; xcodebuild wants the 0000... UDID.
+
+Ian	00008140-00044D591E3B001C
+Weston	00008110-000615D20CB8801E

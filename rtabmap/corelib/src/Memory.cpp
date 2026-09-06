@@ -141,7 +141,8 @@ Memory::Memory(const ParametersMap & parameters) :
 	_tfIdfLikelihoodUsed(Parameters::defaultKpTfIdfLikelihoodUsed()),
 	_parallelized(Parameters::defaultKpParallelized()),
 	_registrationVis(0),
-	_dummyDictionary(false)
+	_dummyDictionary(false),
+	_dbConnectedAt(0.0)
 {
 	_feature2D = Feature2D::create(parameters);
 	_vwd = new VWDictionary(parameters);
@@ -220,6 +221,7 @@ bool Memory::init(const std::string & dbUrl, bool dbOverwritten, const Parameter
 		if(_dbDriver->openConnection(dbUrl, dbOverwritten, isReadOnly()))
 		{
 			success = true;
+			_dbConnectedAt = UTimer::now();
 			if(postInitClosingEvents) UEventsManager::post(new RtabmapEventInit(std::string("Connecting to database \"") + dbUrl + "\", done!"));
 		}
 		else
@@ -2064,6 +2066,47 @@ int Memory::getNextId()
 	return ++_idCount;
 }
 
+void Memory::setCurrentMapId(int mapId)
+{
+	if(mapId >= 0)
+	{
+		UINFO("setCurrentMapId %d -> %d", _idMapCount, mapId);
+		_idMapCount = mapId;
+	}
+}
+
+bool Memory::addNeighborLink(const Link & link)
+{
+	if(link.type() != Link::kNeighbor && link.type() != Link::kNeighborMerged)
+	{
+		UERROR("addNeighborLink requires a neighbor type, got %s", link.typeName().c_str());
+		return false;
+	}
+	if(link.transform().isNull())
+	{
+		UERROR("Neighbor link %d -> %d has a null transform", link.from(), link.to());
+		return false;
+	}
+	Signature * fromS = _getSignature(link.from());
+	Signature * toS = _getSignature(link.to());
+	if(!fromS || !toS)
+	{
+		UERROR("Cannot add neighbor %d -> %d (from=%d to=%d missing in WM)",
+			link.from(), link.to(), fromS?1:0, toS?1:0);
+		return false;
+	}
+	if(fromS->hasLink(link.to()) || toS->hasLink(link.from()))
+	{
+		UINFO("Neighbor %d -> %d already exists", link.from(), link.to());
+		return true;
+	}
+	fromS->addLink(link);
+	toS->addLink(link.inverse());
+	_linksChanged = true;
+	UINFO("Added neighbor chain %d -> %d", link.from(), link.to());
+	return true;
+}
+
 int Memory::incrementMapId(std::map<int, int> * reducedIds)
 {
 	//don't increment if there is no location in the current map
@@ -2172,8 +2215,14 @@ void Memory::clear()
 	if(_dbDriver)
 	{
 		// make sure time_enter in database is at least 1 second
-		// after for the next stuf added to database
-		uSleep(1500);
+		// after for the next stuff added to database. Only sleep the remainder:
+		// a connection that has been open for longer already satisfies it, and
+		// a fixed 1.5 s was the largest cost of every short-lived session.
+		const double openFor = _dbConnectedAt > 0.0 ? UTimer::now() - _dbConnectedAt : 0.0;
+		if(openFor < 1.5)
+		{
+			uSleep(static_cast<unsigned int>((1.5 - openFor) * 1000.0));
+		}
 	}
 
 	// Save some stats to the db, save only when the mem is not empty

@@ -86,6 +86,9 @@
 		4E3525672DE4C72D00F39D8F /* libamd.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 4E3525662DE4C72D00F39D8F /* libamd.a */; };
 		4E8B155426273A580037FC53 /* Zip in Frameworks */ = {isa = PBXBuildFile; productRef = 4E8B155326273A580037FC53 /* Zip */; };
 		4EB1A66625A0D90B0043C7BF /* RTABMap.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EB1A66525A0D90B0043C7BF /* RTABMap.swift */; };
+		C011AB010000000000000002 /* CollabSync.swift in Sources */ = {isa = PBXBuildFile; fileRef = C011AB010000000000000001 /* CollabSync.swift */; };
+		C011AB030000000000000002 /* TagCalibrator.swift in Sources */ = {isa = PBXBuildFile; fileRef = C011AB030000000000000001 /* TagCalibrator.swift */; };
+		C011AB020000000000000002 /* CollabServerConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = C011AB020000000000000001 /* CollabServerConfig.swift */; };
 		4EE016B3259BE441008CCE65 /* ViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EE016AF259BE441008CCE65 /* ViewController.swift */; };
 		4EE016B4259BE441008CCE65 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EE016B0259BE441008CCE65 /* SceneDelegate.swift */; };
 		4EE016B9259BE449008CCE65 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EE016B8259BE449008CCE65 /* AppDelegate.swift */; };
@@ -186,6 +189,10 @@
 		4E3525662DE4C72D00F39D8F /* libamd.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libamd.a; path = RTABMapApp/Libraries/lib/libamd.a; sourceTree = "<group>"; };
 		4E401BE825CC92C100240A56 /* ProgressionStatus.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = ProgressionStatus.h; path = ../android/jni/ProgressionStatus.h; sourceTree = "<group>"; };
 		4EB1A66525A0D90B0043C7BF /* RTABMap.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; name = RTABMap.swift; path = RTABMapApp/RTABMap.swift; sourceTree = "<group>"; };
+		C011AB010000000000000001 /* CollabSync.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; name = CollabSync.swift; path = RTABMapApp/CollabSync.swift; sourceTree = "<group>"; };
+		C011AB030000000000000001 /* TagCalibrator.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; name = TagCalibrator.swift; path = RTABMapApp/TagCalibrator.swift; sourceTree = "<group>"; };
+		C011AB020000000000000001 /* CollabServerConfig.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; name = CollabServerConfig.swift; path = RTABMapApp/Generated/CollabServerConfig.swift; sourceTree = "<group>"; };
+		C011AB020000000000000005 /* CollabServerConfig.fallback.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; name = CollabServerConfig.fallback.swift; path = RTABMapApp/Generated/CollabServerConfig.fallback.swift; sourceTree = "<group>"; };
 		4ED73AD02D7FECF3007899C2 /* liblaszip.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = liblaszip.a; path = RTABMapApp/Libraries/lib/liblaszip.a; sourceTree = "<group>"; };
 		4EE015C2259A2AF0008CCE65 /* RTABMapApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RTABMapApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		4EE016AF259BE441008CCE65 /* ViewController.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; name = ViewController.swift; path = RTABMapApp/ViewController.swift; sourceTree = "<group>"; };
@@ -478,6 +485,9 @@
 				4EE016E1259BE96A008CCE65 /* RTABMapApp-Bridging-Header.h */,
 				4EE016B0259BE441008CCE65 /* SceneDelegate.swift */,
 				4EE016AF259BE441008CCE65 /* ViewController.swift */,
+				C011AB010000000000000001 /* CollabSync.swift */,
+				C011AB030000000000000001 /* TagCalibrator.swift */,
+				C011AB020000000000000003 /* Generated */,
 				4EE016BF259BE464008CCE65 /* Main.storyboard */,
 				4EE016C1259BE464008CCE65 /* LaunchScreen.storyboard */,
 				4EE016BC259BE45C008CCE65 /* Info.plist */,
@@ -487,6 +497,15 @@
 				4E2C516625A63119005CEDBD /* VerticalScrollerView.swift */,
 			);
 			name = RTABMapApp;
+			sourceTree = "<group>";
+		};
+		C011AB020000000000000003 /* Generated */ = {
+			isa = PBXGroup;
+			children = (
+				C011AB020000000000000001 /* CollabServerConfig.swift */,
+				C011AB020000000000000005 /* CollabServerConfig.fallback.swift */,
+			);
+			name = Generated;
 			sourceTree = "<group>";
 		};
 		4EFD0B2A259D4DE900575D88 /* Frameworks */ = {
@@ -755,6 +774,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 4EE015D6259A2AF0008CCE65 /* Build configuration list for PBXNativeTarget "RTABMapApp" */;
 			buildPhases = (
+				C011AB020000000000000004 /* Generate CollabServerConfig */,
 				4EE015BE259A2AF0008CCE65 /* Sources */,
 				4EE015BF259A2AF0008CCE65 /* Frameworks */,
 				4EA4BDE12635BD4500706703 /* ShellScript */,
@@ -783,6 +803,8 @@
 				TargetAttributes = {
 					4EE015C1259A2AF0008CCE65 = {
 						CreatedOnToolsVersion = 12.3;
+						DevelopmentTeam = F38B8K483F;
+						ProvisioningStyle = Automatic;
 					};
 				};
 			};
@@ -824,6 +846,26 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
+		C011AB020000000000000004 /* Generate CollabServerConfig */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Generate CollabServerConfig";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(SRCROOT)/RTABMapApp/Generated/CollabServerConfig.swift",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${SRCROOT}/scripts/generate_collab_server_config.sh\"\n";
+		};
 		4EA4BDE12635BD4500706703 /* ShellScript */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
@@ -854,6 +896,9 @@
 				4EFD0BC0259D50A800575D88 /* scene.cpp in Sources */,
 				4E2C516825A63119005CEDBD /* VerticalScrollerView.swift in Sources */,
 				4EE016B3259BE441008CCE65 /* ViewController.swift in Sources */,
+				C011AB010000000000000002 /* CollabSync.swift in Sources */,
+				C011AB030000000000000002 /* TagCalibrator.swift in Sources */,
+				C011AB020000000000000002 /* CollabServerConfig.swift in Sources */,
 				4E2C516725A63119005CEDBD /* DatabaseView.swift in Sources */,
 				4EFD0BAA259D501E00575D88 /* triangle.cpp in Sources */,
 				4EFD0B9D259D501E00575D88 /* segment_drawable.cpp in Sources */,
@@ -969,6 +1014,7 @@
 				SDKROOT = iphoneos;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				DEVELOPMENT_TEAM = F38B8K483F;
 			};
 			name = Debug;
 		};
@@ -1026,6 +1072,7 @@
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				VALIDATE_PRODUCT = YES;
+				DEVELOPMENT_TEAM = F38B8K483F;
 			};
 			name = Release;
 		};
@@ -1041,7 +1088,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEFINES_MODULE = YES;
-				DEVELOPMENT_TEAM = 3RRB6NV8U9;
+				DEVELOPMENT_TEAM = F38B8K483F;
 				EXCLUDED_ARCHS = "";
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
@@ -1055,6 +1102,7 @@
 				);
 				GCC_UNROLL_LOOPS = NO;
 				INFOPLIST_FILE = RTABMapApp/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Rtab-ian";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -1067,14 +1115,23 @@
 				);
 				MARKETING_VERSION = 0.23.7;
 				OTHER_CFLAGS = "";
-				PRODUCT_BUNDLE_IDENTIFIER = com.introlab.rtabmap;
+				PRODUCT_BUNDLE_IDENTIFIER = com.dnhacks.rtabmap;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SWIFT_OBJC_BRIDGING_HEADER = "RTABMapApp/$(SWIFT_MODULE_NAME)-Bridging-Header.h";
 				SWIFT_OBJC_INTERFACE_HEADER_NAME = "$(SWIFT_MODULE_NAME)-Swift.h";
 				SWIFT_VERSION = 5.0;
 				SYSTEM_FRAMEWORK_SEARCH_PATHS = "\"$(SRCROOT)/RTABMapApp/Libraries/lib\"";
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"$(SRCROOT)/Generated/include\"",
+					"\"$(SRCROOT)/../../utilite/include\"",
+					"\"$(SRCROOT)/../../corelib/include\"",
+				);
 				SYSTEM_HEADER_SEARCH_PATHS = (
+					"\"$(SRCROOT)/Generated/include\"",
+					"\"$(SRCROOT)/../../utilite/include\"",
+					"\"$(SRCROOT)/../../corelib/include\"",
 					"\"$(SRCROOT)/RTABMapApp/Libraries/include\"",
 					"\"$(SRCROOT)/RTABMapApp/Libraries/include/eigen3\"",
 					"\"$(SRCROOT)/RTABMapApp/Libraries/include/pcl-1.15\"",
@@ -1101,7 +1158,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEFINES_MODULE = YES;
-				DEVELOPMENT_TEAM = 3RRB6NV8U9;
+				DEVELOPMENT_TEAM = F38B8K483F;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(PROJECT_DIR)/RTABMapApp/Libraries/lib",
@@ -1115,6 +1172,7 @@
 				);
 				GCC_UNROLL_LOOPS = NO;
 				INFOPLIST_FILE = RTABMapApp/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Rtab-ian";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -1128,14 +1186,23 @@
 				MARKETING_VERSION = 0.23.7;
 				ONLY_ACTIVE_ARCH = YES;
 				OTHER_CFLAGS = "";
-				PRODUCT_BUNDLE_IDENTIFIER = com.introlab.rtabmap;
+				PRODUCT_BUNDLE_IDENTIFIER = com.dnhacks.rtabmap;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SWIFT_OBJC_BRIDGING_HEADER = "RTABMapApp/$(SWIFT_MODULE_NAME)-Bridging-Header.h";
 				SWIFT_OBJC_INTERFACE_HEADER_NAME = "$(SWIFT_MODULE_NAME)-Swift.h";
 				SWIFT_VERSION = 5.0;
 				SYSTEM_FRAMEWORK_SEARCH_PATHS = "\"$(SRCROOT)/RTABMapApp/Libraries/lib\"";
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"$(SRCROOT)/Generated/include\"",
+					"\"$(SRCROOT)/../../utilite/include\"",
+					"\"$(SRCROOT)/../../corelib/include\"",
+				);
 				SYSTEM_HEADER_SEARCH_PATHS = (
+					"\"$(SRCROOT)/Generated/include\"",
+					"\"$(SRCROOT)/../../utilite/include\"",
+					"\"$(SRCROOT)/../../corelib/include\"",
 					"\"$(SRCROOT)/RTABMapApp/Libraries/include\"",
 					"\"$(SRCROOT)/RTABMapApp/Libraries/include/eigen3\"",
 					"\"$(SRCROOT)/RTABMapApp/Libraries/include/pcl-1.15\"",
