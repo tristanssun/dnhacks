@@ -95,26 +95,24 @@ function zoomProgress(scroll) {
   return clamp01((scroll - start) / Math.max(end - start, 1));
 }
 
-function mapHoldScroll(scroll) {
-  if (!intoMap || !zoomStartEl) {
-    return null;
-  }
-  const start = pageTop(zoomStartEl, scroll);
-  return start + intoMap.offsetHeight * 0.88 * 0.995;
-}
-
 let mapGateOpen = false;
+let mapHoldY = null;
 
 function holdMapScroll(scroll) {
-  const hold = mapHoldScroll(scroll);
-  if (mapGateOpen || hold == null || scroll <= hold) {
-    if (zoomProgress(scroll) < 0.96) {
-      mapGateOpen = false;
-    }
+  const raw = zoomProgress(scroll);
+  if (raw < 0.92) {
+    mapGateOpen = false;
+    mapHoldY = null;
     return scroll;
   }
-  lenis.scrollTo(hold, { immediate: true });
-  return hold;
+  if (raw >= 0.99 && mapHoldY == null) {
+    mapHoldY = scroll;
+  }
+  if (!mapGateOpen && mapHoldY != null && scroll > mapHoldY + 1) {
+    lenis.scrollTo(mapHoldY, { immediate: true });
+    return mapHoldY;
+  }
+  return scroll;
 }
 
 const player = document.getElementById("player");
@@ -280,8 +278,7 @@ function syncZoom(scroll) {
   const raw = zoomProgress(scroll);
   const t = raw * raw * (3 - 2 * raw);
   document.documentElement.style.setProperty("--zoom", String(t));
-  const leftMap = !!zoomStartEl && !!intoMap && scroll >= pageTop(zoomStartEl, scroll) + intoMap.offsetHeight - 8;
-  const mapFull = raw >= 0.995 && !leftMap;
+  const mapFull = raw >= 0.99 && !mapGateOpen;
   document.body.classList.toggle("is-zooming", raw > 0.001);
   document.body.classList.toggle("is-map-full", mapFull);
   document.getElementById("map-notes")?.setAttribute("aria-hidden", mapFull ? "false" : "true");
@@ -349,17 +346,14 @@ document.querySelector(".map-next")?.addEventListener("click", (event) => {
 window.addEventListener(
   "wheel",
   (event) => {
-    if (mapGateOpen || event.deltaY <= 0) {
+    if (mapGateOpen || event.deltaY <= 0 || mapHoldY == null) {
       return;
     }
-    if (zoomProgress(lenis.scroll) < 0.995) {
+    if (zoomProgress(lenis.scroll) < 0.99) {
       return;
     }
     event.preventDefault();
-    const hold = mapHoldScroll(lenis.scroll);
-    if (hold != null) {
-      lenis.scrollTo(hold, { immediate: true });
-    }
+    lenis.scrollTo(mapHoldY, { immediate: true });
   },
   { passive: false },
 );
