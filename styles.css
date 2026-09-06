@@ -225,9 +225,7 @@ h1 {
   align-items: center;
   justify-content: space-between;
   gap: clamp(1.2rem, 3vw, 3rem);
-  min-height: 78vh;
-  min-height: 78svh;
-  padding: 8vh 4vw;
+  padding: 4.5rem 4vw;
 }
 
 .relay-copy {
@@ -729,9 +727,7 @@ body.is-map-full .map-note.is-off {
     flex-direction: column;
     justify-content: center;
     gap: 2.2rem;
-    min-height: 88vh;
-    min-height: 88svh;
-    padding: 8vh 6vw;
+    padding: 3.2rem 6vw;
   }
 
   .relay-copy {
