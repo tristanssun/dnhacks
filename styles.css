@@ -375,15 +375,15 @@ h1 {
 
 .relay-wall {
   position: absolute;
-  top: 8%;
-  height: 84%;
+  top: 0;
+  height: 100%;
   left: 50%;
   z-index: 1;
-  width: 2.75rem;
+  width: 2.05rem;
   transform: translateX(-50%);
   object-fit: cover;
   object-position: center;
-  border: 1px solid #1a1a1a;
+  border: 0;
   box-shadow: 0 10px 18px rgba(0, 0, 0, 0.08);
 }
 
