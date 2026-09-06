@@ -168,6 +168,13 @@ body{display:flex;flex-direction:column;min-height:100%;background:var(--page);}
 .lamp{width:7px;height:7px;flex:0 0 7px;border-radius:50%;background:var(--border);}
 .lamp.on{background:var(--text-1);}
 .side-actions{margin-top:auto;padding:14px;display:flex;flex-direction:column;gap:8px;border-top:1px solid var(--border);}
+.side-lock{display:flex;align-items:center;gap:8px;}
+.side-lock label{flex:1;min-width:0;font-size:12px;font-weight:500;color:var(--text-2);}
+#lock-phones-input{width:56px;height:28px;border:1px solid var(--border);background:var(--card);
+  color:var(--text-1);font-family:var(--mono);font-size:13px;padding:0 6px;text-align:right;}
+#lock-phones-input:focus{outline:none;border-color:var(--text-1);}
+#lock-phones-status{font-family:var(--mono);font-size:12px;color:var(--text-2);min-width:44px;text-align:right;}
+#lock-need-hint{margin-top:16px;font-family:var(--mono);font-size:13px;font-weight:500;color:var(--text-2);}
 .btn{appearance:none;height:36px;border:1px solid var(--border);background:transparent;
   color:var(--text-1);font-family:var(--sans);font-size:13px;font-weight:500;line-height:1;
   cursor:pointer;text-decoration:none;display:flex;align-items:center;justify-content:center;gap:8px;}
@@ -315,6 +322,11 @@ body{display:flex;flex-direction:column;min-height:100%;background:var(--page);}
     <hr class="side-rule">
     <div id="dots" class="tree"></div>
     <div class="side-actions">
+      <div class="side-lock">
+        <label for="lock-phones-input">Phones to start</label>
+        <input id="lock-phones-input" type="number" min="1" max="16" step="1" value="1">
+        <span id="lock-phones-status">0 / 1</span>
+      </div>
       <button type="button" class="btn" id="opt-btn">Optimize</button>
       <button type="button" class="btn ghost-bad" id="reset-btn">Reset</button>
     </div>
@@ -325,6 +337,7 @@ body{display:flex;flex-direction:column;min-height:100%;background:var(--page);}
         <div class="reticle">
           <img id="calib-tag-img" src="/tag.png" alt="ArUco 4x4 start tag id 0"/>
         </div>
+        <div id="lock-need-hint">0 of 1 phones ready</div>
       </div>
       <div id="live">
         <div id="map-wrap">
@@ -364,7 +377,7 @@ body{display:flex;flex-direction:column;min-height:100%;background:var(--page);}
 <div id="confirm">
   <div class="sheet" role="dialog" aria-labelledby="confirm-title">
     <h3 id="confirm-title">Reset the room?</h3>
-    <p>Deletes the stored map and unlocks the session. Both phones must join and point at the tag again.</p>
+    <p>Deletes the stored map and unlocks the session. Phones must join and point at the tag again.</p>
     <div class="sheet-row">
       <button type="button" class="btn" id="confirm-no">Cancel</button>
       <button type="button" class="btn solid" id="confirm-go">Reset</button>
@@ -1639,6 +1652,7 @@ function setBanner(demo, live) {
   renderDots(demo);
   setPhases(demo);
   setStats(demo);
+  refreshLockNeed(demo);
 }
 // Physical size of the displayed marker. Browsers do not expose screen DPI, so
 // estimate mm per CSS pixel from known Apple panels (the demo laptop), fall back
@@ -1709,6 +1723,35 @@ function reportTagSize() {
   window.addEventListener('resize', function() { lastReportedTagM = 0; reportTagSize(); });
   const img = document.getElementById('calib-tag-img');
   if (img) img.addEventListener('load', reportTagSize);
+})();
+function refreshLockNeed(demo) {
+  const need = Math.max(1, parseInt(demo && demo.lock_phones_required, 10) || 1);
+  const have = parseInt(demo && demo.calibrated_count, 10) || 0;
+  const input = document.getElementById('lock-phones-input');
+  if (input && document.activeElement !== input) input.value = String(need);
+  const status = document.getElementById('lock-phones-status');
+  if (status) status.textContent = have + ' / ' + need;
+  const hint = document.getElementById('lock-need-hint');
+  if (hint) {
+    hint.textContent = (demo && demo.locked) ? 'Locked' : (have + ' of ' + need + ' phones ready');
+  }
+}
+(function wireLockPhones() {
+  const input = document.getElementById('lock-phones-input');
+  if (!input) return;
+  input.addEventListener('change', function() {
+    const n = parseInt(input.value, 10);
+    if (!(n >= 1 && n <= 16)) return;
+    fetch('/lock_phones', {method: 'POST', cache: 'no-store', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({lock_phones_required: n})}).then(function(r) { return r.json(); }).then(function(res) {
+      if (!res || res.ok === false) return;
+      if (lastDemo) {
+        lastDemo.lock_phones_required = res.lock_phones_required;
+        if (typeof res.locked === 'boolean') lastDemo.locked = res.locked;
+        refreshLockNeed(lastDemo);
+      }
+    }).catch(function() {});
+  });
 })();
 function showCalib(demo) {
   const tag = document.getElementById('calib-tag');

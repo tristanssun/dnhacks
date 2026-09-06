@@ -206,6 +206,8 @@ class CollabSync {
         var showTag: Bool
         var mustWaitForLock: Bool
         var tagId: Int
+        var lockPhonesRequired: Int
+        var calibratedCount: Int
         var error: String
     }
 
@@ -215,6 +217,7 @@ class CollabSync {
         var showTag: Bool
         var tagId: Int
         var calibratedCount: Int
+        var lockPhonesRequired: Int
         var thisPhoneLocked: Bool
         var globalNodes: Int
     }
@@ -296,6 +299,8 @@ class CollabSync {
             showTag: false,
             mustWaitForLock: false,
             tagId: DemoTag.id,
+            lockPhonesRequired: 1,
+            calibratedCount: 0,
             error: message
         )
     }
@@ -380,6 +385,8 @@ class CollabSync {
             showTag: (obj["show_tag"] as? Bool) ?? !locked,
             mustWaitForLock: (obj["must_wait_for_lock"] as? Bool) ?? !locked,
             tagId: jsonInt(obj, "tag_id") ?? DemoTag.id,
+            lockPhonesRequired: jsonInt(obj, "lock_phones_required") ?? 1,
+            calibratedCount: jsonInt(obj, "calibrated_count") ?? 0,
             error: ""
         )
         NSLog("CollabSync: join url=%@ mode=%@ active=%d nodes=%d locked=%d mustWait=%d",
@@ -469,6 +476,7 @@ class CollabSync {
             showTag: (obj["show_tag"] as? Bool) ?? !locked,
             tagId: jsonInt(obj, "tag_id") ?? DemoTag.id,
             calibratedCount: jsonInt(obj, "calibrated_count") ?? 0,
+            lockPhonesRequired: jsonInt(obj, "lock_phones_required") ?? 1,
             thisPhoneLocked: thisPhone,
             globalNodes: jsonInt(obj, "global_nodes") ?? 0
         )
@@ -513,6 +521,7 @@ class CollabSync {
             showTag: (obj["show_tag"] as? Bool) ?? !locked,
             tagId: jsonInt(obj, "tag_id") ?? pose.tagId,
             calibratedCount: jsonInt(obj, "calibrated_count") ?? 0,
+            lockPhonesRequired: jsonInt(obj, "lock_phones_required") ?? 1,
             thisPhoneLocked: true,
             globalNodes: 0
         )

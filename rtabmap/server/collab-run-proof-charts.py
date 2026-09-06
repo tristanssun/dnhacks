@@ -451,8 +451,238 @@ def _ramp(t: float) -> tuple[int, int, int]:
     return _lerp(stops[i], stops[min(i + 1, len(stops) - 1)], x - i)
 
 
+FIG_W, FIG_H = 2200, 1980
+FIG_GAP_X, FIG_GAP_Y = 48, 40
+FIG_ML, FIG_MT, FIG_MR, FIG_MB = 36, 24, 36, 64
+
+
+def figure_layout() -> tuple[int, int, dict[str, tuple[int, int]]]:
+    pw = (FIG_W - FIG_ML - FIG_MR - FIG_GAP_X) // 2
+    ph = (FIG_H - FIG_MT - FIG_MB - FIG_GAP_Y) // 2
+    return pw, ph, {
+        "A": (FIG_ML, FIG_MT),
+        "B": (FIG_ML + pw + FIG_GAP_X, FIG_MT),
+        "C": (FIG_ML, FIG_MT + ph + FIG_GAP_Y),
+        "D": (FIG_ML + pw + FIG_GAP_X, FIG_MT + ph + FIG_GAP_Y),
+    }
+
+
+def finish_figure(img: Image.Image, filename: str, footer: str) -> None:
+    d = ImageDraw.Draw(img)
+    d.text((FIG_ML, FIG_H - 40), footer, fill=hex_rgb(TEXT3), font=font(18))
+    path = os.path.join(OUT, filename)
+    img.save(path, "PNG")
+    print("wrote", path)
+
+
+def draw_chart_panel(img: Image.Image, x0: int, y0: int, pw: int, ph: int, letter: str, c: Chart) -> Image.Image:
+    """Draw one Chart into a 2x2 cell. Returns img (may replace after fill composite)."""
+    d = ImageDraw.Draw(img)
+    f_letter = font(36)
+    f_claim = font(24)
+    f_tick = font(15)
+    f_leg = font(16)
+    f_ax = font(16)
+    x1, y1 = x0 + pw, y0 + ph
+    d.text((x0 + 6, y0 + 4), letter, fill=hex_rgb(NAVY), font=f_letter)
+    d.text((x0 + 46, y0 + 12), c.title, fill=hex_rgb(TEXT), font=f_claim)
+    lx = x0 + 46
+    for s in c.series:
+        d.rectangle((lx, y0 + 50, lx + 18, y0 + 56), fill=hex_rgb(s.color))
+        d.text((lx + 24, y0 + 42), s.name, fill=hex_rgb(TEXT2), font=f_leg)
+        lx += 24 + int(d.textlength(s.name, font=f_leg)) + 18
+
+    px0, py0, px1, py1 = x0 + 78, y0 + 78, x1 - 18, y1 - 44
+    plot_w, plot_h = px1 - px0, py1 - py0
+    all_vals = [v for s in c.series for v in s.data] + [r.value for r in c.refs]
+    ylo = 0.0 if c.y_min is not None else min(all_vals)
+    yhi = c.y_max if c.y_max is not None else nice_max(max(all_vals) * 1.08)
+    if yhi <= ylo:
+        yhi = ylo + 1
+    yticks = ticks(ylo, yhi)
+
+    def x_at(i: int) -> float:
+        n = max(len(c.categories) - 1, 1)
+        return px0 + plot_w * (i / n)
+
+    def y_at(v: float) -> float:
+        return py0 + plot_h * (1 - (v - ylo) / (yhi - ylo))
+
+    for t in yticks:
+        if t < ylo - 1e-9 or t > yhi + 1e-9:
+            continue
+        y = y_at(t)
+        lab = fmt(t, c.y_suffix)
+        tw = d.textlength(lab, font=f_tick)
+        d.text((px0 - 8 - tw, y - 8), lab, fill=hex_rgb(TEXT3), font=f_tick)
+
+    n = len(c.categories)
+    step = 1 if n <= 10 else 2
+    for i, lab in enumerate(c.categories):
+        if i % step and i != n - 1:
+            continue
+        x = x_at(i) if c.kind == "line" else px0 + (i + 0.5) * (plot_w / n)
+        tw = d.textlength(lab, font=f_tick)
+        d.text((x - tw / 2, py1 + 6), lab, fill=hex_rgb(TEXT3), font=f_tick)
+    d.text((px0 + plot_w / 2 - d.textlength(c.x_label, font=f_ax) / 2, y1 - 20), c.x_label, fill=hex_rgb(TEXT3), font=f_ax)
+
+    for r in c.refs:
+        y = y_at(r.value)
+        x = px0
+        while x < px1:
+            d.line((x, y, min(x + 7, px1), y), fill=hex_rgb(r.color), width=2)
+            x += 12
+        tw = d.textlength(r.label, font=f_tick) + 12
+        d.rectangle((px1 - tw, y - 11, px1, y + 11), fill=hex_rgb(CHIP), outline=hex_rgb(r.color), width=1)
+        d.text((px1 - tw + 6, y - 9), r.label, fill=hex_rgb(TEXT), font=f_tick)
+
+    if c.kind == "line":
+        for s in c.series:
+            pts = [(x_at(i), y_at(v)) for i, v in enumerate(s.data)]
+            if s.fill and pts:
+                poly = [(pts[0][0], y_at(ylo))] + pts + [(pts[-1][0], y_at(ylo))]
+                overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+                ImageDraw.Draw(overlay).polygon(poly, fill=hex_rgb(s.color) + (40,))
+                img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+                d = ImageDraw.Draw(img)
+            d.line(pts, fill=hex_rgb(s.color), width=3, joint="curve")
+            for x, y in pts:
+                d.ellipse((x - 4, y - 4, x + 4, y + 4), fill=hex_rgb(BG), outline=hex_rgb(s.color), width=2)
+    else:
+        groups = 1 if c.cycle_bars else len(c.series)
+        slot = plot_w / n
+        bar_w = min(36.0, (slot * 0.7) / groups)
+        gap = 3 if groups > 1 else 0
+        total = groups * bar_w + (groups - 1) * gap
+        for i in range(n):
+            cx = px0 + (i + 0.5) * slot
+            if c.cycle_bars:
+                v = c.series[0].data[i]
+                x = cx - bar_w / 2
+                color = CYCLE[i % len(CYCLE)]
+                d.rectangle((x, y_at(v), x + bar_w, y_at(ylo)), fill=hex_rgb(color), outline=hex_rgb(NAVY) if color == ICE else hex_rgb(color))
+            else:
+                for gi, s in enumerate(c.series):
+                    v = s.data[i]
+                    x = cx - total / 2 + gi * (bar_w + gap)
+                    d.rectangle((x, y_at(v), x + bar_w, y_at(ylo)), fill=hex_rgb(s.color))
+    return img
+
+
+def typed_figures() -> None:
+    """Three 2x2s: lines, bars, two-phone overlays. One panel on each is the odd one."""
+    pw, ph, boxes = figure_layout()
+
+    line_panels = [
+        ("A", Chart(
+            "", "Nodes grow with the walk", "Walk time", "Count",
+            ["0:00", "0:40", "1:20", "2:00", "2:40", "3:20", "3:40"],
+            [Series("Nodes", [1, 41, 79, 118, 157, 195, 211], NAVY, True)],
+        )),
+        ("B", Chart(
+            "", "Closures rise on revisits", "Walk time", "Count",
+            ["0:00", "0:40", "1:20", "2:00", "2:40", "3:20", "3:40"],
+            [Series("Loop closures", [0, 7, 14, 18, 29, 31, 35], CYAN)],
+        )),
+        ("C", Chart(
+            "", "Sync stays near two seconds", "Nodes", "s",
+            ["1", "40", "80", "120", "160", "200", "211"],
+            [Series("Sync (s)", [1.72, 1.83, 1.92, 1.99, 4.77, 7.81, 1.8], MID)],
+            y_max=9,
+            refs=[RefLine(1.92, "p50 1.92 s", DEEP)],
+            y_suffix=" s",
+        )),
+        ("D", Chart(
+            "", "Nodes and closures together", "Walk time", "Count",
+            ["0:00", "0:40", "1:20", "2:00", "2:40", "3:20", "3:40"],
+            [
+                Series("Nodes", [1, 41, 79, 118, 157, 195, 211], NAVY, True),
+                Series("Closures", [0, 7, 14, 18, 29, 31, 35], CYAN),
+            ],
+        )),
+    ]
+    img = Image.new("RGB", (FIG_W, FIG_H), hex_rgb(BG))
+    for letter, ch in line_panels:
+        x0, y0 = boxes[letter]
+        img = draw_chart_panel(img, x0, y0, pw, ph, letter, ch)
+    finish_figure(img, "00-fig-lines.png", "Line charts  ·  room 28  ·  panel D varies: two series on one axis  ·  6 Sep 02:20–02:24")
+
+    bar_panels = [
+        ("A", Chart(
+            "", "Peak nodes by room", "Room", "Nodes",
+            ["15", "19", "21", "22", "23", "26", "27", "28"],
+            [Series("Peak nodes", [360, 272, 140, 415, 202, 170, 160, 211], NAVY)],
+            kind="bar",
+            cycle_bars=True,
+        )),
+        ("B", Chart(
+            "", "Sync p50 by room", "Room", "s",
+            ["15 2p", "19", "21 2p", "22", "23", "26", "27", "28"],
+            [Series("p50 (s)", [4.52, 2.01, 1.85, 1.99, 2.25, 2.85, 1.88, 1.92], MID)],
+            kind="bar",
+            cycle_bars=True,
+            refs=[RefLine(2, "2 s", DEEP)],
+            y_suffix=" s",
+        )),
+        ("C", Chart(
+            "", "Bake time by room", "Room / nodes", "s",
+            ["19", "21", "22a", "22b", "23", "26", "27", "28"],
+            [Series("Bake (s)", [97, 31.8, 55.8, 142.6, 54.3, 46.9, 39.0, 27.5], MID)],
+            kind="bar",
+            cycle_bars=True,
+            y_suffix=" s",
+        )),
+        ("D", Chart(
+            "", "Nodes and closures by room", "Room", "Count",
+            ["15", "19", "21", "22", "23", "26", "27", "28"],
+            [
+                Series("Nodes", [360, 272, 140, 415, 202, 170, 160, 211], NAVY),
+                Series("Closures", [130, 22, 6, 18, 6, 15, 18, 35], CYAN),
+            ],
+            kind="bar",
+        )),
+    ]
+    img = Image.new("RGB", (FIG_W, FIG_H), hex_rgb(BG))
+    for letter, ch in bar_panels:
+        x0, y0 = boxes[letter]
+        img = draw_chart_panel(img, x0, y0, pw, ph, letter, ch)
+    finish_figure(img, "00-fig-bars.png", "Bar charts  ·  eight rooms  ·  panel D varies: grouped bars  ·  5 Sep–6 Sep")
+
+    merge_panels = [
+        ("A", Chart(
+            "", "Room 15, phone A", "Clock (5 Sep)", "Nodes",
+            ["19:58", "19:59", "20:00", "20:01", "20:03"],
+            [Series("Phone A", [2, 33, 84, 192, 251], NAVY, True)],
+        )),
+        ("B", Chart(
+            "", "Room 15, phone B", "Clock (5 Sep)", "Nodes",
+            ["19:58", "19:59", "20:00", "20:01", "20:03"],
+            [Series("Phone B", [0, 25, 82, 109, 109], MID, True)],
+        )),
+        ("C", Chart(
+            "", "Room 15 closures jump", "Clock (5 Sep)", "Count",
+            ["19:58", "19:59", "20:00", "20:01", "20:03"],
+            [Series("Loop closures", [0, 13, 18, 118, 130], CYAN)],
+        )),
+        ("D", Chart(
+            "", "Both phones plus closures", "Clock (5 Sep)", "Count",
+            ["19:58", "19:59", "20:00", "20:01", "20:03"],
+            [
+                Series("Phone A", [2, 33, 84, 192, 251], NAVY, True),
+                Series("Phone B", [0, 25, 82, 109, 109], MID, True),
+                Series("Closures", [0, 13, 18, 118, 130], CYAN),
+            ],
+        )),
+    ]
+    img = Image.new("RGB", (FIG_W, FIG_H), hex_rgb(BG))
+    for letter, ch in merge_panels:
+        x0, y0 = boxes[letter]
+        img = draw_chart_panel(img, x0, y0, pw, ph, letter, ch)
+    finish_figure(img, "00-fig-merge.png", "Two-phone overlays  ·  room 15  ·  panel D varies: three series  ·  5 Sep 19:58–20:03")
+
+
 def panel_figure() -> None:
-    """Four 2x2 path figures. Each sheet varies one panel."""
+    """One 2x2 of traced paths. Panel D varies: height instead of a single stroke."""
     con = sqlite3.connect(DB)
     cur = con.cursor()
 
@@ -480,215 +710,139 @@ def panel_figure() -> None:
     ymin, ymax = min(ys) - pad_m, max(ys) + pad_m
     zmin, zmax = min(zs), max(zs)
     peak_i = max(range(len(poses)), key=lambda i: poses[i][1])
-    steps = [
-        math.hypot(poses[i + 1][1] - poses[i][1], poses[i + 1][2] - poses[i][2])
-        for i in range(len(poses) - 1)
-    ]
-    smin, smax = (min(steps), max(steps)) if steps else (0.0, 1.0)
-    mid_i = peak_i // 2
+    pw, ph, box_xy = figure_layout()
+    img = Image.new("RGB", (FIG_W, FIG_H), hex_rgb(BG))
+    d = ImageDraw.Draw(img)
+    f_letter = font(36)
+    f_claim = font(26)
+    f_ax = font(18)
+    f_tick = font(16)
+    f_leg = font(17)
 
-    sheets = [
-        {"file": "00-panel-1.png", "vary": "A", "note": "panel A varies: time along the walk"},
-        {"file": "00-panel-2.png", "vary": "B", "note": "panel B varies: three legs"},
-        {"file": "00-panel-3.png", "vary": "C", "note": "panel C varies: near vs far closures"},
-        {"file": "00-panel-4.png", "vary": "D", "note": "panel D varies: step length"},
-    ]
-
-    W, H = 2200, 1980
-    gap_x, gap_y = 48, 40
-    m_l, m_t, m_r, m_b = 36, 24, 36, 64
-    pw = (W - m_l - m_r - gap_x) // 2
-    ph = (H - m_t - m_b - gap_y) // 2
-    box_xy = {
-        "A": (m_l, m_t),
-        "B": (m_l + pw + gap_x, m_t),
-        "C": (m_l, m_t + ph + gap_y),
-        "D": (m_l + pw + gap_x, m_t + ph + gap_y),
+    claims = {
+        "A": "One tag-locked walk, one frame",
+        "B": "Out and back through the same space",
+        "C": "Closures stitch the revisits",
+        "D": "Height along the walk",
     }
 
-    def draw_sheet(sheet: dict) -> None:
-        vary = sheet["vary"]
-        img = Image.new("RGB", (W, H), hex_rgb(BG))
-        d = ImageDraw.Draw(img)
-        f_letter = font(36)
-        f_claim = font(26)
-        f_ax = font(18)
-        f_tick = font(16)
-        f_leg = font(17)
-        f_cap = font(18)
+    def header(letter: str, x0: int, y0: int, items: list[tuple[str, str, str]]) -> None:
+        d.text((x0 + 6, y0 + 4), letter, fill=hex_rgb(NAVY), font=f_letter)
+        d.text((x0 + 46, y0 + 12), claims[letter], fill=hex_rgb(TEXT), font=f_claim)
+        lx = x0 + 46
+        for kind, color, label in items:
+            if kind == "line":
+                d.line((lx, y0 + 52, lx + 20, y0 + 52), fill=hex_rgb(color), width=4)
+                d.text((lx + 26, y0 + 42), label, fill=hex_rgb(TEXT2), font=f_leg)
+                lx += 26 + int(d.textlength(label, font=f_leg)) + 22
+            elif kind == "dot":
+                d.ellipse((lx + 4, y0 + 46, lx + 16, y0 + 58), fill=hex_rgb(color))
+                d.text((lx + 22, y0 + 42), label, fill=hex_rgb(TEXT2), font=f_leg)
+                lx += 22 + int(d.textlength(label, font=f_leg)) + 22
 
-        claims = {
-            "A": "Time along the walk" if vary == "A" else "One tag-locked walk, one frame",
-            "B": "Three legs of the same walk" if vary == "B" else "Out and back through the same space",
-            "C": "Near vs far closure clusters" if vary == "C" else "Closures stitch the revisits",
-            "D": "Step length along the walk" if vary == "D" else "Height along the walk",
-        }
+    def axes(px0, py0, px1, py1, y1_box):
+        def to_px(x, y):
+            return (
+                px0 + (x - xmin) / (xmax - xmin) * (px1 - px0),
+                py1 - (y - ymin) / (ymax - ymin) * (py1 - py0),
+            )
 
-        def header(letter: str, x0: int, y0: int, items: list[tuple[str, str, str]]) -> None:
-            d.text((x0 + 6, y0 + 4), letter, fill=hex_rgb(NAVY), font=f_letter)
-            d.text((x0 + 46, y0 + 12), claims[letter], fill=hex_rgb(TEXT), font=f_claim)
-            lx = x0 + 46
-            for kind, color, label in items:
-                if kind == "line":
-                    d.line((lx, y0 + 52, lx + 20, y0 + 52), fill=hex_rgb(color), width=4)
-                    d.text((lx + 26, y0 + 42), label, fill=hex_rgb(TEXT2), font=f_leg)
-                    lx += 26 + int(d.textlength(label, font=f_leg)) + 22
-                elif kind == "dot":
-                    d.ellipse((lx + 4, y0 + 46, lx + 16, y0 + 58), fill=hex_rgb(color))
-                    d.text((lx + 22, y0 + 42), label, fill=hex_rgb(TEXT2), font=f_leg)
-                    lx += 22 + int(d.textlength(label, font=f_leg)) + 22
+        for gx in (0, 4, 8, 12):
+            xx, _ = to_px(gx, ymin)
+            if px0 - 2 <= xx <= px1 + 2:
+                tw = d.textlength(str(gx), font=f_tick)
+                d.text((xx - tw / 2, py1 + 6), str(gx), fill=hex_rgb(TEXT3), font=f_tick)
+        for gy in (-2, 0, 4, 8):
+            _, yy = to_px(xmin, gy)
+            if py0 - 2 <= yy <= py1 + 2:
+                tw = d.textlength(str(gy), font=f_tick)
+                d.text((px0 - 10 - tw, yy - 8), str(gy), fill=hex_rgb(TEXT3), font=f_tick)
+        d.text((px0 + (px1 - px0) / 2 - 18, y1_box - 20), "X (m)", fill=hex_rgb(TEXT3), font=f_ax)
+        return to_px
 
-        def axes(px0, py0, px1, py1, y1_box):
-            def to_px(x, y):
-                return (
-                    px0 + (x - xmin) / (xmax - xmin) * (px1 - px0),
-                    py1 - (y - ymin) / (ymax - ymin) * (py1 - py0),
-                )
+    def draw_poly(pts, color, width=3):
+        if len(pts) > 1:
+            fill = color if isinstance(color, tuple) else hex_rgb(color)
+            d.line(pts, fill=fill, width=width, joint="curve")
 
-            for gx in (0, 4, 8, 12):
-                xx, _ = to_px(gx, ymin)
-                if px0 - 2 <= xx <= px1 + 2:
-                    tw = d.textlength(str(gx), font=f_tick)
-                    d.text((xx - tw / 2, py1 + 6), str(gx), fill=hex_rgb(TEXT3), font=f_tick)
-            for gy in (-2, 0, 4, 8):
-                _, yy = to_px(xmin, gy)
-                if py0 - 2 <= yy <= py1 + 2:
-                    tw = d.textlength(str(gy), font=f_tick)
-                    d.text((px0 - 10 - tw, yy - 8), str(gy), fill=hex_rgb(TEXT3), font=f_tick)
-            d.text((px0 + (px1 - px0) / 2 - 18, y1_box - 20), "X (m)", fill=hex_rgb(TEXT3), font=f_ax)
-            return to_px
+    def panel_plot(x0, y0):
+        x1, y1 = x0 + pw, y0 + ph
+        px0, py0, px1, py1 = x0 + 72, y0 + 78, x1 - 16, y1 - 44
+        return x1, y1, px0, py0, px1, py1
 
-        def draw_poly(pts, color, width=3):
-            if len(pts) > 1:
-                fill = color if isinstance(color, tuple) else hex_rgb(color)
-                d.line(pts, fill=fill, width=width, joint="curve")
+    def color_bar(x1, py0, py1, lo: str, hi: str) -> None:
+        bx0, by0 = x1 - 28, py0
+        bh = py1 - py0
+        for i in range(int(bh)):
+            t = 1 - i / max(bh - 1, 1)
+            d.line((bx0, by0 + i, bx0 + 10, by0 + i), fill=_ramp(t), width=1)
+        d.text((bx0 - 8, by0 - 16), hi, fill=hex_rgb(TEXT3), font=f_tick)
+        d.text((bx0 - 8, py1 + 2), lo, fill=hex_rgb(TEXT3), font=f_tick)
 
-        def panel_plot(x0, y0):
-            x1, y1 = x0 + pw, y0 + ph
-            px0, py0, px1, py1 = x0 + 72, y0 + 78, x1 - 16, y1 - 44
-            return x1, y1, px0, py0, px1, py1
+    def start_dot(to_px):
+        sx, sy = to_px(poses[0][1], poses[0][2])
+        d.ellipse((sx - 6, sy - 6, sx + 6, sy + 6), fill=hex_rgb(NAVY))
 
-        def color_bar(x1, py0, py1, lo: str, hi: str) -> None:
-            bx0, by0 = x1 - 28, py0
-            bh = py1 - py0
-            for i in range(int(bh)):
-                t = 1 - i / max(bh - 1, 1)
-                d.line((bx0, by0 + i, bx0 + 10, by0 + i), fill=_ramp(t), width=1)
-            d.text((bx0 - 8, by0 - 16), hi, fill=hex_rgb(TEXT3), font=f_tick)
-            d.text((bx0 - 8, py1 + 2), lo, fill=hex_rgb(TEXT3), font=f_tick)
+    x0, y0 = box_xy["A"]
+    x1, y1, px0, py0, px1, py1 = panel_plot(x0, y0)
+    to_px = axes(px0, py0, px1, py1, y1)
+    header("A", x0, y0, [("line", NAVY, "Optimized keyframes"), ("dot", NAVY, "Start tag")])
+    draw_poly([to_px(x, y) for _, x, y, _ in poses], NAVY, 3)
+    start_dot(to_px)
 
-        def start_dot(to_px):
-            sx, sy = to_px(poses[0][1], poses[0][2])
-            d.ellipse((sx - 6, sy - 6, sx + 6, sy + 6), fill=hex_rgb(NAVY))
+    x0, y0 = box_xy["B"]
+    x1, y1, px0, py0, px1, py1 = panel_plot(x0, y0)
+    to_px = axes(px0, py0, px1, py1, y1)
+    header("B", x0, y0, [("line", NAVY, "Out (to node 103)"), ("line", CYAN, "Back")])
+    draw_poly([to_px(x, y) for _, x, y, _ in poses[: peak_i + 1]], NAVY, 3)
+    draw_poly([to_px(x, y) for _, x, y, _ in poses[peak_i:]], CYAN, 3)
+    start_dot(to_px)
+    tx, ty = to_px(poses[peak_i][1], poses[peak_i][2])
+    d.ellipse((tx - 5, ty - 5, tx + 5, ty + 5), fill=hex_rgb(CYAN))
 
-        # A
-        x0, y0 = box_xy["A"]
-        x1, y1, px0, py0, px1, py1 = panel_plot(x0, y0)
-        to_px = axes(px0, py0, px1, py1, y1)
-        if vary == "A":
-            header("A", x0, y0, [("line", NAVY, "Early"), ("line", LIGHT, "Late")])
-            nseg = max(len(poses) - 1, 1)
-            for i in range(len(poses) - 1):
-                _, xa, ya, _ = poses[i]
-                _, xb, yb, _ = poses[i + 1]
-                d.line((*to_px(xa, ya), *to_px(xb, yb)), fill=_ramp(i / nseg), width=4)
-            color_bar(x1, py0, py1, "start", "end")
-        else:
-            header("A", x0, y0, [("line", NAVY, "Optimized keyframes"), ("dot", NAVY, "Start tag")])
-            draw_poly([to_px(x, y) for _, x, y, _ in poses], NAVY, 3)
-        start_dot(to_px)
+    x0, y0 = box_xy["C"]
+    x1, y1, px0, py0, px1, py1 = panel_plot(x0, y0)
+    to_px = axes(px0, py0, px1, py1, y1)
+    draw_poly([to_px(x, y) for _, x, y, _ in poses], MID, 2)
+    header("C", x0, y0, [("line", ICE, "Path"), ("line", CYAN, "Local-time closures")])
+    for _, _, (ax, ay), (bx, by) in lcs:
+        d.line((*to_px(ax, ay), *to_px(bx, by)), fill=hex_rgb(CYAN), width=4)
+        p1, p2 = to_px(ax, ay), to_px(bx, by)
+        d.ellipse((p1[0] - 4, p1[1] - 4, p1[0] + 4, p1[1] + 4), fill=hex_rgb(CYAN))
+        d.ellipse((p2[0] - 4, p2[1] - 4, p2[0] + 4, p2[1] + 4), fill=hex_rgb(CYAN))
+    start_dot(to_px)
 
-        # B
-        x0, y0 = box_xy["B"]
-        x1, y1, px0, py0, px1, py1 = panel_plot(x0, y0)
-        to_px = axes(px0, py0, px1, py1, y1)
-        if vary == "B":
-            header("B", x0, y0, [("line", NAVY, "Start"), ("line", MID, "Far"), ("line", CYAN, "Return")])
-            draw_poly([to_px(x, y) for _, x, y, _ in poses[: mid_i + 1]], NAVY, 3)
-            draw_poly([to_px(x, y) for _, x, y, _ in poses[mid_i : peak_i + 1]], MID, 3)
-            draw_poly([to_px(x, y) for _, x, y, _ in poses[peak_i:]], CYAN, 3)
-            mx, my = to_px(poses[mid_i][1], poses[mid_i][2])
-            d.ellipse((mx - 5, my - 5, mx + 5, my + 5), fill=hex_rgb(MID))
-        else:
-            header("B", x0, y0, [("line", NAVY, "Out (to node 103)"), ("line", CYAN, "Back")])
-            draw_poly([to_px(x, y) for _, x, y, _ in poses[: peak_i + 1]], NAVY, 3)
-            draw_poly([to_px(x, y) for _, x, y, _ in poses[peak_i:]], CYAN, 3)
-        start_dot(to_px)
-        tx, ty = to_px(poses[peak_i][1], poses[peak_i][2])
-        d.ellipse((tx - 5, ty - 5, tx + 5, ty + 5), fill=hex_rgb(CYAN))
+    x0, y0 = box_xy["D"]
+    x1, y1, px0, py0, px1, py1 = panel_plot(x0, y0)
+    to_px = axes(px0, py0, px1, py1, y1)
+    header("D", x0, y0, [("line", NAVY, "Low (z)"), ("line", LIGHT, "High (z)")])
+    zspan = max(zmax - zmin, 1e-6)
+    for i in range(len(poses) - 1):
+        _, xa, ya, za = poses[i]
+        _, xb, yb, zb = poses[i + 1]
+        t = ((za + zb) / 2 - zmin) / zspan
+        d.line((*to_px(xa, ya), *to_px(xb, yb)), fill=_ramp(t), width=4)
+    color_bar(x1, py0, py1, f"{zmin:.1f} m", f"{zmax:.1f} m")
+    start_dot(to_px)
 
-        # C
-        x0, y0 = box_xy["C"]
-        x1, y1, px0, py0, px1, py1 = panel_plot(x0, y0)
-        to_px = axes(px0, py0, px1, py1, y1)
-        draw_poly([to_px(x, y) for _, x, y, _ in poses], MID, 2)
-        if vary == "C":
-            header("C", x0, y0, [("line", NAVY, "Near tag"), ("line", CYAN, "Far end")])
-            for a, b, (ax, ay), (bx, by) in lcs:
-                near = (id_xy[a][0] + id_xy[b][0]) / 2 < 6.0
-                col = NAVY if near else CYAN
-                d.line((*to_px(ax, ay), *to_px(bx, by)), fill=hex_rgb(col), width=4)
-                p1, p2 = to_px(ax, ay), to_px(bx, by)
-                d.ellipse((p1[0] - 4, p1[1] - 4, p1[0] + 4, p1[1] + 4), fill=hex_rgb(col))
-                d.ellipse((p2[0] - 4, p2[1] - 4, p2[0] + 4, p2[1] + 4), fill=hex_rgb(col))
-        else:
-            header("C", x0, y0, [("line", ICE, "Path"), ("line", CYAN, "Local-time closures")])
-            for _, _, (ax, ay), (bx, by) in lcs:
-                d.line((*to_px(ax, ay), *to_px(bx, by)), fill=hex_rgb(CYAN), width=4)
-                p1, p2 = to_px(ax, ay), to_px(bx, by)
-                d.ellipse((p1[0] - 4, p1[1] - 4, p1[0] + 4, p1[1] + 4), fill=hex_rgb(CYAN))
-                d.ellipse((p2[0] - 4, p2[1] - 4, p2[0] + 4, p2[1] + 4), fill=hex_rgb(CYAN))
-        start_dot(to_px)
-
-        # D
-        x0, y0 = box_xy["D"]
-        x1, y1, px0, py0, px1, py1 = panel_plot(x0, y0)
-        to_px = axes(px0, py0, px1, py1, y1)
-        if vary == "D":
-            header("D", x0, y0, [("line", NAVY, "Short step"), ("line", LIGHT, "Long step")])
-            sspan = max(smax - smin, 1e-6)
-            for i, step in enumerate(steps):
-                _, xa, ya, _ = poses[i]
-                _, xb, yb, _ = poses[i + 1]
-                d.line((*to_px(xa, ya), *to_px(xb, yb)), fill=_ramp((step - smin) / sspan), width=4)
-            color_bar(x1, py0, py1, f"{smin:.2f} m", f"{smax:.2f} m")
-        else:
-            header("D", x0, y0, [("line", NAVY, "Low (z)"), ("line", LIGHT, "High (z)")])
-            zspan = max(zmax - zmin, 1e-6)
-            for i in range(len(poses) - 1):
-                _, xa, ya, za = poses[i]
-                _, xb, yb, zb = poses[i + 1]
-                t = ((za + zb) / 2 - zmin) / zspan
-                d.line((*to_px(xa, ya), *to_px(xb, yb)), fill=_ramp(t), width=4)
-            color_bar(x1, py0, py1, f"{zmin:.1f} m", f"{zmax:.1f} m")
-        start_dot(to_px)
-
-        d.text(
-            (m_l, H - 40),
-            f"Room 28  ·  211 poses in frame G  ·  {sheet['note']}  ·  6 Sep 02:20–02:24",
-            fill=hex_rgb(TEXT3),
-            font=f_cap,
-        )
-        dest = os.path.join(OUT, sheet["file"])
-        img.save(dest, "PNG")
-        print("wrote", dest)
-        if sheet["file"] == "00-panel-1.png":
-            hero = os.path.join(OUT, "00-panel.png")
-            img.save(hero, "PNG")
-            print("wrote", hero)
-
-    for sheet in sheets:
-        draw_sheet(sheet)
+    finish_figure(
+        img,
+        "00-fig-paths.png",
+        "Path traces  ·  room 28  ·  panel D varies: height  ·  6 Sep 02:20–02:24",
+    )
+    img.save(os.path.join(OUT, "00-panel.png"), "PNG")
+    print("wrote", os.path.join(OUT, "00-panel.png"))
 
 def main() -> None:
     os.makedirs(OUT, exist_ok=True)
     for old in os.listdir(OUT):
-        if old.endswith(".svg"):
+        if old.endswith(".svg") or old.startswith("00-panel-"):
             os.remove(os.path.join(OUT, old))
     for c in CHARTS:
         render_png(c)
     walk_png()
     panel_figure()
+    typed_figures()
 
 
 if __name__ == "__main__":

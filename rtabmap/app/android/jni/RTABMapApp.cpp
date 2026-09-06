@@ -65,6 +65,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <rtabmap/core/GPS.h>
 #include <rtabmap/core/EnvSensor.h>
 #include <set>
+#include <vector>
 #include <rtabmap/core/GainCompensator.h>
 #include <rtabmap/core/DBDriver.h>
 #include <rtabmap/core/Signature.h>
@@ -5330,9 +5331,82 @@ int RTABMapApp::importRemoteDeltaDb(const std::string & path, const rtabmap::Tra
 		LOGI("importRemoteDeltaDb: no server T, using identity (shared global frame)");
 	}
 
-	int added = 0;
+	// Build meshes before taking meshesMutex_. Holding that lock while
+	// organizedFastMesh runs freezes the camera/render thread on the phone
+	// that is pulling the other camera's nodes.
+	struct PendingRemote
+	{
+		int sid;
+		rtabmap::Transform pose;
+		rtabmap::Mesh mesh;
+		bool haveMesh;
+		std::vector<rtabmap::Link> links;
+	};
+	std::vector<PendingRemote> pending;
+	pending.reserve(signatures.size());
 	int skippedEmpty = 0;
 	int firstSid = 0;
+	for(std::list<rtabmap::Signature *>::iterator it = signatures.begin(); it != signatures.end(); ++it)
+	{
+		rtabmap::Signature * sig = *it;
+		if(!sig)
+		{
+			continue;
+		}
+		int gid = sig->id();
+		int sid = remoteSceneId(gid);
+		rtabmap::Transform pose;
+		std::map<int, rtabmap::Transform>::const_iterator pit = optPoses.find(gid);
+		if(pit != optPoses.end() && !pit->second.isNull())
+		{
+			pose = T * pit->second;
+		}
+		else if(!sig->getPose().isNull())
+		{
+			pose = T * sig->getPose();
+		}
+		if(pose.isNull())
+		{
+			delete sig;
+			continue;
+		}
+		if(firstSid == 0)
+		{
+			firstSid = sid;
+		}
+
+		PendingRemote item;
+		item.sid = sid;
+		item.pose = pose;
+		item.haveMesh = false;
+		const std::multimap<int, rtabmap::Link> & links = sig->getLinks();
+		for(std::multimap<int, rtabmap::Link>::const_iterator lt = links.begin(); lt != links.end(); ++lt)
+		{
+			rtabmap::Link link = lt->second;
+			if(link.from() <= 0 || link.to() <= 0)
+			{
+				continue;
+			}
+			link.setFrom(remoteSceneId(link.from()));
+			link.setTo(remoteSceneId(link.to()));
+			item.links.push_back(link);
+		}
+
+		rtabmap::SensorData data = sig->sensorData();
+		if(createRemoteMeshFromData(data, item.mesh))
+		{
+			item.mesh.pose = pose;
+			item.haveMesh = true;
+		}
+		else
+		{
+			++skippedEmpty;
+		}
+		pending.push_back(item);
+		delete sig;
+	}
+
+	int added = 0;
 	{
 		boost::mutex::scoped_lock lock(meshesMutex_);
 		remoteLocalFromGlobal_ = T;
@@ -5358,70 +5432,30 @@ int RTABMapApp::importRemoteDeltaDb(const std::string & path, const rtabmap::Tra
 			}
 		}
 
-		for(std::list<rtabmap::Signature *>::iterator it = signatures.begin(); it != signatures.end(); ++it)
+		for(std::vector<PendingRemote>::iterator it = pending.begin(); it != pending.end(); ++it)
 		{
-			rtabmap::Signature * sig = *it;
-			if(!sig)
+			remotePoses_[it->sid] = it->pose;
+			for(std::vector<rtabmap::Link>::const_iterator lt = it->links.begin(); lt != it->links.end(); ++lt)
 			{
-				continue;
+				remoteLinks_.insert(std::make_pair(lt->from(), *lt));
 			}
-			int gid = sig->id();
-			int sid = remoteSceneId(gid);
-			rtabmap::Transform pose;
-			std::map<int, rtabmap::Transform>::const_iterator pit = optPoses.find(gid);
-			if(pit != optPoses.end() && !pit->second.isNull())
+			if(it->haveMesh)
 			{
-				pose = T * pit->second;
-			}
-			else if(!sig->getPose().isNull())
-			{
-				pose = T * sig->getPose();
-			}
-			if(pose.isNull())
-			{
-				delete sig;
-				continue;
-			}
-			remotePoses_[sid] = pose;
-			if(firstSid == 0)
-			{
-				firstSid = sid;
-			}
-
-			const std::multimap<int, rtabmap::Link> & links = sig->getLinks();
-			for(std::multimap<int, rtabmap::Link>::const_iterator lt = links.begin(); lt != links.end(); ++lt)
-			{
-				rtabmap::Link link = lt->second;
-				if(link.from() <= 0 || link.to() <= 0)
+				if(remoteMeshes_.find(it->sid) == remoteMeshes_.end())
 				{
-					continue;
-				}
-				link.setFrom(remoteSceneId(link.from()));
-				link.setTo(remoteSceneId(link.to()));
-				remoteLinks_.insert(std::make_pair(link.from(), link));
-			}
-
-			if(remoteMeshes_.find(sid) == remoteMeshes_.end())
-			{
-				rtabmap::SensorData data = sig->sensorData();
-				rtabmap::Mesh mesh;
-				if(createRemoteMeshFromData(data, mesh))
-				{
-					mesh.pose = pose;
-					remoteMeshes_.insert(std::make_pair(sid, mesh));
-					++added;
+					remoteMeshes_.insert(std::make_pair(it->sid, it->mesh));
 				}
 				else
 				{
-					++skippedEmpty;
+					remoteMeshes_[it->sid].pose = it->pose;
 				}
-			}
-			else
-			{
-				remoteMeshes_[sid].pose = pose;
 				++added;
 			}
-			delete sig;
+			else if(remoteMeshes_.find(it->sid) != remoteMeshes_.end())
+			{
+				remoteMeshes_[it->sid].pose = it->pose;
+				++added;
+			}
 		}
 
 		remoteDirty_ = true;
