@@ -198,18 +198,21 @@ struct MapView: View {
         for track: TacticalMapModel.Track,
         hasFacing: Bool
     ) -> (marker: Color, label: Color) {
+        // A dropped UWB link outranks every other marker state, including a
+        // missing heading: it is the one thing on this map that is a fault
+        // rather than a degree of confidence, and it has to survive whatever
+        // else is also wrong with the track.
+        if track.source.hasLostUWB {
+            return (Theme.alarm.opacity(hasFacing ? 1 : 0.55), Theme.alarm)
+        }
         if track.hasBearing, !hasFacing {
             return (Theme.inkFaint, Theme.ink)
         }
         switch track.source {
-        case .live:
-            return (Theme.ink, Theme.ink)
-        case .aging:
-            return (Theme.inkDim, Theme.ink)
         case .relayed:
             return (Theme.frost, Theme.frost)
-        case .inferred, .none:
-            return (Theme.inkFaint, Theme.ink)
+        case .live, .aging, .inferred, .none:
+            return (Theme.ink, Theme.ink)
         }
     }
 
@@ -311,13 +314,17 @@ struct MapView: View {
                     width: radius * 2,
                     height: radius * 2
                 ))
+                // A peer can be both bearingless and off UWB at once, which is
+                // the common way a link actually dies. The ring stays faint for
+                // the ordinary "distance only" case and goes red for the fault.
+                let ringColor = marker.track.source.hasLostUWB ? Theme.alarm.opacity(0.55) : Theme.inkFaint
                 context.stroke(
                     ring,
-                    with: .color(Theme.inkFaint.opacity(marker.opacity)),
+                    with: .color(ringColor.opacity(marker.opacity)),
                     style: StrokeStyle(lineWidth: 1, dash: [3, 4])
                 )
                 let dot = Path(ellipseIn: CGRect(x: marker.point.x - 1.5, y: marker.point.y - 1.5, width: 3, height: 3))
-                context.fill(dot, with: .color(Theme.inkFaint.opacity(marker.opacity)))
+                context.fill(dot, with: .color(ringColor.opacity(marker.opacity)))
             }
         }
 
@@ -345,10 +352,11 @@ struct MapView: View {
     }
 
     private func distanceText(for marker: Marker) -> Text {
-        Text(distanceLabel(for: marker.track))
+        let color = marker.track.source.hasLostUWB ? Theme.alarm : Theme.inkDim
+        return Text(distanceLabel(for: marker.track))
             .font(Theme.mono(10))
             .monospacedDigit()
-            .foregroundStyle(Theme.inkDim.opacity(marker.opacity))
+            .foregroundStyle(color.opacity(marker.opacity))
     }
 
     private func distanceLabel(for track: TacticalMapModel.Track) -> String {
@@ -357,11 +365,11 @@ struct MapView: View {
             ? String(format: "%.1f FT", Double(feet))
             : String(format: "%.0f FT", Double(feet))
         switch track.source {
-        case .aging, .inferred:
+        case .aging, .inferred, .none:
             return "~" + value
         case .relayed:
             return "!" + value
-        case .live, .none:
+        case .live:
             return value
         }
     }

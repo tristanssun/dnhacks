@@ -25,6 +25,22 @@ struct PeerSnapshot: Identifiable {
     }
 }
 
+extension PeerSnapshot.Source {
+    /// True once our own UWB ranging to this peer has dropped out — either the
+    /// last sample has aged past `RangeTrack.liveWindow`, or there was never a
+    /// measurement behind the distance at all.
+    ///
+    /// `relayed` is deliberately excluded. That is another device's *live* UWB
+    /// reaching us second-hand, which is the normal and expected state for a
+    /// peer beyond our own range, not a fault worth alarming about.
+    var hasLostUWB: Bool {
+        switch self {
+        case .live, .relayed: return false
+        case .aging, .inferred, .none: return true
+        }
+    }
+}
+
 extension PeerSnapshot {
     init(peer: PeerManager.Peer, localHeading: Float, at date: Date) {
         let display = peer.displayDistance(at: date)

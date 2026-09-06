@@ -323,15 +323,16 @@ private struct RosterRow: View {
     @ViewBuilder
     private var rosterDistance: some View {
         if let track {
+            let lostUWB = track.source.hasLostUWB
             HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text(distanceNumber(track.distance))
+                Text(lostUWB ? "~" + distanceNumber(track.distance) : distanceNumber(track.distance))
                     .font(Theme.mono(20, .medium))
                     .monospacedDigit()
                 Text("FT")
                     .font(Theme.mono(10))
                     .kerning(Theme.tracking(10))
             }
-            .foregroundStyle(track.source == .live ? Theme.ink : Theme.inkDim)
+            .foregroundStyle(lostUWB ? Theme.alarm : (track.source == .live ? Theme.ink : Theme.inkDim))
         } else {
             Text("NO RANGE")
                 .font(Theme.mono(12, .medium))
@@ -343,7 +344,7 @@ private struct RosterRow: View {
     private var statusLabel: String {
         switch track?.source ?? snapshot.source {
         case .live: return "LIVE"
-        case .aging: return "AGING"
+        case .aging: return "NO UWB"
         case .relayed: return "RELAY"
         case .inferred: return "DR"
         case .none: return "NO FIX"
@@ -353,9 +354,9 @@ private struct RosterRow: View {
     private var statusColor: Color {
         switch track?.source ?? snapshot.source {
         case .live: return Theme.ember
-        case .aging: return Theme.inkDim
+        case .aging: return Theme.alarm
         case .relayed: return Theme.frost
-        case .inferred, .none: return Theme.inkFaint
+        case .inferred, .none: return Theme.alarm.opacity(0.7)
         }
     }
 

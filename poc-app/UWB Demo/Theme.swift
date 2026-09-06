@@ -15,6 +15,11 @@ enum Theme {
     static let emberSoft = Color(red: 0x6B/255, green: 0xFF/255, blue: 0x73/255) // --sf2f-ember-soft
     // --sf2f-frost (pale blue) — secondary accent. Used ONLY for relayed (second-hand) data.
     static let frost = Color(red: 0x9F/255, green: 0xC4/255, blue: 0xD2/255)
+    // Alarm red — the deliberate exception to the four-hue palette. Reserved for
+    // exactly one condition: our own UWB ranging to a peer has dropped out. Every
+    // other degraded state is still expressed with opacity and dashes, because if
+    // red ever means "somewhat less confident" it stops meaning "this is broken".
+    static let alarm = Color(red: 0xFF/255, green: 0x45/255, blue: 0x3A/255)
 
     // Typography. Second Front: display 'Space Grotesk' → SF Pro here;
     // mono 'Space Mono','SF Mono' → SF Mono (system monospaced design).
