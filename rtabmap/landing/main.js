@@ -1,4 +1,4 @@
-import { initMap } from "./map.js?v=18";
+import { initMap } from "./map.js?v=19";
 import { initParticleText } from "./particles.js?v=5";
 
 history.scrollRestoration = "manual";

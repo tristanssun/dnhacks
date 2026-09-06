@@ -334,7 +334,10 @@ export function initMap() {
     scanMesh = new THREE.Mesh(geom, mat);
     world.add(scanMesh);
     [unit1.marker, unit2.marker, unit1.trail, unit2.trail, origin, tagPlane].forEach((obj) => {
-      obj.position.applyMatrix4(gBasis).sub(mean);
+      // Rotate the whole object into the three.js (y-up) frame, not just its
+      // position, so the unit figures stand upright instead of lying sideways.
+      obj.applyMatrix4(gBasis);
+      obj.position.sub(mean);
     });
     noteTargets.unit1.copy(unit1.marker.position);
     noteTargets.unit2.copy(unit2.marker.position);
