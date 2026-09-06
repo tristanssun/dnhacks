@@ -95,6 +95,28 @@ function zoomProgress(scroll) {
   return clamp01((scroll - start) / Math.max(end - start, 1));
 }
 
+function mapHoldScroll(scroll) {
+  if (!intoMap || !zoomStartEl) {
+    return null;
+  }
+  const start = pageTop(zoomStartEl, scroll);
+  return start + intoMap.offsetHeight * 0.88 * 0.995;
+}
+
+let mapGateOpen = false;
+
+function holdMapScroll(scroll) {
+  const hold = mapHoldScroll(scroll);
+  if (mapGateOpen || hold == null || scroll <= hold) {
+    if (zoomProgress(scroll) < 0.96) {
+      mapGateOpen = false;
+    }
+    return scroll;
+  }
+  lenis.scrollTo(hold, { immediate: true });
+  return hold;
+}
+
 const player = document.getElementById("player");
 const playerVideo = document.getElementById("player-video");
 const playerTitle = document.getElementById("player-title");
@@ -289,6 +311,7 @@ function syncZoom(scroll) {
 lenis.scrollTo(0, { immediate: true });
 
 function applyScroll(scroll) {
+  scroll = holdMapScroll(scroll);
   scrollHint?.classList.toggle("is-hidden", scroll > 8);
   syncPhone(scroll);
   syncFeature(scroll);
@@ -319,8 +342,27 @@ scrollHint?.addEventListener("click", (event) => {
 
 document.querySelector(".map-next")?.addEventListener("click", (event) => {
   event.preventDefault();
+  mapGateOpen = true;
   lenis.scrollTo("#footer");
 });
+
+window.addEventListener(
+  "wheel",
+  (event) => {
+    if (mapGateOpen || event.deltaY <= 0) {
+      return;
+    }
+    if (zoomProgress(lenis.scroll) < 0.995) {
+      return;
+    }
+    event.preventDefault();
+    const hold = mapHoldScroll(lenis.scroll);
+    if (hold != null) {
+      lenis.scrollTo(hold, { immediate: true });
+    }
+  },
+  { passive: false },
+);
 
 initParticleText(document.getElementById("name-particles"), {
   text: "MiniMap",
