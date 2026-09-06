@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="vendor/lenis.css" />
-    <link rel="stylesheet" href="styles.css?v=73" />
+    <link rel="stylesheet" href="styles.css?v=74" />
     <link rel="stylesheet" href="cmcs.css?v=4" />
     <script type="importmap">
       {
@@ -454,27 +454,22 @@
       <i class="map-pin" data-pin="floors"></i>
       <i class="map-pin" data-pin="scan"></i>
       <aside class="map-note" data-note="unit1" data-slot="tl">
-        <p class="map-note-kicker">UNIT-01</p>
         <p class="map-note-title">Live teammate</p>
         <p class="map-note-body">Pose locked to the shared mesh so command can follow the scenario.</p>
       </aside>
       <aside class="map-note" data-note="unit2" data-slot="tr">
-        <p class="map-note-kicker">UNIT-02</p>
         <p class="map-note-title">Second unit</p>
         <p class="map-note-body">Another phone in the same room, streamed into one frame.</p>
       </aside>
       <aside class="map-note" data-note="mesh" data-slot="bl">
-        <p class="map-note-kicker">Reconstruction</p>
         <p class="map-note-title">Shared mesh</p>
         <p class="map-note-body">Both phones fuse into one map, built in real time as the crew moves through the space.</p>
       </aside>
       <aside class="map-note" data-note="floors" data-slot="br">
-        <p class="map-note-kicker">Levels</p>
         <p class="map-note-title">Traverse floors</p>
         <p class="map-note-body">The mesh spans stories, so a scenario upstairs stays in the same view.</p>
       </aside>
       <aside class="map-note" data-note="scan" data-slot="ml">
-        <p class="map-note-kicker">Pipeline</p>
         <p class="map-note-title">LiDAR construction</p>
         <p class="map-note-body">iPhone LiDAR and RGB keyframes feed RTAB-Map. Confidence-filtered depth is meshed, then Poisson-fused into one textured model.</p>
       </aside>

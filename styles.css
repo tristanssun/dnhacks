@@ -621,17 +621,8 @@ body.is-map-full .map-note.is-off {
   opacity: 0;
 }
 
-.map-note-kicker {
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
-  font-size: 0.68rem;
-  font-weight: 500;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: #5c5a56;
-}
-
 .map-note-title {
-  margin-top: 0.2rem;
+  margin-top: 0;
   font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
   font-size: 1.2rem;
   font-weight: 700;
