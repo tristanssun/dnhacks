@@ -1,4 +1,4 @@
-import { initMap } from "./map.js?v=19";
+import { initMap } from "./map.js?v=20";
 import { initParticleText } from "./particles.js?v=5";
 
 history.scrollRestoration = "manual";
@@ -27,6 +27,31 @@ const cmcs = document.querySelector(".cmcs");
 const laptopScreen = document.querySelector(".laptop-screen");
 const map = initMap();
 const sessionStart = Date.now();
+
+function revealSite() {
+  document.documentElement.classList.remove("is-booting");
+}
+
+function whenLoaded(el) {
+  if (!el) {
+    return Promise.resolve();
+  }
+  if (el.complete && el.naturalWidth) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    el.addEventListener("load", resolve, { once: true });
+    el.addEventListener("error", resolve, { once: true });
+  });
+}
+
+const bootWait = [
+  map?.ready ?? Promise.resolve(),
+  document.fonts ? document.fonts.ready : Promise.resolve(),
+  ...[...document.images].map(whenLoaded),
+];
+Promise.all(bootWait).then(() => requestAnimationFrame(revealSite));
+window.setTimeout(revealSite, 12000);
 
 function pad2(n) {
   return n < 10 ? `0${n}` : String(n);
