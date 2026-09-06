@@ -1,14 +1,22 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="is-booting">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>MiniMap</title>
+    <style>
+      html.is-booting body {
+        background: #f4f1ea;
+      }
+      html.is-booting body > * {
+        visibility: hidden !important;
+      }
+    </style>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="vendor/lenis.css" />
-    <link rel="stylesheet" href="styles.css?v=80" />
+    <link rel="stylesheet" href="styles.css?v=81" />
     <link rel="stylesheet" href="cmcs.css?v=5" />
     <script type="importmap">
       {
@@ -97,12 +105,14 @@
         </div>
 
         <div class="relay-copy relay-copy-end">
-          <h2>Phone-only</h2>
+          <h2>UWB + VIO</h2>
+          <p>Ultra-wideband and visual-inertial odometry.</p>
           <ul class="relay-stats">
-            <li><b>8 cm</b> at 5 m</li>
-            <li><b>15 cm</b> relayed</li>
-            <li><b>2.8°</b> heading</li>
-            <li>Through walls</li>
+            <li>Through walls and obstacles</li>
+            <li><b>8 cm</b> std at 5 m</li>
+            <li>Under <b>1 KB/s</b> encrypted</li>
+            <li>Cross-device clock sync</li>
+            <li>Intelligent relay on a weak link</li>
           </ul>
         </div>
       </section>
@@ -502,6 +512,6 @@
     </a>
 
     <script src="vendor/lenis.min.js"></script>
-    <script type="module" src="main.js?v=58"></script>
+    <script type="module" src="main.js?v=59"></script>
   </body>
 </html>

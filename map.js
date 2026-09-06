@@ -243,6 +243,10 @@ export function initMap() {
 
   let scanRadius = 8;
   let scanMesh = null;
+  let readyResolve = () => {};
+  const ready = new Promise((resolve) => {
+    readyResolve = resolve;
+  });
   const noteTargets = {
     unit1: new THREE.Vector3(),
     unit2: new THREE.Vector3(),
@@ -346,6 +350,7 @@ export function initMap() {
     noteTargets.scan.copy(pickScanPoint(geom));
     resize();
     requestAnimationFrame(fit);
+    readyResolve();
   }
 
   new PLYLoader().load("assets/map.ply?v=15", (geom) => {
@@ -366,7 +371,7 @@ export function initMap() {
       undefined,
       () => attachScan(geom, null),
     );
-  });
+  }, undefined, () => readyResolve());
 
   function resize() {
     const w = Math.max(1, wrap.clientWidth);
@@ -581,5 +586,5 @@ export function initMap() {
     controls.autoRotate = false;
   });
 
-  return { resize, fit, setEnter };
+  return { resize, fit, setEnter, ready };
 }

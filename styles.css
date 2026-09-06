@@ -252,6 +252,8 @@ h1 {
 }
 
 .relay-copy-end {
+  flex-basis: 18rem;
+  max-width: 18rem;
   text-align: left;
 }
 
