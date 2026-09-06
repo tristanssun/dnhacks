@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1800 1200" font-family="Helvetica Neue, Helvetica, Arial, sans-serif">
+  <!-- Editable stat panel: Live 3D mapping, measured results.
+       Each card is a group; move or restyle freely. Colors:
+       navy #10375C, teal #2F9E9E, ink #161514, gray #8A867E, bg #F4F1EA -->
+
+  <rect id="background" width="1800" height="1200" fill="#F4F1EA"/>
+
+  <g id="header">
+    <text x="60" y="96" font-size="26" font-weight="700" letter-spacing="4" fill="#2F9E9E">MINIMAP &#183; COLLABORATIVE LIVE 3D MAPPING &#8212; MEASURED, NOT SIMULATED</text>
+    <text x="60" y="176" font-size="64" font-weight="700" fill="#161514">Ten rooms. Two phones. One live map.</text>
+    <text x="60" y="222" font-size="30" fill="#5A5751">Every number below comes from overnight live runs in real buildings.</text>
+  </g>
+
+  <g id="card-latency">
+    <rect x="60" y="260" width="533" height="380" rx="16" fill="#FFFFFF" stroke="#161514" stroke-width="2"/>
+    <rect x="100" y="308" width="64" height="6" fill="#2F9E9E"/>
+    <text x="100" y="455" font-size="120" font-weight="700" fill="#10375C">2 s</text>
+    <text x="100" y="512" font-size="34" font-weight="600" fill="#161514">from a phone&#8217;s scan to</text>
+    <text x="100" y="552" font-size="34" font-weight="600" fill="#161514">the command screen</text>
+    <text x="100" y="596" font-size="24" fill="#8A867E">median across 457 live uploads</text>
+  </g>
+
+  <g id="card-redraw">
+    <rect x="633" y="260" width="533" height="380" rx="16" fill="#FFFFFF" stroke="#161514" stroke-width="2"/>
+    <rect x="673" y="308" width="64" height="6" fill="#2F9E9E"/>
+    <text x="673" y="455" font-size="120" font-weight="700" fill="#10375C">40 ms</text>
+    <text x="673" y="512" font-size="34" font-weight="600" fill="#161514">to redraw the live</text>
+    <text x="673" y="552" font-size="34" font-weight="600" fill="#161514">3D model</text>
+    <text x="673" y="596" font-size="24" fill="#8A867E">even past 150,000 triangles</text>
+  </g>
+
+  <g id="card-texture">
+    <rect x="1206" y="260" width="533" height="380" rx="16" fill="#FFFFFF" stroke="#161514" stroke-width="2"/>
+    <rect x="1246" y="308" width="64" height="6" fill="#2F9E9E"/>
+    <text x="1246" y="455" font-size="120" font-weight="700" fill="#10375C">84%</text>
+    <text x="1246" y="512" font-size="34" font-weight="600" fill="#161514">of the model wears real</text>
+    <text x="1246" y="552" font-size="34" font-weight="600" fill="#161514">camera imagery</text>
+    <text x="1246" y="596" font-size="24" fill="#8A867E">photo-texture baked in 28 s</text>
+  </g>
+
+  <g id="card-merge">
+    <rect x="60" y="680" width="820" height="380" rx="16" fill="#FFFFFF" stroke="#161514" stroke-width="2"/>
+    <rect x="100" y="728" width="64" height="6" fill="#2F9E9E"/>
+    <text x="100" y="890" font-size="150" font-weight="700" fill="#10375C">29 <tspan fill="#2F9E9E">&#8594;</tspan> 93</text>
+    <text x="100" y="948" font-size="36" font-weight="600" fill="#161514">drift corrections, the instant two</text>
+    <text x="100" y="990" font-size="36" font-weight="600" fill="#161514">phones&#8217; paths overlapped</text>
+    <text x="100" y="1032" font-size="24" fill="#8A867E">two scans fused into one 360-keyframe map</text>
+  </g>
+
+  <g id="card-taglock">
+    <rect x="920" y="680" width="820" height="380" rx="16" fill="#FFFFFF" stroke="#161514" stroke-width="2"/>
+    <rect x="960" y="728" width="64" height="6" fill="#2F9E9E"/>
+    <text x="960" y="890" font-size="150" font-weight="700" fill="#10375C">0</text>
+    <text x="960" y="948" font-size="36" font-weight="600" fill="#161514">failed alignments &#8212; joining the map</text>
+    <text x="960" y="990" font-size="36" font-weight="600" fill="#161514">takes one glance at a paper tag</text>
+    <text x="960" y="1032" font-size="24" fill="#8A867E">14 of 14 tag locks succeeded across the night</text>
+  </g>
+
+  <text id="footer" x="60" y="1148" font-size="22" fill="#8A867E">Source: rtabmap-collab-server logs and global.db, Sep 5&#8211;6 &#183; full data in collab-run-proof.md</text>
+</svg>
