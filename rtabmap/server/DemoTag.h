@@ -115,7 +115,19 @@ body{display:flex;flex-direction:column;min-height:100%;background:var(--page);}
 #clock{font-family:var(--mono);font-size:13px;font-weight:400;color:var(--text-1);}
 #shell{flex:1 1 auto;min-height:0;display:grid;grid-template-columns:300px minmax(0,1fr);gap:0;}
 #side{grid-column:1;grid-row:1;min-height:0;display:flex;flex-direction:column;background:var(--panel);border-right:1px solid var(--border);overflow:hidden;}
-#side-map{flex:0 0 auto;padding:10px 10px 0;position:relative;}
+#side-map{flex:0 0 auto;padding:10px 10px 0;position:relative;z-index:4;}
+.place-search{position:relative;margin:0 0 8px;}
+#place-search{width:100%;height:28px;border:1px solid var(--border);background:var(--card);
+  color:var(--text-1);font-family:var(--sans);font-size:12px;padding:0 8px;}
+#place-search:focus{outline:none;border-color:var(--text-1);}
+#place-search-hits{position:absolute;left:0;right:0;top:100%;z-index:6;
+  background:var(--panel);border:1px solid var(--border);max-height:180px;overflow:auto;}
+#place-search-hits[hidden]{display:none;}
+.place-hit{display:block;width:100%;text-align:left;padding:7px 8px;border:0;background:transparent;
+  color:var(--text-1);font:inherit;font-size:12px;cursor:pointer;}
+.place-hit:hover{background:var(--card);}
+.place-hit em{display:block;margin-top:2px;font-style:normal;color:var(--text-2);font-size:11px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .tree-search{position:relative;margin:4px 10px 8px calc(8px + var(--d,1)*14px);}
 #scan-search{width:100%;height:28px;border:1px solid var(--border);background:var(--card);
   color:var(--text-1);font-family:var(--sans);font-size:12px;padding:0 8px;}
@@ -291,6 +303,10 @@ body{display:flex;flex-direction:column;min-height:100%;background:var(--page);}
 <div id="shell">
   <aside id="side">
     <div id="side-map">
+      <div class="place-search">
+        <input id="place-search" type="search" placeholder="Search places" autocomplete="off" spellcheck="false">
+        <div id="place-search-hits" hidden></div>
+      </div>
       <div class="scan-map-wrap">
         <div id="scan-map" aria-label="Scanned sites"></div>
         <div id="scan-map-empty" class="scan-map-empty">Locating sites</div>
@@ -1161,7 +1177,7 @@ function initScanMap() {
   setTimeout(function() { if (scanMap) scanMap.invalidateSize(); }, 80);
   ensureOperatorGeo();
   refreshScanMap();
-  bindScanSearch();
+  bindPlaceSearch();
 }
 function refreshScanMap() {
   if (!scanMap || !scanLayer) return;
@@ -1209,6 +1225,131 @@ function refreshScanMap() {
     scanMap.invalidateSize();
   });
   if (sites.some(function(s) { return !hasGeo(s.lat, s.lng); })) ensureOperatorGeo();
+}
+let placeTimer = 0;
+let placeHits = [];
+function haversineM(aLat, aLng, bLat, bLng) {
+  const toR = Math.PI / 180;
+  const dLat = (bLat - aLat) * toR;
+  const dLng = (bLng - aLng) * toR;
+  const s = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(aLat * toR) * Math.cos(bLat * toR) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  return 12742000 * Math.asin(Math.min(1, Math.sqrt(s)));
+}
+function nearestSite(lat, lng, maxM) {
+  let best = null, bestD = maxM;
+  collectSites().forEach(function(s) {
+    if (!hasGeo(s.lat, s.lng)) return;
+    const d = haversineM(lat, lng, s.lat, s.lng);
+    if (d < bestD) { bestD = d; best = s; }
+  });
+  return best;
+}
+function shortPlace(name) {
+  const parts = String(name || '').split(',').map(function(s) { return s.trim(); }).filter(Boolean);
+  return parts.slice(0, 3).join(', ') || name;
+}
+function searchNominatim(q) {
+  const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=5&q=' + encodeURIComponent(q);
+  return fetch(url, {headers: {'Accept': 'application/json'}}).then(function(r) { return r.json(); }).then(function(rows) {
+    return (rows || []).map(function(row) {
+      return {
+        kind: 'place',
+        label: shortPlace(row.display_name),
+        detail: row.display_name,
+        lat: Number(row.lat),
+        lng: Number(row.lon)
+      };
+    }).filter(function(hit) { return hasGeo(hit.lat, hit.lng); });
+  }).catch(function() { return []; });
+}
+function localPlaceHits(q) {
+  const qn = q.toLowerCase();
+  return collectSites().filter(function(s) {
+    if ((s.label || '').toLowerCase().indexOf(qn) >= 0) return true;
+    return s.items.some(function(it) {
+      return String(it.address || it.title || '').toLowerCase().indexOf(qn) >= 0;
+    });
+  }).map(function(s) {
+    return {kind: 'site', label: s.label, detail: 'Scanned', site: s, lat: s.lat, lng: s.lng};
+  });
+}
+function renderPlaceHits(hits) {
+  const box = document.getElementById('place-search-hits');
+  if (!box) return;
+  placeHits = hits;
+  if (!hits.length) {
+    box.hidden = true;
+    box.innerHTML = '';
+    return;
+  }
+  box.innerHTML = hits.map(function(hit, i) {
+    return '<button type="button" class="place-hit" data-i="' + i + '">' +
+      esc(hit.label) + '<em>' + esc(hit.detail || '') + '</em></button>';
+  }).join('');
+  box.hidden = false;
+}
+function applyPlaceHit(hit) {
+  if (!hit) return;
+  if (hasGeo(hit.lat, hit.lng) && scanMap) scanMap.setView([hit.lat, hit.lng], 17);
+  if (hit.kind === 'site' && hit.site) {
+    openLatestSite(hit.site);
+    return;
+  }
+  const near = hasGeo(hit.lat, hit.lng) ? nearestSite(hit.lat, hit.lng, 250) : null;
+  if (near) openLatestSite(near);
+}
+function runPlaceSearch(q) {
+  const query = String(q || '').trim();
+  const local = query ? localPlaceHits(query) : [];
+  if (!query) {
+    renderPlaceHits([]);
+    return;
+  }
+  renderPlaceHits(local);
+  searchNominatim(query).then(function(places) {
+    const input = document.getElementById('place-search');
+    if (!input || input.value.trim() !== query) return;
+    const seen = {};
+    local.forEach(function(h) { if (h.label) seen[h.label.toLowerCase()] = true; });
+    const extra = places.filter(function(p) { return !seen[String(p.label || '').toLowerCase()]; });
+    renderPlaceHits(local.concat(extra));
+  });
+}
+function bindPlaceSearch() {
+  const input = document.getElementById('place-search');
+  const box = document.getElementById('place-search-hits');
+  if (!input || !box || input.getAttribute('data-bound')) return;
+  input.setAttribute('data-bound', '1');
+  input.addEventListener('input', function() {
+    clearTimeout(placeTimer);
+    const q = input.value.trim();
+    if (!q) { renderPlaceHits([]); return; }
+    placeTimer = setTimeout(function() { runPlaceSearch(q); }, 320);
+  });
+  input.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+      renderPlaceHits([]);
+      input.blur();
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (placeHits[0]) {
+        renderPlaceHits([]);
+        applyPlaceHit(placeHits[0]);
+      }
+    }
+  });
+  box.addEventListener('click', function(e) {
+    const row = e.target.closest('.place-hit');
+    if (!row) return;
+    const hit = placeHits[Number(row.getAttribute('data-i'))];
+    renderPlaceHits([]);
+    applyPlaceHit(hit);
+  });
+  document.addEventListener('click', function(e) {
+    if (!e.target.closest('.place-search')) renderPlaceHits([]);
+  });
 }
 let searchTimer = 0;
 function historySearch(q) {
