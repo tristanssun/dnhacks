@@ -31,6 +31,66 @@ final class LocAREngine {
         var thetaConfidence: Float
     }
 
+    /// Weighted histogram of horizontal bearings, used to report the cloud's
+    /// dominant mode instead of its mean.
+    ///
+    /// The mean resultant length this replaced measures how tightly the cloud
+    /// agrees with *itself*, which is a different question from whether it is
+    /// right, and it cannot see multimodality at all. Three devices make that
+    /// concrete: with a bearing to one peer and range only to another, the
+    /// second peer has two solutions mirrored across the line joining the first
+    /// two, and range can never break the tie — a lateral move changes range by
+    /// d²/2r. The cloud correctly settles on both, and the weighted mean then
+    /// lands between them, at a spot the peer is not, reported confidently
+    /// because each lobe is individually tight.
+    private struct BearingHistogram {
+        static let binCount = 36
+        /// Bins within this many of the peak count as the same mode: ±2 bins is
+        /// ±20°, comfortably wider than a converged cloud (`sigmaBearing` is
+        /// about 7°) and narrower than any ambiguity worth hiding an arrow for.
+        static let modeHalfWidth = 2
+
+        var weights = [Float](repeating: 0, count: binCount)
+        var vectors = [SIMD2<Float>](repeating: .zero, count: binCount)
+
+        /// `unit` is a world-frame horizontal (x, z) unit vector. Binning in the
+        /// world frame rather than the body frame keeps the bins still while the
+        /// phone turns.
+        mutating func add(_ unit: SIMD2<Float>, weight: Float) {
+            let angle = atan2(unit.x, unit.y)
+            let bin = Int((angle + .pi) / (2 * .pi) * Float(Self.binCount))
+            let index = min(max(bin, 0), Self.binCount - 1)
+            weights[index] += weight
+            vectors[index] += unit * weight
+        }
+
+        /// Direction of the heaviest mode, and the share of the cloud's total
+        /// weight lying inside it. Two equal lobes report about 0.5 and so fail
+        /// the caller's gate, which is the point.
+        func dominant(total: Float) -> (direction: SIMD2<Float>, confidence: Float)? {
+            guard total > 0 else { return nil }
+            var bestBin = 0
+            var bestWeight: Float = -1
+            for bin in 0..<Self.binCount {
+                var sum: Float = 0
+                for offset in -Self.modeHalfWidth...Self.modeHalfWidth {
+                    sum += weights[(bin + offset + Self.binCount) % Self.binCount]
+                }
+                if sum > bestWeight {
+                    bestWeight = sum
+                    bestBin = bin
+                }
+            }
+            var direction = SIMD2<Float>.zero
+            for offset in -Self.modeHalfWidth...Self.modeHalfWidth {
+                direction += vectors[(bestBin + offset + Self.binCount) % Self.binCount]
+            }
+            let length = simd_length(direction)
+            guard length > 1e-6 else { return nil }
+            return (direction / length, min(max(bestWeight / total, 0), 1))
+        }
+    }
+
     private struct Hypothesis {
         var x: Float
         var y: Float
@@ -676,7 +736,7 @@ final class LocAREngine {
                 var count = Int32(thetaValues.count)
                 vvsincosf(sine.baseAddress!, cosine.baseAddress!, thetaValues.baseAddress!, &count)
                 var rangeSum: Float = 0
-                var bearing = SIMD2<Float>.zero
+                var histogram = BearingHistogram()
                 var world = SIMD3<Float>.zero
                 var total: Float = 0
                 var sinSum: Float = 0
@@ -691,7 +751,7 @@ final class LocAREngine {
                         rangeSum += simd_length(relative) * weight
                         let planar = hypot(relative.x, relative.z)
                         if planar > 0.02 {
-                            bearing += SIMD2<Float>(relative.x, relative.z) / planar * weight
+                            histogram.add(SIMD2<Float>(relative.x, relative.z) / planar, weight: weight)
                         }
                         world += point * weight
                         total += weight
@@ -700,13 +760,18 @@ final class LocAREngine {
                     }
                 }
                 guard total > 0 else { return nil }
-                bearing /= total
-                let confidence = simd_length(bearing)
-                let (right, forward) = bodyAxes(SIMD3<Float>(bearing.x, 0, bearing.y))
-                let planar = hypot(right, forward)
-                let direction = planar > 1e-4
-                    ? simd_float3(right / planar, forward / planar, 0)
-                    : simd_float3(0, 1, 0)
+                // The mode rather than the mean, and the weight behind it rather
+                // than how tightly the cloud agrees with itself.
+                let mode = histogram.dominant(total: total)
+                let confidence = mode?.confidence ?? 0
+                var direction = simd_float3(0, 1, 0)
+                if let mode {
+                    let (right, forward) = bodyAxes(SIMD3<Float>(mode.direction.x, 0, mode.direction.y))
+                    let planar = hypot(right, forward)
+                    if planar > 1e-4 {
+                        direction = simd_float3(right / planar, forward / planar, 0)
+                    }
+                }
                 let theta = atan2(sinSum, cosSum)
                 // Mean resultant length of the θ distribution. Free here, since the
                 // sums are already computed, and it is the only window onto the state
@@ -734,7 +799,7 @@ final class LocAREngine {
     func relativeVector(for peerID: MCPeerID) -> (vector: SIMD3<Float>, confidence: Float)? {
         guard hasLocal, let slot = slots[peerID], let cloud = clouds[slot] else { return nil }
         var relativeMean = SIMD3<Float>.zero
-        var bearingMean = SIMD2<Float>.zero
+        var histogram = BearingHistogram()
         var total: Float = 0
         for i in hypotheses.indices {
             let hypothesis = hypotheses[i]
@@ -746,15 +811,17 @@ final class LocAREngine {
                 relativeMean += relative * weight
                 let planar = hypot(relative.x, relative.z)
                 if planar.isFinite, planar > 0.02 {
-                    bearingMean += SIMD2<Float>(relative.x, relative.z) / planar * weight
+                    histogram.add(SIMD2<Float>(relative.x, relative.z) / planar, weight: weight)
                 }
                 total += weight
             }
         }
         guard total.isFinite, total > 0 else { return nil }
         relativeMean /= total
-        bearingMean /= total
-        let confidence = simd_length(bearingMean)
+        // Same mode-based measure as `estimate`. It gates `broadcastRelativeEstimates`,
+        // so an unresolved two-lobed cloud now stays off the wire instead of being
+        // shared at high confidence and reseeding someone else's cloud onto it.
+        let confidence = histogram.dominant(total: total)?.confidence ?? 0
         guard relativeMean.x.isFinite, relativeMean.y.isFinite, relativeMean.z.isFinite,
               confidence.isFinite else { return nil }
         return (relativeMean, min(max(confidence, 0), 1))

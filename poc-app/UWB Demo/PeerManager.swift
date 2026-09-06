@@ -122,6 +122,17 @@ final class PeerManager: NSObject, ObservableObject {
     /// θ agreement required before a VIO-propagated bearing is shown at all.
     /// Below this the raw Nearby Interaction bearing, or nothing, is honest.
     private let thetaTrustThreshold: Float = 0.5
+    /// How recently theta must have been measured before a VIO-propagated
+    /// bearing is trusted on screen.
+    ///
+    /// Cloud agreement cannot tell a converged theta from a confidently wrong
+    /// one: when theta is wrong every particle moves the same wrong way, so the
+    /// cloud stays tight and `thetaConfidence` stays near 1. On the harness it
+    /// read 1.00 in 100% of samples while theta was 49 deg out, which is why
+    /// neither existing gate ever fired. Time since a real measurement is the
+    /// one signal that does separate them, because an unchecked theta has been
+    /// drifting the whole time.
+    private let thetaMeasurementWindow: TimeInterval = 90
     /// Most recent estimate per peer. `publishLocAR` computes these; everything
     /// else reuses them rather than walking the particle clouds again.
     private var lastEstimate: [MCPeerID: LocAREngine.Estimate] = [:]
@@ -150,6 +161,8 @@ final class PeerManager: NSObject, ObservableObject {
     /// filter. See `shouldIngest`. 10 Hz matches the paper's UWB rate (§5.2).
     private var lastRangeIngest: [MCPeerID: Date] = [:]
     private var lastBearingIngest: [MCPeerID: Date] = [:]
+    /// Doubles as when theta was last genuinely *measured*, since it is written
+    /// only on a bearing exchange that reached the filter. See `thetaAge`.
     private var lastThetaIngest: [MCPeerID: Date] = [:]
     private var lastBearingLog: [MCPeerID: Date] = [:]
     /// Last ingest per (anchor, target) pair. See `shouldIngestRelative`.
@@ -176,9 +189,18 @@ final class PeerManager: NSObject, ObservableObject {
     private var tokenAttempts: [MCPeerID: Int] = [:]
     /// Last NISession invalidation reason per peer, surfaced in `linkStatus`.
     private var niErrors: [MCPeerID: String] = [:]
-    /// Hold once converged: long enough for the filter to carry the bearing on
-    /// VIO until this peer's next turn.
-    private let cameraAssistanceMinHold: TimeInterval = 25
+    /// Hold once converged.
+    ///
+    /// The floor is not how long theta takes to learn — exchanges average as
+    /// sigma/sqrt(N), so ten of them at ~10 deg each reach ~3 deg in a couple of
+    /// seconds. It is how long camera assistance takes to *re*-converge after
+    /// `moveCameraAssistance` re-runs the configuration, because until it does
+    /// `horizontalAngle` is nil and nothing is harvested. Rotate faster than
+    /// that and every slot is spent reconverging, which is worse than never
+    /// rotating: measured on the filter, a 5 s period against a 5 s
+    /// reconvergence produced zero exchanges and 22 deg of theta error, against
+    /// 2.8 deg at 12 s.
+    private let cameraAssistanceMinHold: TimeInterval = 8
     /// Hold when convergence never arrives, so one bad peer can't starve the rest.
     private let cameraAssistanceMaxHold: TimeInterval = 45
 
@@ -658,6 +680,7 @@ final class PeerManager: NSObject, ObservableObject {
             guard now.timeIntervalSince(date) < freshWindow else { continue }
             if let last = dates[target], last >= date { continue }
             dates[target] = date
+            guard !hasBetterDirectFix(for: target, at: now) else { continue }
             guard shouldIngestRelative(anchor: sender, target: target, at: now) else { continue }
             locar.ingestRelativeEstimate(
                 target: target,
@@ -894,8 +917,13 @@ final class PeerManager: NSObject, ObservableObject {
             // component changes range by d²/2r, which at 6 m is centimetres, so
             // ranging cannot contradict θ and the error is invisible until the
             // devices come close enough for NI direction to fix it.
+            // A device that cannot do camera assistance at all can never run an
+            // exchange, so requiring one there would blank its map permanently.
+            // On that hardware cloud agreement is genuinely all there is.
+            let thetaMeasured = !useCameraAssistance
+                || thetaAge(of: id, at: now) < thetaMeasurementWindow
             if let estimate, estimate.bearingConfidence > 0.6,
-               estimate.thetaConfidence > thetaTrustThreshold {
+               estimate.thetaConfidence > thetaTrustThreshold, thetaMeasured {
                 peer.locarDirection = estimate.direction
             } else if let angle = freshBearing(for: id, at: now) {
                 peer.locarDirection = simd_float3(sin(angle), cos(angle), 0)
@@ -1424,6 +1452,28 @@ final class PeerManager: NSObject, ObservableObject {
         locar.ingestThetaAnchor(peerID: peerID, theta: compassTheta)
     }
 
+    /// True when our own measurements of this peer beat anything a third party
+    /// can tell us about it.
+    ///
+    /// A shared estimate arrives in the sender's frame and has to be rotated by
+    /// theta before it means anything here, so it carries the sender's theta
+    /// error on top of its own — and the sender is subject to the same single
+    /// camera-assistance claim we are, so its fix on this target is often the
+    /// weak one. It ships whenever its confidence clears 0.6 regardless.
+    /// Applying that over a peer we range and bear ourselves replaces a
+    /// first-hand measurement with a worse second-hand one, and when the two
+    /// disagree enough `ingestRelativeEstimate` reseeds 30% of the cloud onto
+    /// the relayed position.
+    ///
+    /// Relaying still does the job it exists for: a peer we cannot range
+    /// ourselves fails both tests here and is placed entirely through its anchor.
+    private func hasBetterDirectFix(for peerID: MCPeerID, at now: Date) -> Bool {
+        guard let sample = localRange[peerID], now.timeIntervalSince(sample.date) < freshWindow else {
+            return false
+        }
+        return freshBearing(for: peerID, at: now) != nil
+    }
+
     /// Whether some peer has recently told us where this one is. Read across
     /// every anchor, since any device that can range the target may be the one
     /// relaying it. The window is generous relative to the 2 Hz broadcast so a
@@ -1602,26 +1652,57 @@ final class PeerManager: NSObject, ObservableObject {
     /// than continuously.
     private func rotateCameraAssistanceIfDue() {
         guard useCameraAssistance, let current = cameraAssistedPeer else { return }
-        let candidates = niSessions.keys.sorted { $0.displayName < $1.displayName }
-        guard candidates.count > 1, let index = candidates.firstIndex(of: current) else { return }
-
         let now = Date()
         let held = now.timeIntervalSince(cameraAssistanceGrantedAt)
         // A nil hint means NIAlgorithmConvergence reported `.converged`.
         let converged = peers[current]?.hint == nil
         let due = held >= (converged ? cameraAssistanceMinHold : cameraAssistanceMaxHold)
         guard due else { return }
-
-        let next = candidates[(index + 1) % candidates.count]
-        // Rotating re-runs both configurations, and re-running a configuration
-        // restarts that peer's ranging. On a clock that manufactures a dropout
-        // every cycle — the tilde flicker was partly self-inflicted. Rotate into
-        // a gap instead: only hand the camera to a peer that has no live range
-        // and therefore actually needs the help, and never interrupt one that is
-        // already ranging cleanly.
-        guard tracks[next]?.isLive(at: now) != true else { return }
-
+        guard let next = nextCameraAssistanceCandidate(excluding: current, at: now) else { return }
+        mcLog("cam-rotate", next, String(format: "from %@ after %.0fs", current.displayName, held))
         moveCameraAssistance(to: next, from: current)
+    }
+
+    /// The peer that has gone longest without a real theta measurement.
+    ///
+    /// This used to be round-robin behind a hard veto: hand the claim on only to
+    /// a peer with no live range, on the reasoning that re-running a
+    /// configuration interrupts ranging and so should happen in a gap that
+    /// already exists. The effect with three devices was the opposite of the
+    /// intent. Once every link is healthy no peer ever qualifies, so the veto
+    /// fires every time and the claim never moves again. One peer per device
+    /// keeps `horizontalAngle` forever and every other peer loses its only
+    /// source of theta, because `handleBearingExchange` needs a bearing of our
+    /// own to pair with theirs. Two devices never showed it: one link, and the
+    /// single claim covers it.
+    ///
+    /// So the veto is now a preference — a peer with no live range still goes
+    /// first, since it has nothing else — and staleness breaks the rest.
+    /// Ordering by staleness also tends to pair the two ends of a link without
+    /// any protocol for it: an exchange needs both phones bearing each other
+    /// inside `maxLag`, and the pair that has gone longest without one is the
+    /// pair that will both pick each other next.
+    private func nextCameraAssistanceCandidate(excluding current: MCPeerID, at now: Date) -> MCPeerID? {
+        let candidates = niSessions.keys.filter { $0 != current }
+        guard !candidates.isEmpty else { return nil }
+        return candidates.min { a, b in
+            let aDark = tracks[a]?.isLive(at: now) != true
+            let bDark = tracks[b]?.isLive(at: now) != true
+            if aDark != bDark { return aDark }
+            let aAge = thetaAge(of: a, at: now)
+            let bAge = thetaAge(of: b, at: now)
+            // Deterministic tiebreak, so two peers that have never been measured
+            // cannot oscillate the claim between them.
+            if aAge != bAge { return aAge > bAge }
+            return a.displayName < b.displayName
+        }
+    }
+
+    /// Seconds since a bearing exchange last actually measured this peer's
+    /// theta. `lastThetaIngest` is written only when one succeeds.
+    private func thetaAge(of peerID: MCPeerID, at now: Date) -> TimeInterval {
+        guard let last = lastThetaIngest[peerID] else { return .greatestFiniteMagnitude }
+        return now.timeIntervalSince(last)
     }
 
     /// Re-running a configuration briefly interrupts that peer's ranging, which
