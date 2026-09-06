@@ -86,13 +86,23 @@ function pageTop(el, scroll = window.scrollY || 0) {
   return el.getBoundingClientRect().top + scroll;
 }
 
-function zoomProgress(scroll) {
+const MAP_FULL_RAW = 0.9;
+
+function zoomRange(scroll) {
   if (!intoMap || !zoomStartEl) {
-    return 0;
+    return null;
   }
   const start = pageTop(zoomStartEl, scroll);
-  const end = start + intoMap.offsetHeight * 0.88;
-  return clamp01((scroll - start) / Math.max(end - start, 1));
+  const span = intoMap.offsetHeight * 0.88;
+  return { start, span, enterY: start + span * MAP_FULL_RAW };
+}
+
+function zoomProgress(scroll) {
+  const range = zoomRange(scroll);
+  if (!range) {
+    return 0;
+  }
+  return clamp01((scroll - range.start) / Math.max(range.span, 1));
 }
 
 let mapArriveAt = 0;
@@ -100,12 +110,11 @@ let mapHoldY = null;
 let mapLeaving = false;
 
 function holdMapBriefly(scroll) {
-  if (!intoMap || !zoomStartEl) {
+  const range = zoomRange(scroll);
+  if (!range) {
     return scroll;
   }
   const raw = zoomProgress(scroll);
-  const start = pageTop(zoomStartEl, scroll);
-  const fullY = start + intoMap.offsetHeight * 0.88 * 0.995;
   if (raw < 0.85) {
     mapArriveAt = 0;
     mapHoldY = null;
@@ -115,10 +124,10 @@ function holdMapBriefly(scroll) {
   if (mapLeaving) {
     return scroll;
   }
-  if (mapHoldY == null && (raw >= 0.995 || scroll >= fullY)) {
-    mapHoldY = Math.min(scroll, fullY);
+  if (mapHoldY == null && scroll >= range.enterY) {
+    mapHoldY = range.enterY;
     mapArriveAt = performance.now();
-    if (scroll > fullY) {
+    if (scroll > range.enterY + 1) {
       lenis.scrollTo(mapHoldY, { immediate: true });
       return mapHoldY;
     }
@@ -294,7 +303,7 @@ function syncZoom(scroll) {
   const t = raw * raw * (3 - 2 * raw);
   document.documentElement.style.setProperty("--zoom", String(t));
   const leftMap = !!zoomStartEl && !!intoMap && scroll >= pageTop(zoomStartEl, scroll) + intoMap.offsetHeight - 8;
-  const mapFull = raw >= 0.995 && !leftMap;
+  const mapFull = raw >= MAP_FULL_RAW && !leftMap && !mapLeaving;
   document.body.classList.toggle("is-zooming", raw > 0.001);
   document.body.classList.toggle("is-map-full", mapFull);
   document.getElementById("map-notes")?.setAttribute("aria-hidden", mapFull ? "false" : "true");
